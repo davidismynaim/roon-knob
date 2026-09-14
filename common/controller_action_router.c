@@ -11,6 +11,13 @@
 #define ZONE_ID_BACK "__back__"
 #define ZONE_ID_SETTINGS "__settings__"
 
+static controller_volume_override_fn_t s_volume_override;
+
+void controller_action_router_set_volume_override(
+    controller_volume_override_fn_t fn) {
+    s_volume_override = fn;
+}
+
 static const char *const s_back_name = "Back";
 static const char *const s_back_id = ZONE_ID_BACK;
 static const char *const s_settings_name = "Settings";
@@ -171,6 +178,11 @@ bool controller_action_router_handle(const controller_action_t *action) {
                  CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS &&
              action->value.command.volume_steps != 0)) {
             return false;
+        }
+        if (action->value.command.kind ==
+                CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS &&
+            s_volume_override) {
+            return s_volume_override(action->value.command.volume_steps);
         }
         return bridge_client_execute_command(&action->value.command);
 

@@ -11,7 +11,9 @@
 #include "platform/platform_time.h"
 #include "platform_display_idf.h"
 #include "bridge_client.h"
+#include "controller_action_router.h"
 #include "controller_config.h"
+#include "ha_volume_client.h"
 #include "ui.h"
 #include "ui_network.h"
 #include "wifi_manager.h"
@@ -455,6 +457,12 @@ void app_main(void) {
     ESP_LOGI(TAG, "Starting app...");
     app_entry();
     log_memory("after bridge worker start");
+
+    // Direct-to-Home-Assistant volume backend (Dial-only; see
+    // docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md). No-ops if
+    // host/token aren't configured yet via the device's config page.
+    controller_action_router_set_volume_override(ha_volume_client_adjust);
+    ha_volume_client_init();
     show_config_durability_diagnostic();
 
     // Start WiFi AFTER UI task is running (WiFi event callbacks use lv_async_call)

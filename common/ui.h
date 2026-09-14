@@ -10,6 +10,7 @@ extern "C" {
 void ui_init(void);
 void ui_loop_iter(void);
 void ui_update(const char *line1, const char *line2, bool playing, float volume, float volume_min, float volume_max, float volume_step, int seek_position, int length);
+void ui_set_volume_with_range(float vol, float vol_min, float vol_max, float vol_step);  // Update volume ring/label without touching track/progress
 void ui_set_status(bool online);
 void ui_set_message(const char *msg);
 void ui_set_zone_name(const char *zone_name);

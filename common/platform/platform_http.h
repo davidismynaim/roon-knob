@@ -11,6 +11,11 @@ int platform_http_get_bounded(const char *url, size_t max_bytes,
                               char **out, size_t *out_len);
 int platform_http_get_image(const char *url, char **out, size_t *out_len);
 int platform_http_post_json(const char *url, const char *json, char **out, size_t *out_len);
+/* Bearer-auth variants (e.g. Home Assistant's long-lived access tokens). */
+int platform_http_get_auth(const char *url, const char *bearer_token,
+                           char **out, size_t *out_len);
+int platform_http_post_auth(const char *url, const char *bearer_token,
+                            const char *json, char **out, size_t *out_len);
 void platform_http_free(char *p);
 
 /**
