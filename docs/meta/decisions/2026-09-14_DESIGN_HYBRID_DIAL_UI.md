@@ -51,23 +51,56 @@ here so the deviation is explicit and owned, not accidental drift.
 
 ## Volume control backend
 
+**Corrected 2026-09-14 (later same day) after the owner shared the full HA
+wiki.** The original version of this section (below, in the implementation
+notes) assumed `script.nexus_volume_up`/`nexus_volume_down` send Nexus IR
+directly and that the dial should call one of them once per volume step.
+That's wrong: per the wiki (§44.9, §45–§47), those two scripts are
+**logical-only** — they just increment/decrement the currently-selected
+input's `input_number.*` helper by one 0.5 dB position and do not touch
+Nexus at all. A separate automation, `Audio - Volume Helper Changed`,
+watches those helpers and is the **only** thing that ever sends Nexus IR:
+it diffs old vs. new helper value and sends exactly that many
+`DirectionUp`/`DirectionDown` pulses in **one** `remote.send_command` call
+using Harmony's native `num_repeats` — the same batching mechanism already
+proven for Harmony's own held-button case, not something to reimplement.
+
+Looping `nexus_volume_up` N times per rotation dispatch (the earlier plan)
+would have produced N separate helper writes and therefore N separate IR
+transactions — exactly the "many rapid calls" problem flagged in this
+section's original rate-limiting note, self-inflicted rather than
+avoided.
+
 - **Read** (for display): `GET http://<ha-host>:8123/api/states/number.hifi_volume`,
   `Authorization: Bearer <long-lived access token>`. Convert from
   `number.hifi_volume`'s native dB scale (-127.5 to 0) to the 0-255
   position scale for display: `position = round((db_value + 127.5) * 2)`.
-- **Write** (for control): `POST http://<ha-host>:8123/api/services/script/nexus_volume_up`
-  (and `nexus_volume_down`), same auth. Each call moves the
-  currently-selected input's volume by one 0.5 dB step — the dial's own
-  encoder/acceleration logic decides how many calls to fire per unit of
-  rotation.
+  Unchanged from the original plan — `number.hifi_volume` already tracks
+  whichever input (Music/TV/Vinyl) is currently selected.
+- **Write** (for control): **one** `POST http://<ha-host>:8123/api/services/script/audio_voice_volume`
+  per rotation dispatch, body `{"action": "increase"|"decrease", "unit":
+  "clicks", "amount": <magnitude>}` (wiki §27.4/§47.2 — "one click is 0.5
+  dB"). That script resolves the selected input's helper itself, clamps
+  0-255, and writes the target in one `input_number.set_value` — which
+  `Audio - Volume Helper Changed` then turns into one batched IR send, no
+  matter how large `amount` is. The dial does not call
+  `nexus_volume_up`/`down` at all, and does not need to loop.
 - Roon's Lounge zone is on **Fixed Volume at unity gain** — Roon no longer
   offers any volume interface for this zone, which is fine since nothing
   here depends on Roon's own volume buttons.
-- Rate-limiting: a fast spin could fire many rapid HA calls. Carry forward
-  the accumulate-and-flush coalescing pattern already used for Harmony's
-  held-volume-button case (HA automation `Audio - Harmony Volume`) rather
-  than one HTTP call per detent. **Not required for the first working
-  version.**
+- **Open follow-up, not yet resolved:** the firmware's own encoder
+  acceleration (`resolve_volume_ticks` in `common/controller_input.c`)
+  buckets true rotation magnitude down to a capped 1/3/5 steps *before*
+  it reaches this backend — a raw 10-tick spin and a raw 3-tick spin
+  currently produce the same `amount`. That capping was tuned for the old
+  per-step Roon/UHC path, where uncapped magnitude meant uncapped rapid
+  HTTP calls; it no longer serves that purpose now that one HA call
+  safely carries any `amount` and HA does the batching. Whether to pass
+  the true uncapped magnitude through for this path (own opt-in hook,
+  matching the `controller_action_router_set_volume_override` pattern
+  already added for the write path) is a feel/UX decision for the owner
+  to make once the first build is on hardware, not a technical
+  correctness question — see issue #2.
 
 ### Implementation notes (from source investigation)
 
