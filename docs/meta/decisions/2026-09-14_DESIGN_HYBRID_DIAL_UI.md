@@ -1,0 +1,238 @@
+# Design: Hybrid Dial UI + Direct Home Assistant Volume Control
+
+**Status:** Accepted (maintainer-approved, this is a personal fork)
+**Date:** 2026-09-14
+**Issue:** [#1](https://github.com/davidismynaim/roon-knob/issues/1) (tracking), [#2](https://github.com/davidismynaim/roon-knob/issues/2) (first slice: HA volume backend)
+
+> Consolidates and supersedes two prior spec documents kept only in the
+> owner's wiki/notes (`dedicated-single-zone-dial-ui-spec.md`, the original
+> full custom redesign; `dial-minimal-stock-changes-spec.md`, the
+> minimal-change alternative written after running stock firmware). Neither
+> is checked into this repo. **This document is what gets built.**
+
+## Context
+
+This is a personal fork of upstream HiPhi Dial, run against a single fixed
+physical hi-fi setup (one Roon zone, one DSP volume controller called Nexus,
+one Home Assistant instance already acting as the automation hub for that
+gear). The owner wants the on-device volume ring to control Nexus directly
+through Home Assistant rather than through Roon/UHC's relative-volume
+mechanism, plus a reworked Now Playing layout and two new fixed-input
+screens (TV, Vinyl) with a repurposed source picker.
+
+## Decision: bypass the controller-boundary rule for volume/source, deliberately
+
+`.oh/controller-boundaries.md` (enforced by issue #190's CI checks) states
+the physical-input/device layer must contain no Roon/HQPlayer/Home
+Assistant names, entity IDs, or backend action strings — that traffic is
+supposed to go through the bridge service (UHC), with a proper adaptive
+HA integration path already planned (`.oh/input-bindings.md` "Slice C",
+tracked upstream as issue #170 + UHC #333/#335).
+
+This design **knowingly violates that rule**: `idf_app` will call Home
+Assistant's REST API directly, with entity IDs (`number.hifi_volume`,
+`input_select.audio_input`) and a bearer token embedded in firmware
+config, bypassing UHC and Roon entirely for volume and source switching.
+
+**Rationale:** this is a single-owner fork of a single fixed installation,
+not the general multi-user product upstream is building toward. Waiting
+for the upstream Slice C protocol isn't worth it here. Direct investigation
+(owner's wiki §50.3) found two independent reliability problems with the
+Roon-mediated path — a Roon Core volume-event bug (since fixed by a Core
+restart) and a separately unreliable dial/UHC interaction with Roon's
+relative-volume API even with Core healthy — while the HA script-based
+mechanism is already proven reliable for this same hardware via the
+dashboard, Harmony remote, and voice control. Reusing that proven path is
+lower-risk than fixing the Roon-mediated one for a setup of one.
+
+This exception is scoped to volume and source-selection only. It does not
+change the boundary rule for anyone building on upstream; it is recorded
+here so the deviation is explicit and owned, not accidental drift.
+
+## Volume control backend
+
+- **Read** (for display): `GET http://<ha-host>:8123/api/states/number.hifi_volume`,
+  `Authorization: Bearer <long-lived access token>`. Convert from
+  `number.hifi_volume`'s native dB scale (-127.5 to 0) to the 0-255
+  position scale for display: `position = round((db_value + 127.5) * 2)`.
+- **Write** (for control): `POST http://<ha-host>:8123/api/services/script/nexus_volume_up`
+  (and `nexus_volume_down`), same auth. Each call moves the
+  currently-selected input's volume by one 0.5 dB step — the dial's own
+  encoder/acceleration logic decides how many calls to fire per unit of
+  rotation.
+- Roon's Lounge zone is on **Fixed Volume at unity gain** — Roon no longer
+  offers any volume interface for this zone, which is fine since nothing
+  here depends on Roon's own volume buttons.
+- Rate-limiting: a fast spin could fire many rapid HA calls. Carry forward
+  the accumulate-and-flush coalescing pattern already used for Harmony's
+  held-volume-button case (HA automation `Audio - Harmony Volume`) rather
+  than one HTTP call per detent. **Not required for the first working
+  version.**
+
+### Implementation notes (from source investigation)
+
+- `common/bridge_client.c` currently reads volume by scanning UHC's
+  `/now_playing` JSON (`bridge_client.c:732-763`) and writes it via
+  `platform_http_post_json()` to `<bridge>/control` (`bridge_client.c:1011-1016`,
+  `controller_presentation_show_volume_change` at `:1262-1263`). This new
+  path runs alongside/replaces that flow for volume specifically — it does
+  not need to reuse `bridge_client.c`'s JSON scanning, since HA's response
+  shape is different.
+- **No existing HTTP call in this codebase sends an `Authorization` header.**
+  `idf_app/main/platform_http_idf.c:60-70` sets `Accept`, `Content-Type`,
+  `X-Knob-Id`/`X-Knob-Version` only. A bearer-auth GET/POST helper is new
+  code, following the existing `esp_http_client_set_header` pattern — small,
+  but not a rewire of something that already exists.
+
+## Screen 1: Now Playing (Music input)
+
+### Visual layout
+
+- Concentric rings retained exactly as stock: outer ring = volume position,
+  inner ring = playback progress. No change to this visualization.
+- Album art fills the full circular display, edge-to-edge, as the
+  background for the whole screen.
+- No full-screen darkening mask (stock's is removed).
+- A darkening tint applies only to the **lower third**, just enough to
+  keep track/artist text legible over the artwork — the upper two-thirds
+  stay fully undimmed.
+- **Volume number**: top third, 0-255 position scale (not dB), large —
+  the primary at-a-glance readout.
+- **Track/artist details**: lower third, on top of the darkening tint.
+- **Transport controls** (previous / play-pause / next): middle third,
+  all three the same size, touch targets (touch is reliable per stock
+  testing — these stay touch, not rotate/click).
+- **Zone selector and current-zone display: removed entirely** — not
+  hidden, not defaulted, not present.
+
+### Gestures
+
+- Long-press, top third → activate mute (full-screen red mute icon).
+- Long-press, middle third → no action (disabled so it doesn't compete
+  with the three transport touch targets in this region).
+- Long-press, lower third → open source selection.
+
+## Screen 2: TV and Vinyl inputs
+
+Shared layout, differing only in background image and label text.
+
+### Visual layout
+
+- No inner progress ring (no track/timeline concept for these inputs).
+- Outer volume ring retained, same behavior as Music.
+- **Volume number**: 0-255 scale, large, top **two-thirds** (more room
+  than Music's top-third since there's no now-playing content).
+- **Input label** ("TV" or "Vinyl"): small text, bottom third.
+- **Background**: full-screen wallpaper (turntable image for Vinyl,
+  TV/screen image for TV). Owner supplies real photography later — build
+  against placeholders now, but assume a full-bleed photo, not an icon.
+- No darkening tint or overlay at all in this mode.
+
+### Gestures
+
+- Long-press, top two-thirds → activate mute (same full-screen treatment).
+- Long-press, bottom third → re-open source selection.
+
+## Source selection UI
+
+- Reuse the existing zone-picker interaction pattern as-is:
+  `ui_show_zone_picker()` (`common/ui.c:856`, an LVGL `lv_list`) is already
+  cleanly separated from the data feeding it — `controller_action_router.c:60-96`
+  builds the `names`/`ids` arrays before calling it. Feeding it a static
+  3-item Music/TV/Vinyl list instead of live Roon zones is a small,
+  low-risk change; the picker's rendering/interaction code needs no
+  changes.
+- The three fixed options: **Music, TV, Vinyl**, matching
+  `input_select.audio_input`'s three states already used elsewhere in this
+  setup. No dynamic Roon zone list — this dial is locked to one physical
+  setup.
+- Selecting an option sets `input_select.audio_input` in HA (reusing the
+  existing HA-side input-switching logic) and returns to the appropriate
+  screen (Now Playing for Music, the TV/Vinyl screen otherwise).
+- `select_picker_entry()` (`controller_action_router.c:113-150`) currently
+  mutates Roon zone selection on pick — this needs a parallel code path for
+  the HA input-select case rather than reuse of that function's body.
+
+## Long-press-by-region gesture system (new, not a reuse)
+
+Investigation confirmed **no existing per-region touch long-press
+mechanism exists today.** The Dial has no physical buttons
+(`platform_input_idf.c:35-37`); `common/controller_button_gesture.c` only
+handles tap/double-tap on a physical encoder button, which doesn't apply
+here. The only long-press anywhere today is one hardcoded LVGL
+`LV_EVENT_LONG_PRESSED` handler on the zone-name label
+(`common/ui.c:390,554-556`), which opens Settings.
+
+This design's three-region long-press (top/middle/bottom on Music,
+top-two-thirds/bottom-third on TV/Vinyl) is **new interaction code**:
+straightforward in LVGL (stack invisible full-width objects per region,
+attach `LV_EVENT_LONG_PRESSED` to each), but budget it as new work, not a
+rewire.
+
+LVGL's default long-press threshold (~400ms) is not overridden anywhere
+in this repo today and `lv_conf.h` isn't vendored locally to confirm the
+exact value at build time. Use the existing zone-label long-press as the
+feel reference; don't introduce a different threshold without checking
+`lv_conf.h` at build time first.
+
+## Mute behavior
+
+- Full-screen red mute icon, matching the original design document's
+  treatment as an unambiguous, unmissable full-screen state.
+- Confirmed **net-new** — no existing mute mechanism anywhere in the repo
+  (`input_boolean.audio_mute` or otherwise).
+- Exact mechanism (which HA entity/service) carries forward from the
+  project's standard mute toggle (`input_boolean.audio_mute`) unless
+  building it surfaces a reason to deviate.
+
+## Idle timeout / sleep behavior
+
+**No change.** `display_activity_detected()`
+(`idf_app/main/display_sleep.c:516`) is invoked generically from the touch
+and encoder input paths (`platform_display_idf.c:369,387`,
+`platform_input_idf.c:260`), not gated on which screen is active. New
+screens built from normal LVGL touch objects will keep tripping this path
+unchanged — no special-casing needed for Music vs. TV/Vinyl. Default: TV
+and Vinyl screens get the same idle/sleep behavior as Music, for free,
+since the mechanism is screen-agnostic. Revisit only if that feels wrong
+once it's running on hardware.
+
+## Open questions carried into implementation
+
+1. ~~Locate existing Roon-volume read/write code~~ — answered above.
+2. ~~Confirm zone-selection UI mechanism~~ — answered above
+   (`ui_show_zone_picker`, LVGL list).
+3. Exact long-press duration threshold — LVGL default, not confirmed
+   in-repo; check `lv_conf.h` at build time before tuning.
+4. ~~Does stock have idle/sleep for TV/Vinyl~~ — moot; mechanism is
+   screen-agnostic, so TV/Vinyl inherit it automatically. Default decided
+   above.
+5. Exact pixel boundaries for thirds/two-thirds against the round display's
+   circular usable area — **no existing helper for this.** `common/ui.c`
+   lays out everything with fixed, eyeballed pixel offsets against
+   `SCREEN_SIZE` (360 for Dial). Thirds boundaries will need to be tuned
+   by eye on real hardware, same as the rest of this file — not derived
+   from a formula. Budget an iteration pass on-device.
+6. Confirm HA long-lived access token storage/provisioning mechanism on
+   the device (NVS alongside existing WiFi/bridge config, presumably) —
+   not yet designed.
+
+## Implementation order
+
+Smallest independently-testable slices first, each shippable on its own:
+
+1. **HA volume backend** — bearer-auth HTTP helper, GET/POST to the two
+   endpoints above, dB↔position conversion, wired into the existing
+   volume ring display and encoder rotation handler. Testable in isolation
+   against real HA before touching any screen layout.
+2. **Source picker reuse** — static 3-item list into
+   `ui_show_zone_picker()`, writes `input_select.audio_input`.
+3. **Long-press-by-region gesture system** — generic enough to serve both
+   mute-trigger and source-select-open on both screen layouts.
+4. **Mute** — full-screen icon + HA toggle, using the gesture system from
+   step 3.
+5. **Now Playing layout rework** — tint, thirds, zone-selector removal.
+6. **TV/Vinyl screens** — new layout, placeholder art, wired to steps 1-4.
+
+Each slice gets its own branch/PR per the project's git workflow, kept
+draft until tested on hardware.
