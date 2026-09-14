@@ -152,7 +152,6 @@ bool ha_volume_client_adjust(int32_t steps) {
     }
 
     int32_t magnitude = steps < 0 ? -steps : steps;
-    const char *script = steps > 0 ? "nexus_volume_up" : "nexus_volume_down";
 
     int new_position = get_cached_position() + steps;
     if (new_position < 0) {
@@ -163,25 +162,32 @@ bool ha_volume_client_adjust(int32_t steps) {
     set_cached_position(new_position);
     controller_presentation_show_volume_change((float)new_position, 1.0f);
 
+    /* One call to script.audio_voice_volume per dispatch, not one call
+     * per step: that script resolves the currently-selected input's
+     * helper itself, clamps 0-255, and writes the new target in a single
+     * input_number.set_value. Audio - Volume Helper Changed then fires
+     * exactly one remote.send_command with num_repeats = the resulting
+     * delta - the same native-repeat batching already proven for
+     * Harmony's held-button case (wiki §44.9, §47.2/§47.4), rather than
+     * this firmware looping individual nexus_volume_up/down calls and
+     * producing one IR transaction per step. */
     char url[128];
-    snprintf(url, sizeof(url), "http://%s/api/services/script/%s", cfg.host,
-             script);
+    snprintf(url, sizeof(url),
+             "http://%s/api/services/script/audio_voice_volume", cfg.host);
+    char body[96];
+    snprintf(body, sizeof(body),
+             "{\"action\":\"%s\",\"unit\":\"clicks\",\"amount\":%ld}",
+             steps > 0 ? "increase" : "decrease", (long)magnitude);
 
-    bool all_ok = true;
-    for (int32_t i = 0; i < magnitude; i++) {
-        char *resp = NULL;
-        size_t resp_len = 0;
-        int ret = platform_http_post_auth(url, cfg.token, "{}", &resp,
-                                          &resp_len);
-        platform_http_free(resp);
-        if (ret != 0) {
-            all_ok = false;
-        }
+    char *resp = NULL;
+    size_t resp_len = 0;
+    int ret = platform_http_post_auth(url, cfg.token, body, &resp, &resp_len);
+    platform_http_free(resp);
+    if (ret != 0) {
+        LOGW("HA volume adjust: audio_voice_volume call failed");
+        return false;
     }
-    if (!all_ok) {
-        LOGW("HA volume adjust: one or more calls to %s failed", script);
-    }
-    return all_ok;
+    return true;
 }
 
 void ha_volume_client_get_display(float *volume, float *volume_min,
