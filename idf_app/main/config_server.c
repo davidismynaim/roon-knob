@@ -313,26 +313,47 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         snprintf(status_text, sizeof(status_text), "Connecting...");
     }
 
-    char wifi_html[1024] = "";
+    // The HTTP server task's stack is only 8KB (see config.stack_size
+    // below) - these used to be stack arrays, and large ones (the 16-entry
+    // zone list plus its rendered <option> HTML) pushed this handler over
+    // that budget, causing a stack-overflow panic (full chip reboot,
+    // dropping WiFi) on every page load once the zone dropdown was added.
+    // PSRAM-backed heap allocations instead, matching the existing `html`
+    // buffer below.
+    char *wifi_html = heap_caps_malloc(1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bridge_zone_t *zones =
+        heap_caps_malloc(16 * sizeof(bridge_zone_t),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *zone_options = heap_caps_malloc(3072, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wifi_html || !zones || !zone_options) {
+        free(wifi_html);
+        free(zones);
+        free(zone_options);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    wifi_html[0] = '\0';
+    zone_options[0] = '\0';
+
     size_t wifi_pos = 0;
     for (int i = 0; i < cfg->wifi_count && i < RK_MAX_WIFI; i++) {
         char escaped_ssid[192];
         html_escape(cfg->wifi[i].ssid, escaped_ssid, sizeof(escaped_ssid));
         int written = snprintf(
-            wifi_html + wifi_pos, sizeof(wifi_html) - wifi_pos,
+            wifi_html + wifi_pos, 1024 - wifi_pos,
             "<div class='wifi-entry'><span>%d. %s</span>"
             "<form method='POST' action='/wifi-remove' style='display:inline;margin:0;padding:0;'>"
             "<input type='hidden' name='idx' value='%d'>"
             "<input type='submit' value='Remove' class='btn-sm btn-clear'>"
             "</form></div>",
             i + 1, escaped_ssid, i);
-        if (written < 0 || (size_t)written >= sizeof(wifi_html) - wifi_pos) {
+        if (written < 0 || (size_t)written >= 1024 - wifi_pos) {
             break;
         }
         wifi_pos += (size_t)written;
     }
     if (wifi_pos == 0) {
-        snprintf(wifi_html, sizeof(wifi_html),
+        snprintf(wifi_html, 1024,
                  "<div class='wifi-entry'><em>No saved networks</em></div>");
     }
 
@@ -347,9 +368,7 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     // gets an option first, even if the live list didn't return it (e.g.
     // the bridge is briefly unreachable), so the current selection is
     // never silently lost or left unselected.
-    bridge_zone_t zones[16];
     int zone_count = bridge_client_get_zones(zones, 16);
-    char zone_options[3072] = "";
     size_t zone_opt_pos = 0;
     {
         char escaped_id[192];
@@ -365,10 +384,10 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         }
         html_escape(current_name, escaped_name, sizeof(escaped_name));
         int written = snprintf(zone_options + zone_opt_pos,
-                               sizeof(zone_options) - zone_opt_pos,
+                               3072 - zone_opt_pos,
                                "<option value='%s' selected>%s</option>",
                                escaped_id, escaped_name);
-        if (written > 0 && (size_t)written < sizeof(zone_options) - zone_opt_pos) {
+        if (written > 0 && (size_t)written < 3072 - zone_opt_pos) {
             zone_opt_pos += (size_t)written;
         }
 
@@ -379,11 +398,10 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
             html_escape(zones[i].id, escaped_id, sizeof(escaped_id));
             html_escape(zones[i].name, escaped_name, sizeof(escaped_name));
             written = snprintf(zone_options + zone_opt_pos,
-                               sizeof(zone_options) - zone_opt_pos,
+                               3072 - zone_opt_pos,
                                "<option value='%s'>%s</option>", escaped_id,
                                escaped_name);
-            if (written < 0 ||
-                (size_t)written >= sizeof(zone_options) - zone_opt_pos) {
+            if (written < 0 || (size_t)written >= 3072 - zone_opt_pos) {
                 break;
             }
             zone_opt_pos += (size_t)written;
@@ -394,6 +412,9 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     char *html = heap_caps_malloc(8192,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!html) {
+        free(wifi_html);
+        free(zones);
+        free(zone_options);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
@@ -405,6 +426,9 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
     free(html);
+    free(wifi_html);
+    free(zones);
+    free(zone_options);
     return ESP_OK;
 }
 
