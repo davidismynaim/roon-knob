@@ -14,6 +14,7 @@
 #include "controller_action_router.h"
 #include "controller_config.h"
 #include "ha_volume_client.h"
+#include "source_picker_client.h"
 #include "ui.h"
 #include "ui_network.h"
 #include "wifi_manager.h"
@@ -466,6 +467,12 @@ void app_main(void) {
     // host/token aren't configured yet via the device's config page.
     controller_action_router_set_volume_override(ha_volume_client_adjust);
     ha_volume_client_init();
+
+    // Fixed Music/TV/Vinyl source picker in place of the dynamic Roon
+    // zone picker (Dial-only; see
+    // docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md).
+    controller_action_router_set_source_picker_override(source_picker_open,
+                                                        source_picker_select);
     show_config_durability_diagnostic();
 
     // Start WiFi AFTER UI task is running (WiFi event callbacks use lv_async_call)
