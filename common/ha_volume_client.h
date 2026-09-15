@@ -4,8 +4,13 @@
 // entirely. See docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md for
 // why. Dial-only: compiled into idf_app alone (see idf_app/main/CMakeLists.txt),
 // not part of the shared controller/backend boundary Frame and RLCD share.
+// Also tracks input_select.audio_input's current value (see
+// ha_volume_client_get_current_source below) - piggybacking on this
+// module's existing poll task/network-ready gate rather than standing up
+// a second one for one more tiny GET.
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -53,6 +58,14 @@ bool ha_volume_client_adjust(int32_t ticks);
 // successfully read.
 void ha_volume_client_get_display(float *volume, float *volume_min,
                                   float *volume_max, float *volume_step);
+
+// Fills `out` with the last-polled value of input_select.audio_input
+// ("Music"/"TV"/"Vinyl"), reflecting a change made from anywhere (this
+// dial's own picker, Harmony, the HA dashboard, voice), not just writes
+// made through ha_source_client. Returns false if never successfully
+// polled yet (e.g. still booting, or HA unreachable since boot) - `out`
+// is left untouched in that case.
+bool ha_volume_client_get_current_source(char *out, size_t len);
 
 #ifdef __cplusplus
 }

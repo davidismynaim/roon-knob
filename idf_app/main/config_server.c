@@ -48,7 +48,8 @@ static esp_err_t send_conflict(httpd_req_t *req, const char *message) {
 }
 
 // HTML page for config
-// Format args: current_bridge, status_class, status_text, wifi_html, bridge_value
+// Format args: current_bridge, status_class, status_text, wifi_html,
+// bridge_value, ha_host, ha_token_placeholder, zone_options
 static const char *HTML_CONFIG =
     "<!DOCTYPE html>"
     "<html><head>"
@@ -61,7 +62,7 @@ static const char *HTML_CONFIG =
     ".info{color:#888;margin:10px 0;}"
     "form{background:#16213e;padding:20px;border-radius:10px;max-width:400px;}"
     "label{display:block;margin:15px 0 5px;color:#aaa;}"
-    "input[type=text],input[type=url],input[type=password]{width:100%%;padding:10px;border:1px solid #333;border-radius:5px;background:#0f0f1a;color:#fff;box-sizing:border-box;}"
+    "input[type=text],input[type=url],input[type=password],select{width:100%%;padding:10px;border:1px solid #333;border-radius:5px;background:#0f0f1a;color:#fff;box-sizing:border-box;}"
     "input[type=submit]{padding:12px 24px;margin-top:20px;background:#4fc3f7;color:#000;border:none;border-radius:5px;font-weight:bold;cursor:pointer;}"
     "input[type=submit]:hover{background:#29b6f6;}"
     ".btn-clear{background:#ff7043;}"
@@ -115,6 +116,13 @@ static const char *HTML_CONFIG =
     "<label>Long-Lived Access Token</label>"
     "<input type='password' name='ha_token' maxlength='255' placeholder='%s'>"
     "<p class='hint'>Controls Nexus volume directly via Home Assistant, bypassing Roon. Leave the token blank to keep the one already saved.</p>"
+    "<input type='submit' value='Save'>"
+    "</form>"
+    "<form method='POST' action='/zone-config'>"
+    "<h2>Roon Zone</h2>"
+    "<label>Zone</label>"
+    "<select name='zone_id'>%s</select>"
+    "<p class='hint'>Locked to this one zone &mdash; there's no on-device zone picker. Pick a different zone here if the dial is ever connected to the wrong one. If your zone isn't listed, the bridge may be unreachable right now &mdash; reload this page once it's back.</p>"
     "<input type='submit' value='Save'>"
     "</form></body></html>";
 
@@ -305,26 +313,47 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         snprintf(status_text, sizeof(status_text), "Connecting...");
     }
 
-    char wifi_html[1024] = "";
+    // The HTTP server task's stack is only 8KB (see config.stack_size
+    // below) - these used to be stack arrays, and large ones (the 16-entry
+    // zone list plus its rendered <option> HTML) pushed this handler over
+    // that budget, causing a stack-overflow panic (full chip reboot,
+    // dropping WiFi) on every page load once the zone dropdown was added.
+    // PSRAM-backed heap allocations instead, matching the existing `html`
+    // buffer below.
+    char *wifi_html = heap_caps_malloc(1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bridge_zone_t *zones =
+        heap_caps_malloc(16 * sizeof(bridge_zone_t),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char *zone_options = heap_caps_malloc(3072, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wifi_html || !zones || !zone_options) {
+        free(wifi_html);
+        free(zones);
+        free(zone_options);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    wifi_html[0] = '\0';
+    zone_options[0] = '\0';
+
     size_t wifi_pos = 0;
     for (int i = 0; i < cfg->wifi_count && i < RK_MAX_WIFI; i++) {
         char escaped_ssid[192];
         html_escape(cfg->wifi[i].ssid, escaped_ssid, sizeof(escaped_ssid));
         int written = snprintf(
-            wifi_html + wifi_pos, sizeof(wifi_html) - wifi_pos,
+            wifi_html + wifi_pos, 1024 - wifi_pos,
             "<div class='wifi-entry'><span>%d. %s</span>"
             "<form method='POST' action='/wifi-remove' style='display:inline;margin:0;padding:0;'>"
             "<input type='hidden' name='idx' value='%d'>"
             "<input type='submit' value='Remove' class='btn-sm btn-clear'>"
             "</form></div>",
             i + 1, escaped_ssid, i);
-        if (written < 0 || (size_t)written >= sizeof(wifi_html) - wifi_pos) {
+        if (written < 0 || (size_t)written >= 1024 - wifi_pos) {
             break;
         }
         wifi_pos += (size_t)written;
     }
     if (wifi_pos == 0) {
-        snprintf(wifi_html, sizeof(wifi_html),
+        snprintf(wifi_html, 1024,
                  "<div class='wifi-entry'><em>No saved networks</em></div>");
     }
 
@@ -333,20 +362,73 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     const char *ha_token_placeholder =
         ha_cfg.token[0] ? "(unchanged)" : "Paste token here";
 
+    // Build the zone <option> list from the bridge's live zone list - the
+    // same target-neutral zone API frame_app/main/captive_portal.c already
+    // uses for its own zone UI. The currently-configured zone_id always
+    // gets an option first, even if the live list didn't return it (e.g.
+    // the bridge is briefly unreachable), so the current selection is
+    // never silently lost or left unselected.
+    int zone_count = bridge_client_get_zones(zones, 16);
+    size_t zone_opt_pos = 0;
+    {
+        char escaped_id[192];
+        char escaped_name[128];
+        html_escape(cfg->zone_id, escaped_id, sizeof(escaped_id));
+        const char *current_name = cfg->zone_id[0] ? cfg->zone_id
+                                                    : "(not connected yet)";
+        for (int i = 0; i < zone_count; i++) {
+            if (strcmp(zones[i].id, cfg->zone_id) == 0) {
+                current_name = zones[i].name;
+                break;
+            }
+        }
+        html_escape(current_name, escaped_name, sizeof(escaped_name));
+        int written = snprintf(zone_options + zone_opt_pos,
+                               3072 - zone_opt_pos,
+                               "<option value='%s' selected>%s</option>",
+                               escaped_id, escaped_name);
+        if (written > 0 && (size_t)written < 3072 - zone_opt_pos) {
+            zone_opt_pos += (size_t)written;
+        }
+
+        for (int i = 0; i < zone_count; i++) {
+            if (strcmp(zones[i].id, cfg->zone_id) == 0) {
+                continue;  // already listed above as the current selection
+            }
+            html_escape(zones[i].id, escaped_id, sizeof(escaped_id));
+            html_escape(zones[i].name, escaped_name, sizeof(escaped_name));
+            written = snprintf(zone_options + zone_opt_pos,
+                               3072 - zone_opt_pos,
+                               "<option value='%s'>%s</option>", escaped_id,
+                               escaped_name);
+            if (written < 0 || (size_t)written >= 3072 - zone_opt_pos) {
+                break;
+            }
+            zone_opt_pos += (size_t)written;
+        }
+    }
+
     // Build HTML with current values, saved networks, and bridge status.
-    char *html = heap_caps_malloc(4096,
+    char *html = heap_caps_malloc(8192,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!html) {
+        free(wifi_html);
+        free(zones);
+        free(zone_options);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
 
-    snprintf(html, 4096, HTML_CONFIG, current, status_class, status_text,
-             wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder);
+    snprintf(html, 8192, HTML_CONFIG, current, status_class, status_text,
+             wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
+             zone_options);
 
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
     free(html);
+    free(wifi_html);
+    free(zones);
+    free(zone_options);
     return ESP_OK;
 }
 
@@ -415,7 +497,7 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     }
 
     snprintf(html, 1024, HTML_SUCCESS, message);
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
     free(html);
 
@@ -473,11 +555,57 @@ static esp_err_t ha_config_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     snprintf(html, 1024, HTML_SUCCESS, "Home Assistant settings saved!");
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
     free(html);
 
     ESP_LOGI(TAG, "HA config saved, rebooting in 1 second...");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+// Handler for POST /zone-config - override the locked Roon zone (recovery
+// path now that there's no on-device zone picker; see
+// docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md and
+// CONFIG_RK_DEFAULT_ZONE_ID / refresh_zone_label() in bridge_client.c).
+static esp_err_t zone_config_post_handler(httpd_req_t *req) {
+    char buf[256] = {0};
+    int received = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (received <= 0) {
+        ESP_LOGE(TAG, "Failed to receive POST data");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
+        return ESP_FAIL;
+    }
+    buf[received] = '\0';
+
+    char zone_id[64] = {0};
+    get_form_field(buf, "zone_id", zone_id, sizeof(zone_id));
+
+    controller_config_write_result_t result =
+        controller_config_set_zone(zone_id, NULL);
+    if (result == CONTROLLER_CONFIG_NOT_COMMITTED) {
+        ESP_LOGE(TAG, "Failed to save zone");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+    if (result == CONTROLLER_CONFIG_COMMITTED_UNVERIFIED) {
+        return send_unverified_settings(req);
+    }
+
+    char *html = heap_caps_malloc(1024,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!html) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    snprintf(html, 1024, HTML_SUCCESS, "Zone saved!");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_send(req, html, strlen(html));
+    free(html);
+
+    ESP_LOGI(TAG, "Zone config saved, rebooting in 1 second...");
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
 
@@ -950,6 +1078,13 @@ void config_server_start(void) {
         .handler = ha_config_post_handler,
     };
     httpd_register_uri_handler(s_server, &ha_config_post);
+
+    httpd_uri_t zone_config_post = {
+        .uri = "/zone-config",
+        .method = HTTP_POST,
+        .handler = zone_config_post_handler,
+    };
+    httpd_register_uri_handler(s_server, &zone_config_post);
 
     httpd_uri_t wifi_add = {
         .uri = "/wifi-add",

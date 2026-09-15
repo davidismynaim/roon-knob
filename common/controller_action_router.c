@@ -18,6 +18,21 @@ void controller_action_router_set_volume_override(
     s_volume_override = fn;
 }
 
+static controller_source_picker_open_fn_t s_source_picker_open;
+static controller_source_picker_select_fn_t s_source_picker_select;
+
+void controller_action_router_set_source_picker_override(
+    controller_source_picker_open_fn_t open_fn,
+    controller_source_picker_select_fn_t select_fn) {
+    if (open_fn && select_fn) {
+        s_source_picker_open = open_fn;
+        s_source_picker_select = select_fn;
+    } else {
+        s_source_picker_open = NULL;
+        s_source_picker_select = NULL;
+    }
+}
+
 static const char *const s_back_name = "Back";
 static const char *const s_back_id = ZONE_ID_BACK;
 static const char *const s_settings_name = "Settings";
@@ -187,6 +202,9 @@ bool controller_action_router_handle(const controller_action_t *action) {
         return bridge_client_execute_command(&action->value.command);
 
     case CONTROLLER_ACTION_OPEN_ZONE_PICKER:
+        if (s_source_picker_open) {
+            return s_source_picker_open();
+        }
         return open_picker();
 
     case CONTROLLER_ACTION_CLOSE_ZONE_PICKER:
@@ -210,6 +228,9 @@ bool controller_action_router_handle(const controller_action_t *action) {
         if (controller_input_get_context() !=
             CONTROLLER_INTERACTION_CONTEXT_ZONE_PICKER) {
             return false;
+        }
+        if (s_source_picker_select) {
+            return s_source_picker_select();
         }
         return select_picker_entry();
 

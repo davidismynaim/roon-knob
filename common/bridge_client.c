@@ -180,6 +180,17 @@ static atomic_bool s_discovered_endpoint_commit_pending = ATOMIC_VAR_INIT(false)
 #define CONFIG_RK_DEFAULT_BRIDGE_BASE "http://127.0.0.1:8088"
 #endif
 
+// Fallback zone when no zone_id is stored in NVS (fresh device, or a
+// config reset). Without this, refresh_zone_label() falls back to
+// whichever zone the bridge lists first - arbitrary, and for a
+// single-zone-locked personal fork almost certainly wrong. Undefined
+// (empty) on every target except idf_app/Dial, where
+// idf_app/sdkconfig.override sets the real value - so this is a no-op on
+// Frame/RLCD exactly like CONFIG_RK_DEFAULT_BRIDGE_BASE above.
+#ifndef CONFIG_RK_DEFAULT_ZONE_ID
+#define CONFIG_RK_DEFAULT_ZONE_ID ""
+#endif
+
 static void strip_trailing_slashes(char *url);
 static void bridge_poll_thread(void *arg);
 static void post_ui_connectivity_update(const char *line1, const char *line2);
@@ -859,6 +870,11 @@ static bool refresh_zone_label(bool prefer_zone_id) {
     } else {
         rk_strlcpy(preferred_zone_id, cfg.zone_id,
                    sizeof(preferred_zone_id));
+        if (preferred_zone_id[0] == '\0' &&
+            CONFIG_RK_DEFAULT_ZONE_ID[0] != '\0') {
+            rk_strlcpy(preferred_zone_id, CONFIG_RK_DEFAULT_ZONE_ID,
+                       sizeof(preferred_zone_id));
+        }
     }
     LOGI("refresh_zone_label: Parsed %d zones", s_state.zone_count);
     if (s_state.zone_count > 0) {
