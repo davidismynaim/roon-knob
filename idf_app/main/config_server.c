@@ -49,7 +49,8 @@ static esp_err_t send_conflict(httpd_req_t *req, const char *message) {
 
 // HTML page for config
 // Format args: current_bridge, status_class, status_text, wifi_html,
-// bridge_value, ha_host, ha_token_placeholder, zone_options
+// bridge_value, ha_host, ha_token_placeholder, zone_options,
+// escaped_title_patterns
 static const char *HTML_CONFIG =
     "<!DOCTYPE html>"
     "<html><head>"
@@ -123,6 +124,13 @@ static const char *HTML_CONFIG =
     "<label>Zone</label>"
     "<select name='zone_id'>%s</select>"
     "<p class='hint'>Locked to this one zone &mdash; there's no on-device zone picker. Pick a different zone here if the dial is ever connected to the wrong one. If your zone isn't listed, the bridge may be unreachable right now &mdash; reload this page once it's back.</p>"
+    "<input type='submit' value='Save'>"
+    "</form>"
+    "<form method='POST' action='/title-filter-config'>"
+    "<h2>Track Title Cleanup</h2>"
+    "<label>Patterns to strip (one per line)</label>"
+    "<textarea name='patterns' rows='10' style='width:100%%;padding:10px;border:1px solid #333;border-radius:5px;background:#0f0f1a;color:#fff;box-sizing:border-box;font-family:monospace;font-size:12px;'>%s</textarea>"
+    "<p class='hint'>One phrase per line, e.g. \"Remastered YYYY\" or \"Album Version\" &mdash; no need to add the brackets, dashes, or quotes yourself, matching handles those automatically. Write YYYY for a 4-digit year, YY for 2 digits, or NUM for any run of digits (e.g. bit depth/sample rate). Matching is plain text otherwise and not case-sensitive. Leave blank to disable cleanup entirely.</p>"
     "<input type='submit' value='Save'>"
     "</form></body></html>";
 
@@ -198,6 +206,49 @@ static bool get_form_field(const char *data, const char *field, char *out, size_
     }
     memcpy(out, encoded, decoded_len);
     out[decoded_len] = '\0';
+    return true;
+}
+
+// Like get_form_field, but for values that can be much larger than a
+// typical form field (e.g. a multi-line textarea) - heap-allocates its
+// decode scratch buffer sized exactly to the raw field length instead of
+// truncating at get_form_field's fixed 256-byte cap. URL-decoding only
+// ever shrinks or keeps text the same length, so `len` bytes is always
+// enough room for the decoded result too.
+static bool get_form_field_big(const char *data, const char *field, char *out, size_t out_len) {
+    char search[64];
+    snprintf(search, sizeof(search), "%s=", field);
+
+    const char *start = data;
+    while ((start = strstr(start, search)) != NULL) {
+        if (start == data || *(start - 1) == '&') {
+            break;
+        }
+        start++;
+    }
+    if (!start) {
+        return false;
+    }
+    start += strlen(search);
+
+    const char *end = strchr(start, '&');
+    size_t len = end ? (size_t)(end - start) : strlen(start);
+
+    char *encoded = heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!encoded) {
+        return false;
+    }
+    memcpy(encoded, start, len);
+    encoded[len] = '\0';
+    url_decode(encoded);
+
+    size_t decoded_len = strlen(encoded);
+    if (decoded_len >= out_len) {
+        decoded_len = out_len - 1;
+    }
+    memcpy(out, encoded, decoded_len);
+    out[decoded_len] = '\0';
+    free(encoded);
     return true;
 }
 
@@ -362,6 +413,18 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     const char *ha_token_placeholder =
         ha_cfg.token[0] ? "(unchanged)" : "Paste token here";
 
+    rk_title_filter_cfg_t title_cfg = {0};
+    platform_storage_read_title_filters(&title_cfg);
+    char *escaped_patterns = heap_caps_malloc(6144, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!escaped_patterns) {
+        free(wifi_html);
+        free(zones);
+        free(zone_options);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    html_escape(title_cfg.patterns, escaped_patterns, 6144);
+
     // Build the zone <option> list from the bridge's live zone list - the
     // same target-neutral zone API frame_app/main/captive_portal.c already
     // uses for its own zone UI. The currently-configured zone_id always
@@ -409,19 +472,20 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     }
 
     // Build HTML with current values, saved networks, and bridge status.
-    char *html = heap_caps_malloc(8192,
+    char *html = heap_caps_malloc(16384,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!html) {
         free(wifi_html);
         free(zones);
         free(zone_options);
+        free(escaped_patterns);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
 
-    snprintf(html, 8192, HTML_CONFIG, current, status_class, status_text,
+    snprintf(html, 16384, HTML_CONFIG, current, status_class, status_text,
              wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
-             zone_options);
+             zone_options, escaped_patterns);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
@@ -429,6 +493,7 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     free(wifi_html);
     free(zones);
     free(zone_options);
+    free(escaped_patterns);
     return ESP_OK;
 }
 
@@ -606,6 +671,72 @@ static esp_err_t zone_config_post_handler(httpd_req_t *req) {
     free(html);
 
     ESP_LOGI(TAG, "Zone config saved, rebooting in 1 second...");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+// Handler for POST /title-filter-config - save the track-title cleanup
+// pattern list (see common/track_title_filter.c / rk_title_filter_cfg.h).
+static esp_err_t title_filter_config_post_handler(httpd_req_t *req) {
+    // The textarea's raw + URL-encoded body can run well past a typical
+    // form POST (patterns up to 4096 bytes, plus encoding overhead) - heap
+    // buffer rather than a stack array, same reasoning as config_get_handler's
+    // comment on the 8KB HTTP task stack. Also unlike this file's other POST
+    // handlers, a body this size can easily span more than one TCP segment,
+    // so read in a loop until the whole declared content length has arrived
+    // instead of assuming a single httpd_req_recv() call covers it.
+    const size_t buf_cap = 8192;
+    char *buf = heap_caps_malloc(buf_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    size_t want = (req->content_len > 0 && (size_t)req->content_len < buf_cap - 1)
+                      ? (size_t)req->content_len
+                      : buf_cap - 1;
+    size_t received = 0;
+    while (received < want) {
+        int r = httpd_req_recv(req, buf + received, want - received);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (r <= 0) {
+            free(buf);
+            ESP_LOGE(TAG, "Failed to receive POST data");
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
+            return ESP_FAIL;
+        }
+        received += (size_t)r;
+    }
+    buf[received] = '\0';
+
+    rk_title_filter_cfg_t cfg = {0};
+    cfg.cfg_ver = RK_TITLE_FILTER_CFG_CURRENT_VER;
+    if (!get_form_field_big(buf, "patterns", cfg.patterns, sizeof(cfg.patterns))) {
+        cfg.patterns[0] = '\0';
+    }
+    free(buf);
+
+    if (!platform_storage_write_title_filters(&cfg)) {
+        ESP_LOGE(TAG, "Failed to save title filter config");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+
+    char *html = heap_caps_malloc(1024,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!html) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    snprintf(html, 1024, HTML_SUCCESS, "Track title cleanup patterns saved!");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_send(req, html, strlen(html));
+    free(html);
+
+    ESP_LOGI(TAG, "Title filter config saved, rebooting in 1 second...");
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
 
@@ -1044,7 +1175,7 @@ void config_server_start(void) {
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 13;  // root, config, ha-config, zone-config, title-filter-config, 2 wifi, 5 ble
     config.stack_size = 8192;  // Increased for mDNS resolution during config save
     // Note: max_req_hdr_len set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig
 
@@ -1085,6 +1216,13 @@ void config_server_start(void) {
         .handler = zone_config_post_handler,
     };
     httpd_register_uri_handler(s_server, &zone_config_post);
+
+    httpd_uri_t title_filter_config_post = {
+        .uri = "/title-filter-config",
+        .method = HTTP_POST,
+        .handler = title_filter_config_post_handler,
+    };
+    httpd_register_uri_handler(s_server, &title_filter_config_post);
 
     httpd_uri_t wifi_add = {
         .uri = "/wifi-add",

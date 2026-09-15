@@ -252,3 +252,73 @@ bool platform_storage_write_ha(const rk_ha_cfg_t *in) {
              copy.host, copy.token[0] ? "(set)" : "(empty)");
     return true;
 }
+
+static const char *TITLE_FILTER_NAMESPACE = "rk_titlef";
+static const char *TITLE_FILTER_KEY = "cfg";
+
+bool platform_storage_read_title_filters(rk_title_filter_cfg_t *out) {
+    if (!out) {
+        return false;
+    }
+    rk_title_filter_cfg_set_defaults(out);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TITLE_FILTER_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "title filter nvs open failed: %s", esp_err_to_name(err));
+        }
+        return true;
+    }
+
+    rk_title_filter_cfg_t stored = {0};
+    size_t len = sizeof(stored);
+    err = nvs_get_blob(handle, TITLE_FILTER_KEY, &stored, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "title filter nvs read failed: %s", esp_err_to_name(err));
+        }
+        return true;
+    }
+    if (len != sizeof(stored) || stored.cfg_ver != RK_TITLE_FILTER_CFG_CURRENT_VER) {
+        ESP_LOGW(TAG, "title filter config size/version mismatch, using defaults");
+        return true;
+    }
+
+    stored.patterns[sizeof(stored.patterns) - 1] = '\0';
+    *out = stored;
+    return true;
+}
+
+bool platform_storage_write_title_filters(const rk_title_filter_cfg_t *in) {
+    if (!in) {
+        return false;
+    }
+    rk_title_filter_cfg_t copy = *in;
+    copy.patterns[sizeof(copy.patterns) - 1] = '\0';
+    copy.cfg_ver = RK_TITLE_FILTER_CFG_CURRENT_VER;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(TITLE_FILTER_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "title filter nvs open rw failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    err = nvs_set_blob(handle, TITLE_FILTER_KEY, &copy, sizeof(copy));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "title filter nvs_set_blob failed: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return false;
+    }
+    err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "title filter nvs_commit failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "Saved title filter config (%d bytes of patterns)",
+             (int)strlen(copy.patterns));
+    return true;
+}
