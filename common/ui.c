@@ -583,8 +583,15 @@ static void zone_label_event_cb(lv_event_t *e) {
 static void zone_label_long_press_cb(lv_event_t *e) {
     (void)e;
     s_zone_long_pressed = true;  // Mark that we handled a long press
-    controller_action_t action = controller_action_simple(
-        CONTROLLER_ACTION_SHOW_SETTINGS);
+    /* Settings used to live here; now reachable via the source picker's
+     * own Settings entry (see source_picker_client.c), so this dispatches
+     * the same top-third mute gesture as mute_region_long_press_cb below
+     * instead - otherwise the header (which sits on top of, and covers
+     * most of, the top third) would keep intercepting long-presses there
+     * for a now-redundant action, leaving mute reachable only in the
+     * narrow margin outside the header's own bounding box. */
+    controller_action_t action =
+        controller_action_simple(CONTROLLER_ACTION_TOGGLE_MUTE);
     (void)controller_input_dispatch_action(&action);
 }
 
@@ -594,12 +601,12 @@ static void zone_label_long_press_cb(lv_event_t *e) {
 // other widget - header, now_playing's volume/track/controls cluster -
 // sits above them in z-order and keeps handling its own taps/long-presses
 // exactly as before; these only ever see a long-press that lands on
-// otherwise-empty background. Until the Now Playing layout rework (a
-// later slice) repositions content to actually match these thirds, the
-// header's existing hit-region still covers most of the top third, so
-// the mute gesture's usable area there is narrower than it will
-// eventually be - expected, not a bug, and resolves itself once that
-// slice removes the header/zone-label entirely.
+// otherwise-empty background. The header (which covers most of the
+// physical top third until the Now Playing layout rework removes it)
+// dispatches this same action from its own long-press handler
+// (zone_label_long_press_cb above) rather than leaving a competing
+// Settings gesture there, so the whole top third behaves consistently
+// regardless of whether the header happens to be under the touch point.
 static void mute_region_long_press_cb(lv_event_t *e) {
     (void)e;
     controller_action_t action =
