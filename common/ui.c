@@ -940,8 +940,21 @@ void ui_show_zone_picker(const char **zone_names, const char **zone_ids, int cou
 #else
             lv_label_set_text(icon_label, LV_SYMBOL_SETTINGS);
 #endif
+        } else if (strcmp(zone_id, "TV") == 0) {
+#if !TARGET_PC
+            lv_label_set_text(icon_label, ICON_TV);
+#else
+            lv_label_set_text(icon_label, LV_SYMBOL_AUDIO);
+#endif
+        } else if (strcmp(zone_id, "Vinyl") == 0) {
+#if !TARGET_PC
+            lv_label_set_text(icon_label, ICON_ALBUM);
+#else
+            lv_label_set_text(icon_label, LV_SYMBOL_AUDIO);
+#endif
         } else {
-            // Regular zone - use music note icon
+            // Music (the only other non-sentinel entry the source
+            // picker ever sends here) - music note icon.
 #if !TARGET_PC
             lv_label_set_text(icon_label, ICON_MUSIC_NOTE);
 #else

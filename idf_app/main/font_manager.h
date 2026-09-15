@@ -69,6 +69,8 @@ const lv_font_t *font_manager_get_lucide_battery(void);
 
 // Music/audio
 #define ICON_MUSIC_NOTE     "\xEE\x90\x85"  // U+E405
+#define ICON_ALBUM          "\xEE\x80\x99"  // U+E019 (vinyl record)
+#define ICON_TV             "\xEE\x8C\xB3"  // U+E333
 
 // Settings/system
 #define ICON_SETTINGS       "\xEE\xA2\xB8"  // U+E8B8
