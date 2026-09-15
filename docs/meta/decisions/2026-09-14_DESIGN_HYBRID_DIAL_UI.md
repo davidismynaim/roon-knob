@@ -214,6 +214,77 @@ Shared layout, differing only in background image and label text.
   mutates Roon zone selection on pick — this needs a parallel code path for
   the HA input-select case rather than reuse of that function's body.
 
+**Implemented and tested on hardware 2026-09-15.** Built as
+`controller_action_router_set_source_picker_override()` — an opt-in
+open/select hook pair mirroring the volume-override pattern exactly, so
+Frame/RLCD's dynamic Roon zone picker is untouched (NULL on those
+targets). `common/source_picker_client.c` (Dial-only) implements it: a
+static Back/Music/TV/Vinyl/Settings list through the existing
+`controller_presentation_*_zone_picker_*` calls, `common/ha_source_client.c`
+does the one `input_select.select_option` call per pick. Confirmed on
+hardware: all three inputs switch `input_select.audio_input` correctly,
+Back/Settings both still work, and the picker highlights the actually-
+active input (not just whatever was last picked from the dial itself) —
+see the input-tracking note below. TV/Vinyl icons (Material Icons album
+U+E019, tv U+E333 — verified by rendering the actual vendored TTF before
+committing to the codepoints, not guessed) replace the shared music-note
+icon for those two entries; regenerating the bitmap icon font needed
+`lv_font_conv` (installed locally, not system-wide) and the real
+`MaterialIcons-Regular.ttf` already vendored in `idf_app/spiffs_data/`.
+
+Settings sentinel kept in the reused picker list (owner's direction),
+in addition to the existing direct long-press-zone-label-to-Settings
+gesture. Selecting TV/Vinyl returns to the current Now Playing layout
+unchanged for now (owner's direction) — the distinct TV/Vinyl screens
+are their own later slice.
+
+**Input-state tracking (owner-flagged gap, closed same slice).** The
+picker only *wrote* `input_select.audio_input` at first — a source
+switch made from Harmony, the HA dashboard, or voice would have been
+invisible to the dial, mattering once the TV/Vinyl screens need to know
+which to show. `ha_volume_client`'s existing poll task (already polling
+`number.hifi_volume` every 2s with the network-ready gate) now also
+fetches `input_select.audio_input` each cycle — one more small GET on an
+existing task rather than a second task+stack — cached behind
+`ha_volume_client_get_current_source()`. Confirmed on hardware: switching
+input from the dial, then changing it again from the HA dashboard,
+correctly updates the picker's highlight within one poll cycle.
+Volume itself never had this problem — `number.hifi_volume` already
+derives from whichever input's helper is selected, so the existing poll
+reflects a cross-device input change automatically.
+
+**Follow-up fixes from owner review, same slice (2026-09-15):**
+
+- On-device picker header still read "SELECT ZONE" (left over from
+  showing live Roon zones) — changed to "INPUT SOURCE".
+- The config web page's "Roon Zone" field only showed the raw
+  `roon:...` id, with no practical way to type one. Changed from a text
+  input to a `<select>` populated from `bridge_client_get_zones()` (the
+  same target-neutral zone API `frame_app/main/captive_portal.c` already
+  uses for its own zone UI) — pick a zone by name, not by id. The
+  currently-configured zone always gets an option even if the live list
+  didn't return it, so the current selection is never silently dropped.
+- The hint text's em dash rendered as mojibake (`â€"`) in the browser —
+  every `text/html` response in `config_server.c` was missing
+  `charset=utf-8`, so the browser guessed the wrong encoding for
+  otherwise-valid UTF-8 bytes. Fixed the charset on every response, and
+  switched that dash to `&mdash;` as a second, charset-independent
+  safety net.
+- **Real bug, found immediately after shipping the dropdown: a stack
+  overflow crashed the whole chip on every config-page load**, which
+  looked like "page won't load" plus "WiFi has to reconnect" from the
+  outside (a full reboot drops the WiFi connection, then reconnects on
+  the next boot). Root cause: `config_get_handler`'s local buffers — the
+  new 16-entry zone array, the new 3072-byte rendered `<option>` string,
+  plus the pre-existing 1024-byte `wifi_html` — together overran the
+  HTTP server task's 8KB stack (`config.stack_size = 8192`). Fixed by
+  moving all three to PSRAM-backed heap allocations
+  (`heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`),
+  matching the pattern the `html` buffer in the same function already
+  used, freed on every exit path. Confirmed on hardware: config page
+  loads reliably now, no reboot, dropdown/zone-name/charset fixes all
+  working.
+
 ## Long-press-by-region gesture system (new, not a reuse)
 
 Investigation confirmed **no existing per-region touch long-press
