@@ -119,9 +119,12 @@ static const char *HTML_CONFIG =
     "</form>"
     "<form method='POST' action='/zone-config'>"
     "<h2>Roon Zone (advanced)</h2>"
-    "<label>Zone ID</label>"
+    "<div class='current'>"
+    "<strong>Current zone:</strong> %s"
+    "</div>"
+    "<label>Zone ID (override)</label>"
     "<input type='text' name='zone_id' maxlength='63' placeholder='roon:...' value='%s'>"
-    "<p class='hint'>Locked to this one zone — there's no on-device zone picker. Only needed if the dial ever connects to the wrong zone; leave as-is otherwise.</p>"
+    "<p class='hint'>Locked to this one zone &mdash; there's no on-device zone picker. Only needed if the dial ever connects to the wrong zone; leave as-is otherwise.</p>"
     "<input type='submit' value='Save'>"
     "</form></body></html>";
 
@@ -340,6 +343,24 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     const char *ha_token_placeholder =
         ha_cfg.token[0] ? "(unchanged)" : "Paste token here";
 
+    // Resolve the current zone_id to its friendly name (e.g. "Lounge")
+    // for display - the same zones the bridge already reports, just
+    // matched by id rather than rendered as an on-device picker list.
+    char zone_name[64] = {0};
+    bridge_zone_t zones[16];
+    int zone_count = bridge_client_get_zones(zones, 16);
+    for (int i = 0; i < zone_count; i++) {
+        if (strcmp(zones[i].id, cfg->zone_id) == 0) {
+            rk_strlcpy(zone_name, zones[i].name, sizeof(zone_name));
+            break;
+        }
+    }
+    if (!zone_name[0]) {
+        rk_strlcpy(zone_name,
+                  cfg->zone_id[0] ? cfg->zone_id : "(not connected yet)",
+                  sizeof(zone_name));
+    }
+
     // Build HTML with current values, saved networks, and bridge status.
     char *html = heap_caps_malloc(6144,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -350,9 +371,10 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
 
     snprintf(html, 6144, HTML_CONFIG, current, status_class, status_text,
              wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
+             zone_name,
              cfg->zone_id);
 
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
     free(html);
     return ESP_OK;
@@ -423,7 +445,7 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     }
 
     snprintf(html, 1024, HTML_SUCCESS, message);
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
     free(html);
 
@@ -481,7 +503,7 @@ static esp_err_t ha_config_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     snprintf(html, 1024, HTML_SUCCESS, "Home Assistant settings saved!");
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
     free(html);
 
@@ -527,7 +549,7 @@ static esp_err_t zone_config_post_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     snprintf(html, 1024, HTML_SUCCESS, "Zone saved!");
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
     free(html);
 
