@@ -32,6 +32,11 @@ static int16_t s_touch_start_x = 0;
 static int16_t s_touch_start_y = 0;
 static int64_t s_touch_start_time = 0;
 static bool s_touch_tracking = false;
+// Keeps widget touches (taps, long-presses) suppressed across any wake for
+// as long as contact is continuously held, rather than for a fixed window -
+// see the comment in lvgl_touch_read_cb() below for why the fixed window
+// alone isn't enough.
+static bool s_suppress_until_release = false;
 static volatile bool s_pending_art_mode = false;   // Deferred art mode activation
 static volatile bool s_pending_exit_art_mode = false;  // Deferred art mode exit
 static uint16_t s_current_rotation = 0;  // Track rotation for swipe direction transform
@@ -371,13 +376,43 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
             data->point.x = x;
             data->point.y = y;
             data->state = LV_INDEV_STATE_RELEASED;
+            s_suppress_until_release = true;
             return;  // Swipe tracking continues, but widget interaction suppressed
         }
 
-        // Display already awake - check if touches suppressed after recent wake
+        // Display already awake - check if touches suppressed after recent wake.
+        // This also covers a wake triggered by something other than touch (the
+        // rotary encoder): display_wake() arms the same 250ms window
+        // unconditionally, since a touch can be in progress concurrently with an
+        // encoder-triggered wake on this hardware - the encoder knob sits right
+        // on/around the touch surface, so turning it can rest a finger on the
+        // screen for the whole gesture. A quick tap-to-wake naturally releases
+        // well inside 250ms; physically rotating the knob to wake it does not -
+        // it can easily hold contact for a second or more.
         if (display_is_touch_suppressed()) {
             // Within 250ms after wake - suppress widget touches but track for swipes
             data->point.x = x;  // Update coordinates for swipe detection
+            data->point.y = y;
+            data->state = LV_INDEV_STATE_RELEASED;
+            s_suppress_until_release = true;
+            return;
+        }
+
+        // The 250ms window can expire while the SAME touch that was present at
+        // wake is still held down (e.g. still turning the encoder). Without
+        // this check, the next read here would report a fresh PRESSED to LVGL,
+        // which starts a new long-press timer from that moment - if the
+        // encoder rotation (and the finger resting near the top of the screen)
+        // continues past LVGL's long-press threshold, that fires whatever
+        // gesture is bound to wherever the finger happens to be (e.g. mute,
+        // from the top-third long-press region). This was investigated as a
+        // candidate cause for a mute-on-wake report that turned out to be an
+        // unrelated Home Assistant mute-state desync, not this - but the
+        // underlying race is still real, so keep suppressing until an actual
+        // release is seen (the else branch below), not just until the timer
+        // runs out.
+        if (s_suppress_until_release) {
+            data->point.x = x;
             data->point.y = y;
             data->state = LV_INDEV_STATE_RELEASED;
             return;
@@ -390,6 +425,7 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
+        s_suppress_until_release = false;
 
         // Check for swipe gesture on release
         if (s_touch_tracking) {
