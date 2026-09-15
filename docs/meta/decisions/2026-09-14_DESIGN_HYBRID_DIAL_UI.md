@@ -214,6 +214,45 @@ Shared layout, differing only in background image and label text.
   mutates Roon zone selection on pick — this needs a parallel code path for
   the HA input-select case rather than reuse of that function's body.
 
+**Implemented and tested on hardware 2026-09-15.** Built as
+`controller_action_router_set_source_picker_override()` — an opt-in
+open/select hook pair mirroring the volume-override pattern exactly, so
+Frame/RLCD's dynamic Roon zone picker is untouched (NULL on those
+targets). `common/source_picker_client.c` (Dial-only) implements it: a
+static Back/Music/TV/Vinyl/Settings list through the existing
+`controller_presentation_*_zone_picker_*` calls, `common/ha_source_client.c`
+does the one `input_select.select_option` call per pick. Confirmed on
+hardware: all three inputs switch `input_select.audio_input` correctly,
+Back/Settings both still work, and the picker highlights the actually-
+active input (not just whatever was last picked from the dial itself) —
+see the input-tracking note below. TV/Vinyl icons (Material Icons album
+U+E019, tv U+E333 — verified by rendering the actual vendored TTF before
+committing to the codepoints, not guessed) replace the shared music-note
+icon for those two entries; regenerating the bitmap icon font needed
+`lv_font_conv` (installed locally, not system-wide) and the real
+`MaterialIcons-Regular.ttf` already vendored in `idf_app/spiffs_data/`.
+
+Settings sentinel kept in the reused picker list (owner's direction),
+in addition to the existing direct long-press-zone-label-to-Settings
+gesture. Selecting TV/Vinyl returns to the current Now Playing layout
+unchanged for now (owner's direction) — the distinct TV/Vinyl screens
+are their own later slice.
+
+**Input-state tracking (owner-flagged gap, closed same slice).** The
+picker only *wrote* `input_select.audio_input` at first — a source
+switch made from Harmony, the HA dashboard, or voice would have been
+invisible to the dial, mattering once the TV/Vinyl screens need to know
+which to show. `ha_volume_client`'s existing poll task (already polling
+`number.hifi_volume` every 2s with the network-ready gate) now also
+fetches `input_select.audio_input` each cycle — one more small GET on an
+existing task rather than a second task+stack — cached behind
+`ha_volume_client_get_current_source()`. Confirmed on hardware: switching
+input from the dial, then changing it again from the HA dashboard,
+correctly updates the picker's highlight within one poll cycle.
+Volume itself never had this problem — `number.hifi_volume` already
+derives from whichever input's helper is selected, so the existing poll
+reflects a cross-device input change automatically.
+
 ## Long-press-by-region gesture system (new, not a reuse)
 
 Investigation confirmed **no existing per-region touch long-press
