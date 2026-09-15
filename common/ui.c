@@ -879,7 +879,7 @@ void ui_show_zone_picker(const char **zone_names, const char **zone_ids, int cou
 
     // Title at top
     lv_obj_t *title = lv_label_create(s_zone_picker_overlay);
-    lv_label_set_text(title, "SELECT ZONE");
+    lv_label_set_text(title, "INPUT SOURCE");
     lv_obj_set_style_text_font(title, font_normal(), 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xfafafa), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);

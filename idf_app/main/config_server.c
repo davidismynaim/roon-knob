@@ -48,7 +48,8 @@ static esp_err_t send_conflict(httpd_req_t *req, const char *message) {
 }
 
 // HTML page for config
-// Format args: current_bridge, status_class, status_text, wifi_html, bridge_value
+// Format args: current_bridge, status_class, status_text, wifi_html,
+// bridge_value, ha_host, ha_token_placeholder, zone_options
 static const char *HTML_CONFIG =
     "<!DOCTYPE html>"
     "<html><head>"
@@ -61,7 +62,7 @@ static const char *HTML_CONFIG =
     ".info{color:#888;margin:10px 0;}"
     "form{background:#16213e;padding:20px;border-radius:10px;max-width:400px;}"
     "label{display:block;margin:15px 0 5px;color:#aaa;}"
-    "input[type=text],input[type=url],input[type=password]{width:100%%;padding:10px;border:1px solid #333;border-radius:5px;background:#0f0f1a;color:#fff;box-sizing:border-box;}"
+    "input[type=text],input[type=url],input[type=password],select{width:100%%;padding:10px;border:1px solid #333;border-radius:5px;background:#0f0f1a;color:#fff;box-sizing:border-box;}"
     "input[type=submit]{padding:12px 24px;margin-top:20px;background:#4fc3f7;color:#000;border:none;border-radius:5px;font-weight:bold;cursor:pointer;}"
     "input[type=submit]:hover{background:#29b6f6;}"
     ".btn-clear{background:#ff7043;}"
@@ -118,13 +119,10 @@ static const char *HTML_CONFIG =
     "<input type='submit' value='Save'>"
     "</form>"
     "<form method='POST' action='/zone-config'>"
-    "<h2>Roon Zone (advanced)</h2>"
-    "<div class='current'>"
-    "<strong>Current zone:</strong> %s"
-    "</div>"
-    "<label>Zone ID (override)</label>"
-    "<input type='text' name='zone_id' maxlength='63' placeholder='roon:...' value='%s'>"
-    "<p class='hint'>Locked to this one zone &mdash; there's no on-device zone picker. Only needed if the dial ever connects to the wrong zone; leave as-is otherwise.</p>"
+    "<h2>Roon Zone</h2>"
+    "<label>Zone</label>"
+    "<select name='zone_id'>%s</select>"
+    "<p class='hint'>Locked to this one zone &mdash; there's no on-device zone picker. Pick a different zone here if the dial is ever connected to the wrong one. If your zone isn't listed, the bridge may be unreachable right now &mdash; reload this page once it's back.</p>"
     "<input type='submit' value='Save'>"
     "</form></body></html>";
 
@@ -343,36 +341,66 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     const char *ha_token_placeholder =
         ha_cfg.token[0] ? "(unchanged)" : "Paste token here";
 
-    // Resolve the current zone_id to its friendly name (e.g. "Lounge")
-    // for display - the same zones the bridge already reports, just
-    // matched by id rather than rendered as an on-device picker list.
-    char zone_name[64] = {0};
+    // Build the zone <option> list from the bridge's live zone list - the
+    // same target-neutral zone API frame_app/main/captive_portal.c already
+    // uses for its own zone UI. The currently-configured zone_id always
+    // gets an option first, even if the live list didn't return it (e.g.
+    // the bridge is briefly unreachable), so the current selection is
+    // never silently lost or left unselected.
     bridge_zone_t zones[16];
     int zone_count = bridge_client_get_zones(zones, 16);
-    for (int i = 0; i < zone_count; i++) {
-        if (strcmp(zones[i].id, cfg->zone_id) == 0) {
-            rk_strlcpy(zone_name, zones[i].name, sizeof(zone_name));
-            break;
+    char zone_options[3072] = "";
+    size_t zone_opt_pos = 0;
+    {
+        char escaped_id[192];
+        char escaped_name[128];
+        html_escape(cfg->zone_id, escaped_id, sizeof(escaped_id));
+        const char *current_name = cfg->zone_id[0] ? cfg->zone_id
+                                                    : "(not connected yet)";
+        for (int i = 0; i < zone_count; i++) {
+            if (strcmp(zones[i].id, cfg->zone_id) == 0) {
+                current_name = zones[i].name;
+                break;
+            }
         }
-    }
-    if (!zone_name[0]) {
-        rk_strlcpy(zone_name,
-                  cfg->zone_id[0] ? cfg->zone_id : "(not connected yet)",
-                  sizeof(zone_name));
+        html_escape(current_name, escaped_name, sizeof(escaped_name));
+        int written = snprintf(zone_options + zone_opt_pos,
+                               sizeof(zone_options) - zone_opt_pos,
+                               "<option value='%s' selected>%s</option>",
+                               escaped_id, escaped_name);
+        if (written > 0 && (size_t)written < sizeof(zone_options) - zone_opt_pos) {
+            zone_opt_pos += (size_t)written;
+        }
+
+        for (int i = 0; i < zone_count; i++) {
+            if (strcmp(zones[i].id, cfg->zone_id) == 0) {
+                continue;  // already listed above as the current selection
+            }
+            html_escape(zones[i].id, escaped_id, sizeof(escaped_id));
+            html_escape(zones[i].name, escaped_name, sizeof(escaped_name));
+            written = snprintf(zone_options + zone_opt_pos,
+                               sizeof(zone_options) - zone_opt_pos,
+                               "<option value='%s'>%s</option>", escaped_id,
+                               escaped_name);
+            if (written < 0 ||
+                (size_t)written >= sizeof(zone_options) - zone_opt_pos) {
+                break;
+            }
+            zone_opt_pos += (size_t)written;
+        }
     }
 
     // Build HTML with current values, saved networks, and bridge status.
-    char *html = heap_caps_malloc(6144,
+    char *html = heap_caps_malloc(8192,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!html) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
 
-    snprintf(html, 6144, HTML_CONFIG, current, status_class, status_text,
+    snprintf(html, 8192, HTML_CONFIG, current, status_class, status_text,
              wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
-             zone_name,
-             cfg->zone_id);
+             zone_options);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
