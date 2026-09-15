@@ -22,6 +22,13 @@ void controller_presentation_set_zone_name(const char *zone_name);
 void controller_presentation_set_network_status(const char *status);  // NULL clears the banner
 void controller_presentation_set_artwork(const char *image_key);
 void controller_presentation_show_volume_change(float volume, float volume_step);
+/* Independent volume-only refresh (min/max included), for a backend that
+ * updates volume on its own cadence rather than as part of a full
+ * controller_presentation_update. Unused unless a target registers such a
+ * backend (see controller_action_router_set_volume_override). */
+void controller_presentation_set_volume_range(float volume, float volume_min,
+                                              float volume_max,
+                                              float volume_step);
 void controller_presentation_update_battery(void);
 
 void controller_presentation_show_zone_picker(const char **zone_names, const char **zone_ids,

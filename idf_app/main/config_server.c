@@ -5,6 +5,7 @@
 #include "controller_config.h"
 #include "http_server_lifecycle.h"
 #include "platform/platform_mdns.h"
+#include "platform/platform_storage.h"
 #include "bridge_client.h"
 #include "rk_ble_hid_host.h"
 #include "wifi_manager.h"
@@ -106,6 +107,15 @@ static const char *HTML_CONFIG =
     "<p class='hint'>Leave empty for mDNS auto-discovery. Check the HiPhi Dial display for connection progress.</p>"
     "<input type='submit' value='Save'>"
     "<input type='submit' name='action' value='Clear' class='btn-clear' formnovalidate>"
+    "</form>"
+    "<form method='POST' action='/ha-config'>"
+    "<h2>Home Assistant (Nexus Volume)</h2>"
+    "<label>HA Host:Port</label>"
+    "<input type='text' name='ha_host' maxlength='63' placeholder='192.168.1.x:8123' value='%s'>"
+    "<label>Long-Lived Access Token</label>"
+    "<input type='password' name='ha_token' maxlength='255' placeholder='%s'>"
+    "<p class='hint'>Controls Nexus volume directly via Home Assistant, bypassing Roon. Leave the token blank to keep the one already saved.</p>"
+    "<input type='submit' value='Save'>"
     "</form></body></html>";
 
 static const char *HTML_SUCCESS =
@@ -318,6 +328,11 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
                  "<div class='wifi-entry'><em>No saved networks</em></div>");
     }
 
+    rk_ha_cfg_t ha_cfg = {0};
+    platform_storage_read_ha(&ha_cfg);
+    const char *ha_token_placeholder =
+        ha_cfg.token[0] ? "(unchanged)" : "Paste token here";
+
     // Build HTML with current values, saved networks, and bridge status.
     char *html = heap_caps_malloc(4096,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -327,7 +342,7 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     }
 
     snprintf(html, 4096, HTML_CONFIG, current, status_class, status_text,
-             wifi_html, cfg->bridge_base);
+             wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, strlen(html));
@@ -406,6 +421,63 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
 
     // Reboot to apply new config
     ESP_LOGI(TAG, "Config saved, rebooting in 1 second...");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+// Handler for POST /ha-config - save Home Assistant volume-backend settings
+// (direct Nexus volume control; see
+// docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md).
+static esp_err_t ha_config_post_handler(httpd_req_t *req) {
+    char buf[512] = {0};
+    int received = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (received <= 0) {
+        ESP_LOGE(TAG, "Failed to receive POST data");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
+        return ESP_FAIL;
+    }
+    buf[received] = '\0';
+
+    rk_ha_cfg_t cfg = {0};
+    platform_storage_read_ha(&cfg);  // start from saved token so a blank field keeps it
+
+    char host[64] = {0};
+    get_form_field(buf, "ha_host", host, sizeof(host));
+    const char *host_value = host;
+    if (strncmp(host_value, "http://", 7) == 0) {
+        host_value += 7;
+    } else if (strncmp(host_value, "https://", 8) == 0) {
+        host_value += 8;
+    }
+    rk_strlcpy(cfg.host, host_value, sizeof(cfg.host));
+
+    char token[256] = {0};
+    get_form_field(buf, "ha_token", token, sizeof(token));
+    if (token[0]) {
+        rk_strlcpy(cfg.token, token, sizeof(cfg.token));
+    }
+    cfg.cfg_ver = RK_HA_CFG_CURRENT_VER;
+
+    if (!platform_storage_write_ha(&cfg)) {
+        ESP_LOGE(TAG, "Failed to save HA config");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+
+    char *html = heap_caps_malloc(1024,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!html) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    snprintf(html, 1024, HTML_SUCCESS, "Home Assistant settings saved!");
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html, strlen(html));
+    free(html);
+
+    ESP_LOGI(TAG, "HA config saved, rebooting in 1 second...");
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
 
@@ -871,6 +943,13 @@ void config_server_start(void) {
         .handler = config_post_handler,
     };
     httpd_register_uri_handler(s_server, &config_post);
+
+    httpd_uri_t ha_config_post = {
+        .uri = "/ha-config",
+        .method = HTTP_POST,
+        .handler = ha_config_post_handler,
+    };
+    httpd_register_uri_handler(s_server, &ha_config_post);
 
     httpd_uri_t wifi_add = {
         .uri = "/wifi-add",

@@ -11,7 +11,9 @@
 #include "platform/platform_time.h"
 #include "platform_display_idf.h"
 #include "bridge_client.h"
+#include "controller_action_router.h"
 #include "controller_config.h"
+#include "ha_volume_client.h"
 #include "ui.h"
 #include "ui_network.h"
 #include "wifi_manager.h"
@@ -181,6 +183,7 @@ void rk_net_evt_cb(rk_net_evt_t evt, const char *ip_opt) {
         ui_update("WiFi: Connected", "", false, 0.0f, 0.0f, 100.0f, 1.0f, 0, 0);
         bridge_client_set_device_ip(ip_opt);  // Store IP for bridge recovery messages
         bridge_client_set_network_ready(true);
+        ha_volume_client_set_network_ready(true);
         // Defer heavy operations to UI task (sys_evt has limited stack)
         s_mdns_init_pending = true;  // mDNS needs network up first
         s_ota_check_pending = true;
@@ -200,6 +203,7 @@ void rk_net_evt_cb(rk_net_evt_t evt, const char *ip_opt) {
         ESP_LOGW(TAG, "WiFi: %s, attempt %d/%d", error, attempt, max);
         start_wifi_msg_alternation(error, attempt, max);
         bridge_client_set_network_ready(false);
+        ha_volume_client_set_network_ready(false);
         break;
     }
 
@@ -210,6 +214,7 @@ void rk_net_evt_cb(rk_net_evt_t evt, const char *ip_opt) {
         ui_update("hiphi-dial-setup", "Connect to WiFi:", false, 0.0f, 0.0f, 100.0f, 1.0f, 0, 0);
         ui_set_zone_name("WiFi Setup");
         bridge_client_set_network_ready(false);
+        ha_volume_client_set_network_ready(false);
         atomic_store_explicit(&s_config_server_start_pending, false,
                               memory_order_release);
         atomic_store_explicit(&s_config_server_stop_pending, true,
@@ -455,6 +460,12 @@ void app_main(void) {
     ESP_LOGI(TAG, "Starting app...");
     app_entry();
     log_memory("after bridge worker start");
+
+    // Direct-to-Home-Assistant volume backend (Dial-only; see
+    // docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md). No-ops if
+    // host/token aren't configured yet via the device's config page.
+    controller_action_router_set_volume_override(ha_volume_client_adjust);
+    ha_volume_client_init();
     show_config_durability_diagnostic();
 
     // Start WiFi AFTER UI task is running (WiFi event callbacks use lv_async_call)

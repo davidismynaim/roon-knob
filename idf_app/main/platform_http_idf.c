@@ -33,6 +33,7 @@ static const char* get_knob_version(void) {
 
 static int http_perform(const char *url, const char *body,
                         const char *content_type, size_t max_response_bytes,
+                        const char *bearer_token,
                         char **out, size_t *out_len) {
     if (!url || !out || max_response_bytes == 0 ||
         max_response_bytes == SIZE_MAX) {
@@ -68,6 +69,12 @@ static int http_perform(const char *url, const char *body,
     get_knob_id(knob_id, sizeof(knob_id));
     esp_http_client_set_header(client, "X-Knob-Id", knob_id);
     esp_http_client_set_header(client, "X-Knob-Version", get_knob_version());
+
+    char auth_header[300];
+    if (bearer_token && bearer_token[0]) {
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s", bearer_token);
+        esp_http_client_set_header(client, "Authorization", auth_header);
+    }
 
     // Open connection
     esp_err_t err = esp_http_client_open(client, body ? strlen(body) : 0);
@@ -191,12 +198,25 @@ int platform_http_get(const char *url, char **out, size_t *out_len) {
 
 int platform_http_get_bounded(const char *url, size_t max_bytes,
                               char **out, size_t *out_len) {
-    return http_perform(url, NULL, NULL, max_bytes, out, out_len);
+    return http_perform(url, NULL, NULL, max_bytes, NULL, out, out_len);
 }
 
 int platform_http_post_json(const char *url, const char *json, char **out, size_t *out_len) {
     return http_perform(url, json, "application/json",
-                        PLATFORM_HTTP_JSON_MAX_BYTES, out, out_len);
+                        PLATFORM_HTTP_JSON_MAX_BYTES, NULL, out, out_len);
+}
+
+int platform_http_get_auth(const char *url, const char *bearer_token,
+                           char **out, size_t *out_len) {
+    return http_perform(url, NULL, NULL, PLATFORM_HTTP_JSON_MAX_BYTES,
+                        bearer_token, out, out_len);
+}
+
+int platform_http_post_auth(const char *url, const char *bearer_token,
+                            const char *json, char **out, size_t *out_len) {
+    return http_perform(url, json, "application/json",
+                        PLATFORM_HTTP_JSON_MAX_BYTES, bearer_token, out,
+                        out_len);
 }
 
 void platform_http_free(char *p) {

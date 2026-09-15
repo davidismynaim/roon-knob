@@ -4,6 +4,7 @@
 
 #include "controller_presentation.h"
 #include "controller_config.h"
+#include "ha_volume_client.h"
 #include "ui.h"
 
 static const char *config_durability_warning(void) {
@@ -25,6 +26,15 @@ void controller_presentation_update(const char *line1, const char *line2, const 
                                      float volume_max, float volume_step,
                                      int seek_position, int length) {
     (void)line3;
+    /* Volume/source are controlled directly via Home Assistant when
+     * configured (see docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md);
+     * substitute the HA-sourced 0-255 position value for whatever Roon/UHC
+     * reported (irrelevant for a Fixed Volume zone) rather than letting the
+     * two fight over the display on every poll. */
+    if (ha_volume_client_is_active()) {
+        ha_volume_client_get_display(&volume, &volume_min, &volume_max,
+                                     &volume_step);
+    }
     ui_update(line1, line2, playing, volume, volume_min, volume_max, volume_step, seek_position, length);
 }
 
@@ -51,6 +61,12 @@ void controller_presentation_set_artwork(const char *image_key) {
 
 void controller_presentation_show_volume_change(float volume, float volume_step) {
     ui_show_volume_change(volume, volume_step);
+}
+
+void controller_presentation_set_volume_range(float volume, float volume_min,
+                                              float volume_max,
+                                              float volume_step) {
+    ui_set_volume_with_range(volume, volume_min, volume_max, volume_step);
 }
 
 void controller_presentation_update_battery(void) {

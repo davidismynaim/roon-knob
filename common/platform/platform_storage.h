@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rk_cfg.h"
+#include "rk_ha_cfg.h"
 
 #include <stdbool.h>
 
@@ -41,3 +42,11 @@ bool platform_storage_read(rk_cfg_t *out,
 platform_storage_write_result_t platform_storage_write(const rk_cfg_t *in);
 
 void platform_storage_defaults(rk_cfg_t *out);
+
+/*
+ * Home Assistant volume-backend config. Independent blob, no V1/V2/V3
+ * migration ceremony: reads that don't match the current schema exactly
+ * come back as defaults (unconfigured), same as first boot.
+ */
+bool platform_storage_read_ha(rk_ha_cfg_t *out);
+bool platform_storage_write_ha(const rk_ha_cfg_t *in);

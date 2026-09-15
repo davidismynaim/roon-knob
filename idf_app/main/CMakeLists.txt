@@ -33,6 +33,7 @@ set(SRC_FILES
     "../../common/bridge_command_plan.c"
     "../../common/bridge_client.c"
     "../../common/controller_action_router.c"
+    "../../common/ha_volume_client.c"
     "../../common/controller_config.c"
     "../../common/controller_ble_input.c"
     "../../common/controller_input.c"
