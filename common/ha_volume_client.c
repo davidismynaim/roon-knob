@@ -53,6 +53,17 @@ static bool s_network_ready;
 static int s_position;       // last-known volume, 0-255 position scale
 static bool s_have_position;  // true once a poll has succeeded at least once
 
+/* input_select.audio_input's current value ("Music"/"TV"/"Vinyl"), polled
+ * in the same cycle as volume below rather than via a second task+stack -
+ * same host/token/network-ready gate either way, and this is a single
+ * tiny GET. Lets the dial reflect a source switch made from anywhere
+ * (Harmony, the HA dashboard, voice), not just its own picker - needed
+ * for the picker's own highlight now, and for choosing which screen to
+ * show once the TV/Vinyl screens exist (a later slice). */
+#define HA_CURRENT_SOURCE_MAX 16
+static char s_current_source[HA_CURRENT_SOURCE_MAX];
+static bool s_have_source;
+
 static int32_t s_pending_ticks;    // accumulated, not-yet-sent raw ticks
 static uint64_t s_last_tick_ms;    // when a tick last landed in the burst
 
@@ -103,6 +114,26 @@ static int get_cached_position(void) {
     return position;
 }
 
+static void set_cached_source(const char *source) {
+    os_mutex_lock(&s_lock);
+    rk_strlcpy(s_current_source, source, sizeof(s_current_source));
+    s_have_source = true;
+    os_mutex_unlock(&s_lock);
+}
+
+bool ha_volume_client_get_current_source(char *out, size_t len) {
+    if (!out || len == 0) {
+        return false;
+    }
+    os_mutex_lock(&s_lock);
+    bool have = s_have_source;
+    if (have) {
+        rk_strlcpy(out, s_current_source, len);
+    }
+    os_mutex_unlock(&s_lock);
+    return have;
+}
+
 static bool poll_once(const rk_ha_cfg_t *cfg) {
     char url[128];
     snprintf(url, sizeof(url), "http://%s/api/states/number.hifi_volume",
@@ -139,6 +170,35 @@ static bool poll_once(const rk_ha_cfg_t *cfg) {
     return ok;
 }
 
+static bool poll_source_once(const rk_ha_cfg_t *cfg) {
+    char url[128];
+    snprintf(url, sizeof(url),
+             "http://%s/api/states/input_select.audio_input", cfg->host);
+
+    char *resp = NULL;
+    size_t resp_len = 0;
+    int ret = platform_http_get_auth(url, cfg->token, &resp, &resp_len);
+    if (ret != 0 || !resp) {
+        platform_http_free(resp);
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(resp);
+    platform_http_free(resp);
+    if (!root) {
+        return false;
+    }
+
+    cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    bool ok = false;
+    if (cJSON_IsString(state) && state->valuestring) {
+        set_cached_source(state->valuestring);
+        ok = true;
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
 static void poll_task(void *arg) {
     (void)arg;
     while (true) {
@@ -146,6 +206,9 @@ static void poll_task(void *arg) {
         if (snapshot_cfg(&cfg)) {
             if (!poll_once(&cfg)) {
                 LOGW("HA volume poll failed (host='%s')", cfg.host);
+            }
+            if (!poll_source_once(&cfg)) {
+                LOGW("HA source poll failed (host='%s')", cfg.host);
             }
         }
         platform_sleep_ms(HA_VOLUME_POLL_INTERVAL_MS);

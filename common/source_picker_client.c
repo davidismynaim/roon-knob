@@ -3,6 +3,7 @@
 #include "controller_input.h"
 #include "controller_presentation.h"
 #include "ha_source_client.h"
+#include "ha_volume_client.h"
 
 #include <string.h>
 
@@ -15,12 +16,25 @@ static const char *s_ids[] = {SOURCE_ID_BACK, "Music", "TV", "Vinyl",
 #define SOURCE_COUNT 5
 
 bool source_picker_open(void) {
-    /* Not yet tracking which input is actually active (that would need
-     * its own HA poll, like ha_volume_client's for volume) - always
-     * highlights Back rather than guessing at Music/TV/Vinyl. Revisit if
-     * that's confusing in practice once the TV/Vinyl screens land. */
+    /* Reflects whatever ha_volume_client last polled for
+     * input_select.audio_input - which may have been changed from
+     * Harmony, the HA dashboard, or voice, not just this picker - so the
+     * highlight is only ever stale by up to one poll interval, not
+     * permanently wrong. Falls back to Back (index 0) if never
+     * successfully polled yet or the value doesn't match one of the
+     * three known options. */
+    int selected = 0;
+    char current[16] = {0};
+    if (ha_volume_client_get_current_source(current, sizeof(current))) {
+        for (int i = 1; i < SOURCE_COUNT - 1; ++i) {
+            if (strcmp(s_ids[i], current) == 0) {
+                selected = i;
+                break;
+            }
+        }
+    }
     controller_presentation_show_zone_picker(s_names, s_ids, SOURCE_COUNT,
-                                             0);
+                                             selected);
     return controller_input_set_context(
         CONTROLLER_INTERACTION_CONTEXT_ZONE_PICKER);
 }
