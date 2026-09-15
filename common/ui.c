@@ -683,13 +683,14 @@ static void build_layout(void) {
     lv_obj_set_style_border_width(s_status_dot, 0, 0);
     lv_obj_align(s_status_dot, LV_ALIGN_TOP_RIGHT, -35, 35);
 
-    // Battery icon - top left, mirroring the status dot. Independent of
-    // the (now removed) zone header: the ADR removes the zone
-    // selector/current-zone display entirely from this screen, but says
-    // nothing about battery status, so this stays as its own small
-    // top-area indicator rather than disappearing along with the header.
+    // Battery icon - top left, mirroring the status dot. A child of
+    // s_artwork_container (not s_ui_container) so it stays visible on
+    // TV/Vinyl too, same reasoning as the volume ring above - owner
+    // feedback that it was missing there (originally missed since the
+    // ADR only discussed it in the context of the Music screen's now-
+    // removed zone header).
 #if !TARGET_PC
-    s_battery_icon = lv_label_create(s_ui_container);
+    s_battery_icon = lv_label_create(s_artwork_container);
     lv_label_set_text(s_battery_icon, ICON_BATTERY_FULL);
     lv_obj_set_style_text_font(s_battery_icon, font_manager_get_lucide_battery(), 0);
     lv_obj_set_style_text_color(s_battery_icon, lv_color_hex(0x888888), 0);
@@ -935,24 +936,36 @@ static void build_tv_vinyl_layout(void) {
     lv_obj_add_event_cb(source_region, source_region_long_press_cb,
                         LV_EVENT_LONG_PRESSED, NULL);
 
-    // Hero volume number - centered, double Music's xlarge size. No halo:
-    // the background photo is dark by design (owner direction), unlike
-    // variable-brightness album art, so the legibility problem the halo
-    // solves for Music doesn't exist here.
-    s_tv_vinyl_volume_label = lv_label_create(s_tv_vinyl_container);
-    lv_obj_set_style_text_font(s_tv_vinyl_volume_label, font_xxlarge(), 0);
-    lv_obj_set_style_text_color(s_tv_vinyl_volume_label, lv_color_hex(0xfafafa), 0);
-    lv_label_set_text(s_tv_vinyl_volume_label, "--");
-    lv_obj_center(s_tv_vinyl_volume_label);
+    // dB label + hero volume number, grouped in a content-sized flex
+    // column so the *pair* is centered as one block (owner feedback: with
+    // each positioned independently, the hero number alone was centered
+    // and the dB label above it pushed the combined block off-center).
+    lv_obj_t *volume_group = lv_obj_create(s_tv_vinyl_container);
+    lv_obj_set_size(volume_group, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(volume_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(volume_group, 0, 0);
+    lv_obj_set_style_pad_all(volume_group, 0, 0);
+    lv_obj_set_layout(volume_group, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(volume_group, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(volume_group, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(volume_group, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_center(volume_group);
 
     // dB-equivalent, above the hero number - double font_small's size,
     // same relative "secondary" role as Music's s_volume_db_label.
-    s_tv_vinyl_db_label = lv_label_create(s_tv_vinyl_container);
+    s_tv_vinyl_db_label = lv_label_create(volume_group);
     lv_obj_set_style_text_font(s_tv_vinyl_db_label, font_db_large(), 0);
     lv_obj_set_style_text_color(s_tv_vinyl_db_label, lv_color_hex(0xcccccc), 0);
     lv_label_set_text(s_tv_vinyl_db_label, "-- dB");
-    lv_obj_align_to(s_tv_vinyl_db_label, s_tv_vinyl_volume_label,
-                    LV_ALIGN_OUT_TOP_MID, 0, -10);
+
+    // Hero volume number - double Music's xlarge size. No halo: the
+    // background photo is dark by design (owner direction), unlike
+    // variable-brightness album art, so the legibility problem the halo
+    // solves for Music doesn't exist here.
+    s_tv_vinyl_volume_label = lv_label_create(volume_group);
+    lv_obj_set_style_text_font(s_tv_vinyl_volume_label, font_xxlarge(), 0);
+    lv_obj_set_style_text_color(s_tv_vinyl_volume_label, lv_color_hex(0xfafafa), 0);
+    lv_label_set_text(s_tv_vinyl_volume_label, "--");
 }
 
 // Full-screen mute state (owner direction: same slice as TV/Vinyl, shown
@@ -970,7 +983,18 @@ static void build_mute_overlay(void) {
     lv_obj_set_style_bg_opa(s_mute_overlay, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_mute_overlay, 0, 0);
     lv_obj_set_style_radius(s_mute_overlay, 0, 0);
-    lv_obj_remove_flag(s_mute_overlay, LV_OBJ_FLAG_CLICKABLE);  // Let long-press reach the region beneath to unmute
+    // The whole screen is one long-press target while muted - owner
+    // feedback: no top/bottom split here like the screen underneath has,
+    // since there's only one thing to do on this screen (unmute).
+    // CLICKABLE (unlike s_lower_tint's pass-through) so it captures the
+    // touch itself: the mute/source gesture regions on whichever of
+    // Music/TV/Vinyl is showing underneath aren't reachable at all while
+    // this is up. Unmuting just hides this overlay again - the correct
+    // screen is already there underneath, unchanged, so "return to
+    // whichever screen activated the mute" needs no extra logic.
+    lv_obj_add_flag(s_mute_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_mute_overlay, mute_region_long_press_cb,
+                        LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_add_flag(s_mute_overlay, LV_OBJ_FLAG_HIDDEN);
 
 #if !TARGET_PC
