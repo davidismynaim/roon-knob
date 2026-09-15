@@ -413,17 +413,24 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     const char *ha_token_placeholder =
         ha_cfg.token[0] ? "(unchanged)" : "Paste token here";
 
-    rk_title_filter_cfg_t title_cfg = {0};
-    platform_storage_read_title_filters(&title_cfg);
+    // rk_title_filter_cfg_t is 4KB+ (RK_TITLE_FILTER_PATTERNS_MAX patterns
+    // buffer) - same PSRAM-heap treatment as wifi_html/zones/zone_options
+    // above, not a stack local; this handler's task stack is only 8KB.
+    rk_title_filter_cfg_t *title_cfg =
+        heap_caps_malloc(sizeof(*title_cfg), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     char *escaped_patterns = heap_caps_malloc(6144, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!escaped_patterns) {
+    if (!title_cfg || !escaped_patterns) {
         free(wifi_html);
         free(zones);
         free(zone_options);
+        free(title_cfg);
+        free(escaped_patterns);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
-    html_escape(title_cfg.patterns, escaped_patterns, 6144);
+    platform_storage_read_title_filters(title_cfg);
+    html_escape(title_cfg->patterns, escaped_patterns, 6144);
+    free(title_cfg);
 
     // Build the zone <option> list from the bridge's live zone list - the
     // same target-neutral zone API frame_app/main/captive_portal.c already
@@ -712,14 +719,25 @@ static esp_err_t title_filter_config_post_handler(httpd_req_t *req) {
     }
     buf[received] = '\0';
 
-    rk_title_filter_cfg_t cfg = {0};
-    cfg.cfg_ver = RK_TITLE_FILTER_CFG_CURRENT_VER;
-    if (!get_form_field_big(buf, "patterns", cfg.patterns, sizeof(cfg.patterns))) {
-        cfg.patterns[0] = '\0';
+    // Heap, not a stack local - same 4KB+ sizing concern as
+    // config_get_handler's title_cfg above.
+    rk_title_filter_cfg_t *cfg =
+        heap_caps_malloc(sizeof(*cfg), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!cfg) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->cfg_ver = RK_TITLE_FILTER_CFG_CURRENT_VER;
+    if (!get_form_field_big(buf, "patterns", cfg->patterns, sizeof(cfg->patterns))) {
+        cfg->patterns[0] = '\0';
     }
     free(buf);
 
-    if (!platform_storage_write_title_filters(&cfg)) {
+    bool saved = platform_storage_write_title_filters(cfg);
+    free(cfg);
+    if (!saved) {
         ESP_LOGE(TAG, "Failed to save title filter config");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
         return ESP_FAIL;

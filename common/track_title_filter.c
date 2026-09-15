@@ -6,6 +6,7 @@
 
 #include <ctype.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 // One pattern per configured line; kept short since these are short tag
@@ -51,13 +52,23 @@ static void load_patterns(const char *blob) {
 }
 
 void track_title_filter_init(void) {
-    rk_title_filter_cfg_t cfg;
-    if (!platform_storage_read_title_filters(&cfg)) {
+    // rk_title_filter_cfg_t is 4KB+ (RK_TITLE_FILTER_PATTERNS_MAX patterns
+    // buffer) - heap, not a stack local. This runs deep in app_main()'s
+    // call chain on the main task, whose entire stack is only 8KB; a 4KB+
+    // local here silently overflowed it in practice, corrupting adjacent
+    // memory in a way that only crashed later, elsewhere (WiFi startup).
+    rk_title_filter_cfg_t *cfg = malloc(sizeof(*cfg));
+    if (!cfg) {
+        return;
+    }
+    if (!platform_storage_read_title_filters(cfg)) {
+        free(cfg);
         return;
     }
     os_mutex_lock(&s_lock);
-    load_patterns(cfg.patterns);
+    load_patterns(cfg->patterns);
     os_mutex_unlock(&s_lock);
+    free(cfg);
 }
 
 static bool char_eq_ci(char a, char b) {
