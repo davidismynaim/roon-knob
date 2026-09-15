@@ -15,6 +15,7 @@
 #include "lvgl.h"
 #include "ui.h"
 #include "bridge_client.h"
+#include "track_title_filter.h"
 
 #ifdef ESP_PLATFORM
 #include "esp_log.h"
@@ -1350,6 +1351,10 @@ void ui_set_track(const char *line1, const char *line2) {
     strncpy(s_pending.line2, line2, sizeof(s_pending.line2) - 1);
     s_pending.line1[sizeof(s_pending.line1) - 1] = '\0';
     s_pending.line2[sizeof(s_pending.line2) - 1] = '\0';
+    // Strip streaming-service title noise ("(Remastered 2011)", "(Album
+    // Version)", etc.) - see track_title_filter.c. Track title only
+    // (line1); artist/album (line2) is left untouched.
+    track_title_filter_apply(s_pending.line1, sizeof(s_pending.line1));
     s_dirty = true;
     os_mutex_unlock(&s_state_lock);
 }

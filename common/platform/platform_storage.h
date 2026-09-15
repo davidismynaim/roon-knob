@@ -2,6 +2,7 @@
 
 #include "rk_cfg.h"
 #include "rk_ha_cfg.h"
+#include "rk_title_filter_cfg.h"
 
 #include <stdbool.h>
 
@@ -50,3 +51,10 @@ void platform_storage_defaults(rk_cfg_t *out);
  */
 bool platform_storage_read_ha(rk_ha_cfg_t *out);
 bool platform_storage_write_ha(const rk_ha_cfg_t *in);
+
+/*
+ * Track-title cleanup pattern list (Dial-only). Independent blob, same
+ * no-migration contract as the HA config above.
+ */
+bool platform_storage_read_title_filters(rk_title_filter_cfg_t *out);
+bool platform_storage_write_title_filters(const rk_title_filter_cfg_t *in);

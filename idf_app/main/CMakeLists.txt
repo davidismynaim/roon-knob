@@ -38,6 +38,7 @@ set(SRC_FILES
     "../../common/ha_source_client.c"
     "../../common/ha_mute_client.c"
     "../../common/source_picker_client.c"
+    "../../common/track_title_filter.c"
     "../../common/controller_config.c"
     "../../common/controller_ble_input.c"
     "../../common/controller_input.c"

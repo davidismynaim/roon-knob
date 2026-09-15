@@ -16,6 +16,7 @@
 #include "ha_mute_client.h"
 #include "ha_volume_client.h"
 #include "source_picker_client.h"
+#include "track_title_filter.h"
 #include "ui.h"
 #include "ui_network.h"
 #include "wifi_manager.h"
@@ -457,6 +458,12 @@ void app_main(void) {
     // Initialize display sleep management now that UI task is created
     ESP_LOGI(TAG, "Initializing display sleep management");
     platform_display_init_sleep(g_ui_task_handle);
+
+    // Track-title cleanup (Dial-only): strips streaming-service noise like
+    // "(Remastered 2011)" from the Now Playing track title. Loaded before
+    // app_entry() starts the bridge worker so the very first now-playing
+    // update is already filtered.
+    track_title_filter_init();
 
     // Start application logic
     ESP_LOGI(TAG, "Starting app...");
