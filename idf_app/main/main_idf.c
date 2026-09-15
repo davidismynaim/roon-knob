@@ -13,6 +13,7 @@
 #include "bridge_client.h"
 #include "controller_action_router.h"
 #include "controller_config.h"
+#include "ha_mute_client.h"
 #include "ha_volume_client.h"
 #include "source_picker_client.h"
 #include "ui.h"
@@ -473,6 +474,12 @@ void app_main(void) {
     // docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md).
     controller_action_router_set_source_picker_override(source_picker_open,
                                                         source_picker_select);
+
+    // Long-press-top-third mute gesture (Dial-only; see
+    // docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md). Toggles
+    // input_boolean.audio_mute; the full-screen red mute icon is a
+    // separate, later slice.
+    controller_action_router_set_mute_override(ha_mute_client_toggle);
     show_config_durability_diagnostic();
 
     // Start WiFi AFTER UI task is running (WiFi event callbacks use lv_async_call)

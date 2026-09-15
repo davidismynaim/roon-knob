@@ -33,6 +33,13 @@ void controller_action_router_set_source_picker_override(
     }
 }
 
+static controller_mute_override_fn_t s_mute_override;
+
+void controller_action_router_set_mute_override(
+    controller_mute_override_fn_t fn) {
+    s_mute_override = fn;
+}
+
 static const char *const s_back_name = "Back";
 static const char *const s_back_id = ZONE_ID_BACK;
 static const char *const s_settings_name = "Settings";
@@ -238,6 +245,9 @@ bool controller_action_router_handle(const controller_action_t *action) {
         controller_presentation_show_settings();
         return controller_input_set_context(
             CONTROLLER_INTERACTION_CONTEXT_SETTINGS_RECOVERY);
+
+    case CONTROLLER_ACTION_TOGGLE_MUTE:
+        return s_mute_override && s_mute_override();
 
     case CONTROLLER_ACTION_SYSTEM:
         return false;
