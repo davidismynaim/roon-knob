@@ -253,6 +253,38 @@ Volume itself never had this problem — `number.hifi_volume` already
 derives from whichever input's helper is selected, so the existing poll
 reflects a cross-device input change automatically.
 
+**Follow-up fixes from owner review, same slice (2026-09-15):**
+
+- On-device picker header still read "SELECT ZONE" (left over from
+  showing live Roon zones) — changed to "INPUT SOURCE".
+- The config web page's "Roon Zone" field only showed the raw
+  `roon:...` id, with no practical way to type one. Changed from a text
+  input to a `<select>` populated from `bridge_client_get_zones()` (the
+  same target-neutral zone API `frame_app/main/captive_portal.c` already
+  uses for its own zone UI) — pick a zone by name, not by id. The
+  currently-configured zone always gets an option even if the live list
+  didn't return it, so the current selection is never silently dropped.
+- The hint text's em dash rendered as mojibake (`â€"`) in the browser —
+  every `text/html` response in `config_server.c` was missing
+  `charset=utf-8`, so the browser guessed the wrong encoding for
+  otherwise-valid UTF-8 bytes. Fixed the charset on every response, and
+  switched that dash to `&mdash;` as a second, charset-independent
+  safety net.
+- **Real bug, found immediately after shipping the dropdown: a stack
+  overflow crashed the whole chip on every config-page load**, which
+  looked like "page won't load" plus "WiFi has to reconnect" from the
+  outside (a full reboot drops the WiFi connection, then reconnects on
+  the next boot). Root cause: `config_get_handler`'s local buffers — the
+  new 16-entry zone array, the new 3072-byte rendered `<option>` string,
+  plus the pre-existing 1024-byte `wifi_html` — together overran the
+  HTTP server task's 8KB stack (`config.stack_size = 8192`). Fixed by
+  moving all three to PSRAM-backed heap allocations
+  (`heap_caps_malloc(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`),
+  matching the pattern the `html` buffer in the same function already
+  used, freed on every exit path. Confirmed on hardware: config page
+  loads reliably now, no reboot, dropdown/zone-name/charset fixes all
+  working.
+
 ## Long-press-by-region gesture system (new, not a reuse)
 
 Investigation confirmed **no existing per-region touch long-press
