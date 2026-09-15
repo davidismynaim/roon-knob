@@ -77,30 +77,43 @@ avoided.
   position scale for display: `position = round((db_value + 127.5) * 2)`.
   Unchanged from the original plan — `number.hifi_volume` already tracks
   whichever input (Music/TV/Vinyl) is currently selected.
-- **Write** (for control): **one** `POST http://<ha-host>:8123/api/services/script/audio_voice_volume`
-  per rotation dispatch, body `{"action": "increase"|"decrease", "unit":
-  "clicks", "amount": <magnitude>}` (wiki §27.4/§47.2 — "one click is 0.5
-  dB"). That script resolves the selected input's helper itself, clamps
-  0-255, and writes the target in one `input_number.set_value` — which
+- **Write** (for control): `POST http://<ha-host>:8123/api/services/script/audio_voice_volume`,
+  body `{"action": "increase"|"decrease", "unit": "clicks", "amount":
+  <magnitude>}` (wiki §27.4/§47.2 — "one click is 0.5 dB"). That script
+  resolves the selected input's helper itself, clamps 0-255, and writes
+  the target in one `input_number.set_value` — which
   `Audio - Volume Helper Changed` then turns into one batched IR send, no
   matter how large `amount` is. The dial does not call
   `nexus_volume_up`/`down` at all, and does not need to loop.
 - Roon's Lounge zone is on **Fixed Volume at unity gain** — Roon no longer
   offers any volume interface for this zone, which is fine since nothing
   here depends on Roon's own volume buttons.
-- **Open follow-up, not yet resolved:** the firmware's own encoder
-  acceleration (`resolve_volume_ticks` in `common/controller_input.c`)
-  buckets true rotation magnitude down to a capped 1/3/5 steps *before*
-  it reaches this backend — a raw 10-tick spin and a raw 3-tick spin
-  currently produce the same `amount`. That capping was tuned for the old
-  per-step Roon/UHC path, where uncapped magnitude meant uncapped rapid
-  HTTP calls; it no longer serves that purpose now that one HA call
-  safely carries any `amount` and HA does the batching. Whether to pass
-  the true uncapped magnitude through for this path (own opt-in hook,
-  matching the `controller_action_router_set_volume_override` pattern
-  already added for the write path) is a feel/UX decision for the owner
-  to make once the first build is on hardware, not a technical
-  correctness question — see issue #2.
+- **Resolved 2026-09-15** (was an open follow-up above): the firmware's
+  encoder acceleration (`resolve_volume_ticks` in
+  `common/controller_input.c`) used to bucket true rotation magnitude
+  down to a capped 1/3/5 steps before it ever reached this backend. Per
+  the owner's explicit direction, that capping is now removed —
+  `resolve_volume_ticks` passes the true accumulated tick count straight
+  through uncapped. Since the resulting HA write is one call per rotation
+  *dispatch*, and a fast continuous spin can still produce many dispatches
+  in quick succession, `ha_volume_client_adjust` now only accumulates
+  ticks and updates the display optimistically; a separate debounce task
+  flushes the accumulated burst as one `audio_voice_volume` call once
+  ~90ms of quiet passes (constant: `HA_VOLUME_DEBOUNCE_MS` in
+  `common/ha_volume_client.c`) — the same accumulate-then-flush shape as
+  the owner's `Audio - Harmony Volume` automation, tuned much shorter
+  since a physical knob should feel closer to instant than a remote's
+  held-button repeat. Changing `resolve_volume_ticks` directly (rather
+  than behind another opt-in hook) was safe because
+  `CONTROLLER_INPUT_TRANSFORM_ROTATION_ACCELERATED` has no live caller
+  besides `idf_app/main/controller_input_profile_dial.c` — Frame and RLCD
+  bind nothing to it.
+  **Still open:** whether one raw firmware tick equals one physical
+  detent for this encoder hasn't been confirmed on real hardware.
+  `HA_VOLUME_TICKS_PER_CLICK` (currently 1:1) needs calibrating once
+  flashed — e.g. a temporary log of raw ticks against a known number of
+  manual clicks (owner: "32 clicks per complete rotation, 1 click is
+  0.5dB").
 
 ### Implementation notes (from source investigation)
 
