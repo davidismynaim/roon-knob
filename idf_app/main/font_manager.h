@@ -16,6 +16,7 @@ bool font_manager_init(void);
 const lv_font_t *font_manager_get_small(void);   // 22px for metadata, hints
 const lv_font_t *font_manager_get_normal(void);  // 28px for artist, zone names
 const lv_font_t *font_manager_get_large(void);   // 40px for track title
+const lv_font_t *font_manager_get_xlarge(void);  // 56px, digits/./- and "dB" only - Dial volume readout
 
 // Icon fonts (Material Symbols) - for UI controls
 const lv_font_t *font_manager_get_icon_small(void);   // 22px for status icons

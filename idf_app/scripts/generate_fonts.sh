@@ -73,6 +73,28 @@ lv_font_conv \
     --no-prefilter \
     -o "$OUTPUT_DIR/notosans_28.c"
 
+# Generate Noto Sans Bold at 56px, restricted to the Dial volume readout's
+# own characters (digits, ".", "-", and "dB") - the full TEXT_RANGES set
+# would work too but bloats flash for a font used in exactly one place.
+# Bold, not Regular (owner feedback: the number read too thin at this
+# size) - NotoSans-Bold.ttf is a static wght=700 instance pulled from
+# Google Fonts' NotoSans[wdth,wght].ttf variable font via `fonttools
+# varLib.instancer` (this repo doesn't vendor fonttools; regenerate with
+# `pip install fonttools` then:
+#   fonttools varLib.instancer -o NotoSans-Bold.ttf NotoSans[wdth,wght].ttf wght=700 wdth=100
+# before re-running this script, if NotoSans-Bold.ttf isn't already in spiffs_data/).
+echo "Converting Noto Sans Bold (volume readout, 56px)..."
+echo "  - notosans_bold_56.c"
+lv_font_conv \
+    --bpp 4 \
+    --size 56 \
+    --font "$SPIFFS_DIR/NotoSans-Bold.ttf" \
+    --range 0x20,0x2D,0x2E,0x30-0x39,0x42,0x64 \
+    --format lvgl \
+    --no-compress \
+    --no-prefilter \
+    -o "$OUTPUT_DIR/notosans_bold_56.c"
+
 # Generate Material Icons icon fonts at 22, 28, 44, 60px
 # Sizes 44/60 match enlarged transport buttons (60px/80px backgrounds)
 echo "Converting Material Icons..."
