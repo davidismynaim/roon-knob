@@ -307,15 +307,46 @@ exact value at build time. Use the existing zone-label long-press as the
 feel reference; don't introduce a different threshold without checking
 `lv_conf.h` at build time first.
 
+**Implemented and tested on hardware 2026-09-15 (#8/#9).** Two invisible
+full-width regions (top third, lower third) created immediately after
+`s_ui_container` in `build_layout()`, so every other widget stays above
+them in z-order and keeps first claim on its own taps/long-presses —
+these two regions only ever see a long-press on otherwise-empty
+background. Middle third deliberately has no widget at all: "no action"
+is just what happens when nothing captures the touch. New
+`CONTROLLER_ACTION_TOGGLE_MUTE` action and an opt-in
+`controller_action_router_set_mute_override` hook, mirroring the
+volume/source-picker override pattern exactly (NULL on Frame/RLCD).
+
+**Owner-found and fixed same slice:** the existing zone-name header
+(covering most of the top third) still had its own long-press wired to
+Settings, competing with the new mute gesture depending on exact touch
+position. Since Settings is already reachable via the source picker's own
+Settings entry (#7), that direct header long-press was redundant —
+repointed it to dispatch the same `CONTROLLER_ACTION_TOGGLE_MUTE` instead
+of `CONTROLLER_ACTION_SHOW_SETTINGS`, so the whole top third now behaves
+consistently regardless of whether the header happens to be under the
+touch point. Confirmed working on hardware after the fix.
+
 ## Mute behavior
 
 - Full-screen red mute icon, matching the original design document's
-  treatment as an unambiguous, unmissable full-screen state.
+  treatment as an unambiguous, unmissable full-screen state. **Not yet
+  built** — the gesture (above) is implemented and confirmed working;
+  the full-screen icon is its own later slice.
 - Confirmed **net-new** — no existing mute mechanism anywhere in the repo
-  (`input_boolean.audio_mute` or otherwise).
-- Exact mechanism (which HA entity/service) carries forward from the
-  project's standard mute toggle (`input_boolean.audio_mute`) unless
-  building it surfaces a reason to deviate.
+  (`input_boolean.audio_mute` or otherwise) before this slice.
+- **Implemented and tested on hardware 2026-09-15.** `common/ha_mute_client.c`
+  calls `POST /api/services/input_boolean/toggle` with
+  `{"entity_id": "input_boolean.audio_mute"}` — verified against the
+  wiki as the exact canonical path every other mute source uses (Harmony's
+  `Audio Mute - Harmony Elite` automation calls the identical
+  `input_boolean.toggle` service on the same entity; the dashboard's mute
+  button's `tap_action: action: toggle` resolves to the same service for
+  an `input_boolean` entity). Corroborated empirically too: `Audio Mute -
+  Nexus` only fires the physical mute IR on a state change of this exact
+  entity, and it does fire from the dial's call, confirming the entity/
+  service match rather than a coincidental no-op.
 
 ## Idle timeout / sleep behavior
 

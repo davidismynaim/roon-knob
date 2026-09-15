@@ -40,6 +40,17 @@ void controller_action_router_set_source_picker_override(
     controller_source_picker_open_fn_t open_fn,
     controller_source_picker_select_fn_t select_fn);
 
+/*
+ * Target-registered override for TOGGLE_MUTE: unset on every target except
+ * idf_app/Dial, where main_idf.c registers ha_mute_client_toggle — see
+ * docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md. No shared/default
+ * mute behavior exists, so the action is simply rejected (returns false)
+ * when unset.
+ */
+typedef bool (*controller_mute_override_fn_t)(void);
+void controller_action_router_set_mute_override(
+    controller_mute_override_fn_t fn);
+
 #ifdef __cplusplus
 }
 #endif

@@ -43,6 +43,7 @@ static bool action_is_valid(const controller_action_t *action) {
     case CONTROLLER_ACTION_CLOSE_ZONE_PICKER:
     case CONTROLLER_ACTION_SELECT_ZONE_PICKER:
     case CONTROLLER_ACTION_SHOW_SETTINGS:
+    case CONTROLLER_ACTION_TOGGLE_MUTE:
         return action->value.picker_delta == 0;
     case CONTROLLER_ACTION_SCROLL_ZONE_PICKER:
         return action->value.picker_delta != 0;

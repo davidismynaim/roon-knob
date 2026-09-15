@@ -161,6 +161,8 @@ static void poll_pending(lv_timer_t *timer);
 static void set_status_dot(bool online);
 static void zone_label_event_cb(lv_event_t *e);
 static void zone_label_long_press_cb(lv_event_t *e);
+static void mute_region_long_press_cb(lv_event_t *e);
+static void source_region_long_press_cb(lv_event_t *e);
 static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
 static void btn_next_event_cb(lv_event_t *e);
@@ -311,6 +313,33 @@ static void build_layout(void) {
 
     // Update background pointer to ui_container for widget creation
     s_background = s_ui_container;
+
+    // Long-press-by-region gesture regions (top third: mute, lower third:
+    // source picker). Created first, so every widget created after this
+    // point sits above them in z-order and keeps first claim on its own
+    // taps/long-presses - see mute_region_long_press_cb's comment below
+    // for why that matters right now. The middle third is deliberately
+    // left uncovered by any widget: "no action" is simply what happens
+    // when nothing captures the touch there.
+    lv_obj_t *mute_region = lv_obj_create(s_ui_container);
+    lv_obj_set_size(mute_region, SCREEN_SIZE, SCREEN_SIZE / 3);
+    lv_obj_align(mute_region, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_opa(mute_region, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(mute_region, 0, 0);
+    lv_obj_set_style_pad_all(mute_region, 0, 0);
+    lv_obj_add_flag(mute_region, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(mute_region, mute_region_long_press_cb,
+                        LV_EVENT_LONG_PRESSED, NULL);
+
+    lv_obj_t *source_region = lv_obj_create(s_ui_container);
+    lv_obj_set_size(source_region, SCREEN_SIZE, SCREEN_SIZE / 3);
+    lv_obj_align(source_region, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_opa(source_region, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(source_region, 0, 0);
+    lv_obj_set_style_pad_all(source_region, 0, 0);
+    lv_obj_add_flag(source_region, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(source_region, source_region_long_press_cb,
+                        LV_EVENT_LONG_PRESSED, NULL);
 
     // Outer volume arc - full circle ring around the display edge
     s_volume_arc = lv_arc_create(s_ui_container);
@@ -554,8 +583,41 @@ static void zone_label_event_cb(lv_event_t *e) {
 static void zone_label_long_press_cb(lv_event_t *e) {
     (void)e;
     s_zone_long_pressed = true;  // Mark that we handled a long press
-    controller_action_t action = controller_action_simple(
-        CONTROLLER_ACTION_SHOW_SETTINGS);
+    /* Settings used to live here; now reachable via the source picker's
+     * own Settings entry (see source_picker_client.c), so this dispatches
+     * the same top-third mute gesture as mute_region_long_press_cb below
+     * instead - otherwise the header (which sits on top of, and covers
+     * most of, the top third) would keep intercepting long-presses there
+     * for a now-redundant action, leaving mute reachable only in the
+     * narrow margin outside the header's own bounding box. */
+    controller_action_t action =
+        controller_action_simple(CONTROLLER_ACTION_TOGGLE_MUTE);
+    (void)controller_input_dispatch_action(&action);
+}
+
+// Long-press-by-region gestures (ADR: docs/meta/decisions/
+// 2026-09-14_DESIGN_HYBRID_DIAL_UI.md). These regions are invisible,
+// full-width bands created early (right after s_ui_container) so every
+// other widget - header, now_playing's volume/track/controls cluster -
+// sits above them in z-order and keeps handling its own taps/long-presses
+// exactly as before; these only ever see a long-press that lands on
+// otherwise-empty background. The header (which covers most of the
+// physical top third until the Now Playing layout rework removes it)
+// dispatches this same action from its own long-press handler
+// (zone_label_long_press_cb above) rather than leaving a competing
+// Settings gesture there, so the whole top third behaves consistently
+// regardless of whether the header happens to be under the touch point.
+static void mute_region_long_press_cb(lv_event_t *e) {
+    (void)e;
+    controller_action_t action =
+        controller_action_simple(CONTROLLER_ACTION_TOGGLE_MUTE);
+    (void)controller_input_dispatch_action(&action);
+}
+
+static void source_region_long_press_cb(lv_event_t *e) {
+    (void)e;
+    controller_action_t action =
+        controller_action_simple(CONTROLLER_ACTION_OPEN_ZONE_PICKER);
     (void)controller_input_dispatch_action(&action);
 }
 

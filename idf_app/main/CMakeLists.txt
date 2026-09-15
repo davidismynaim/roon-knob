@@ -35,6 +35,7 @@ set(SRC_FILES
     "../../common/controller_action_router.c"
     "../../common/ha_volume_client.c"
     "../../common/ha_source_client.c"
+    "../../common/ha_mute_client.c"
     "../../common/source_picker_client.c"
     "../../common/controller_config.c"
     "../../common/controller_ble_input.c"
