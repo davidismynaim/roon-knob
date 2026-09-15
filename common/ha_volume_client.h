@@ -24,6 +24,14 @@ void ha_volume_client_init(void);
 // whether HA is currently reachable).
 bool ha_volume_client_is_active(void);
 
+// Gates every HTTP call this module makes. Call with true only once the
+// device actually has an IP (mirrors bridge_client_set_network_ready) -
+// firing a request before esp_netif/WiFi have initialized at all crashes
+// the whole chip (lwIP's TCPIP task mailbox doesn't exist yet). Call with
+// false on disconnect/AP-mode-fallback; queued rotation writes are kept,
+// not dropped, until this goes true again.
+void ha_volume_client_set_network_ready(bool ready);
+
 // Called once per rotation dispatch with the true accumulated encoder
 // tick count (positive = up, negative = down) - matches
 // controller_command_t.volume_steps, which common/controller_input.c's

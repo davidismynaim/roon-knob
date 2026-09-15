@@ -183,6 +183,7 @@ void rk_net_evt_cb(rk_net_evt_t evt, const char *ip_opt) {
         ui_update("WiFi: Connected", "", false, 0.0f, 0.0f, 100.0f, 1.0f, 0, 0);
         bridge_client_set_device_ip(ip_opt);  // Store IP for bridge recovery messages
         bridge_client_set_network_ready(true);
+        ha_volume_client_set_network_ready(true);
         // Defer heavy operations to UI task (sys_evt has limited stack)
         s_mdns_init_pending = true;  // mDNS needs network up first
         s_ota_check_pending = true;
@@ -202,6 +203,7 @@ void rk_net_evt_cb(rk_net_evt_t evt, const char *ip_opt) {
         ESP_LOGW(TAG, "WiFi: %s, attempt %d/%d", error, attempt, max);
         start_wifi_msg_alternation(error, attempt, max);
         bridge_client_set_network_ready(false);
+        ha_volume_client_set_network_ready(false);
         break;
     }
 
@@ -212,6 +214,7 @@ void rk_net_evt_cb(rk_net_evt_t evt, const char *ip_opt) {
         ui_update("hiphi-dial-setup", "Connect to WiFi:", false, 0.0f, 0.0f, 100.0f, 1.0f, 0, 0);
         ui_set_zone_name("WiFi Setup");
         bridge_client_set_network_ready(false);
+        ha_volume_client_set_network_ready(false);
         atomic_store_explicit(&s_config_server_start_pending, false,
                               memory_order_release);
         atomic_store_explicit(&s_config_server_stop_pending, true,

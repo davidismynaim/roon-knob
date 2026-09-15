@@ -41,6 +41,15 @@
 static os_mutex_t s_lock = OS_MUTEX_INITIALIZER;
 static rk_ha_cfg_t s_cfg;
 static bool s_configured;
+/* Gates every HTTP call, mirroring bridge_client_set_network_ready. lwIP's
+ * TCPIP task doesn't exist yet this early in boot - firing a GET/POST
+ * before esp_netif/WiFi have come up at all (not just "connected", but
+ * initialized) crashes with "assert failed: tcpip_send_msg_wait_sem ...
+ * Invalid mbox" (hit live on hardware: the poll task's very first,
+ * undelayed loop iteration raced ahead of network init). Set from the
+ * same RK_NET_EVT_GOT_IP/FAIL/AP_STARTED handling in main_idf.c that
+ * already drives bridge_client_set_network_ready. */
+static bool s_network_ready;
 static int s_position;       // last-known volume, 0-255 position scale
 static bool s_have_position;  // true once a poll has succeeded at least once
 
@@ -66,12 +75,18 @@ static int db_to_position(float db) {
 
 static bool snapshot_cfg(rk_ha_cfg_t *out) {
     os_mutex_lock(&s_lock);
-    bool configured = s_configured;
-    if (configured && out) {
+    bool ready = s_configured && s_network_ready;
+    if (ready && out) {
         *out = s_cfg;
     }
     os_mutex_unlock(&s_lock);
-    return configured;
+    return ready;
+}
+
+void ha_volume_client_set_network_ready(bool ready) {
+    os_mutex_lock(&s_lock);
+    s_network_ready = ready;
+    os_mutex_unlock(&s_lock);
 }
 
 static void set_cached_position(int position) {
@@ -207,15 +222,18 @@ static bool send_clicks(const rk_ha_cfg_t *cfg, int32_t clicks) {
 static void flush_pending(void) {
     rk_ha_cfg_t cfg;
     os_mutex_lock(&s_lock);
-    bool configured = s_configured;
+    /* Only actually drain s_pending_ticks once the network is up - if we
+     * cleared it while not ready, a burst that happened before WiFi
+     * connected would be silently lost instead of sent once it does. */
+    bool ready = s_configured && s_network_ready;
     int32_t ticks = s_pending_ticks;
-    if (configured) {
+    if (ready) {
         cfg = s_cfg;
         s_pending_ticks = 0;
     }
     os_mutex_unlock(&s_lock);
 
-    if (!configured || ticks == 0) {
+    if (!ready || ticks == 0) {
         return;
     }
     int32_t clicks = ticks / HA_VOLUME_TICKS_PER_CLICK;
