@@ -108,12 +108,27 @@ avoided.
   `CONTROLLER_INPUT_TRANSFORM_ROTATION_ACCELERATED` has no live caller
   besides `idf_app/main/controller_input_profile_dial.c` — Frame and RLCD
   bind nothing to it.
-  **Still open:** whether one raw firmware tick equals one physical
-  detent for this encoder hasn't been confirmed on real hardware.
-  `HA_VOLUME_TICKS_PER_CLICK` (currently 1:1) needs calibrating once
-  flashed — e.g. a temporary log of raw ticks against a known number of
-  manual clicks (owner: "32 clicks per complete rotation, 1 click is
-  0.5dB").
+  **Confirmed on hardware 2026-09-15:** one physical click moves the
+  volume exactly 0.5 dB — `HA_VOLUME_TICKS_PER_CLICK = 1` is correct as
+  shipped, no change needed. Also confirmed on hardware: a full slow
+  rotation, a fast spin (batches into one smooth jump via the debounce
+  flush, no stutter), display staying in sync with HA after repeated
+  up/down turns, and clean reboot with no repeat of the netif-timing
+  crash below.
+
+- **Crash found and fixed on hardware 2026-09-15:** the first flash with
+  HA configured crash-looped on every boot —
+  `assert failed: tcpip_send_msg_wait_sem ... Invalid mbox`. Root cause:
+  `ha_volume_client_init()` started its poll task unconditionally at
+  boot, and that task's first loop iteration fired an HTTP GET (via
+  `platform_http_get_auth` → `esp_http_client_open` → `getaddrinfo`)
+  before `esp_netif`/lwIP's TCPIP task had been initialized at all, let
+  alone connected. Fixed by adding `ha_volume_client_set_network_ready()`,
+  mirroring `bridge_client_set_network_ready`'s existing pattern exactly
+  and wired into the same `RK_NET_EVT_GOT_IP`/`FAIL`/`AP_STARTED`
+  handling in `main_idf.c`. Both the poll task and the debounce-flush
+  task gate on it now; a rotation burst that lands before the network is
+  ready is kept, not dropped, and sent once ready becomes true.
 
 ### Implementation notes (from source investigation)
 
