@@ -116,6 +116,13 @@ static const char *HTML_CONFIG =
     "<input type='password' name='ha_token' maxlength='255' placeholder='%s'>"
     "<p class='hint'>Controls Nexus volume directly via Home Assistant, bypassing Roon. Leave the token blank to keep the one already saved.</p>"
     "<input type='submit' value='Save'>"
+    "</form>"
+    "<form method='POST' action='/zone-config'>"
+    "<h2>Roon Zone (advanced)</h2>"
+    "<label>Zone ID</label>"
+    "<input type='text' name='zone_id' maxlength='63' placeholder='roon:...' value='%s'>"
+    "<p class='hint'>Locked to this one zone — there's no on-device zone picker. Only needed if the dial ever connects to the wrong zone; leave as-is otherwise.</p>"
+    "<input type='submit' value='Save'>"
     "</form></body></html>";
 
 static const char *HTML_SUCCESS =
@@ -334,15 +341,16 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         ha_cfg.token[0] ? "(unchanged)" : "Paste token here";
 
     // Build HTML with current values, saved networks, and bridge status.
-    char *html = heap_caps_malloc(4096,
+    char *html = heap_caps_malloc(6144,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!html) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
 
-    snprintf(html, 4096, HTML_CONFIG, current, status_class, status_text,
-             wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder);
+    snprintf(html, 6144, HTML_CONFIG, current, status_class, status_text,
+             wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
+             cfg->zone_id);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, strlen(html));
@@ -478,6 +486,52 @@ static esp_err_t ha_config_post_handler(httpd_req_t *req) {
     free(html);
 
     ESP_LOGI(TAG, "HA config saved, rebooting in 1 second...");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+// Handler for POST /zone-config - override the locked Roon zone (recovery
+// path now that there's no on-device zone picker; see
+// docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md and
+// CONFIG_RK_DEFAULT_ZONE_ID / refresh_zone_label() in bridge_client.c).
+static esp_err_t zone_config_post_handler(httpd_req_t *req) {
+    char buf[256] = {0};
+    int received = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (received <= 0) {
+        ESP_LOGE(TAG, "Failed to receive POST data");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
+        return ESP_FAIL;
+    }
+    buf[received] = '\0';
+
+    char zone_id[64] = {0};
+    get_form_field(buf, "zone_id", zone_id, sizeof(zone_id));
+
+    controller_config_write_result_t result =
+        controller_config_set_zone(zone_id, NULL);
+    if (result == CONTROLLER_CONFIG_NOT_COMMITTED) {
+        ESP_LOGE(TAG, "Failed to save zone");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+    if (result == CONTROLLER_CONFIG_COMMITTED_UNVERIFIED) {
+        return send_unverified_settings(req);
+    }
+
+    char *html = heap_caps_malloc(1024,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!html) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    snprintf(html, 1024, HTML_SUCCESS, "Zone saved!");
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html, strlen(html));
+    free(html);
+
+    ESP_LOGI(TAG, "Zone config saved, rebooting in 1 second...");
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
 
@@ -950,6 +1004,13 @@ void config_server_start(void) {
         .handler = ha_config_post_handler,
     };
     httpd_register_uri_handler(s_server, &ha_config_post);
+
+    httpd_uri_t zone_config_post = {
+        .uri = "/zone-config",
+        .method = HTTP_POST,
+        .handler = zone_config_post_handler,
+    };
+    httpd_register_uri_handler(s_server, &zone_config_post);
 
     httpd_uri_t wifi_add = {
         .uri = "/wifi-add",

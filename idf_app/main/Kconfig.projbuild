@@ -12,6 +12,16 @@ config RK_DEFAULT_BRIDGE_BASE
     string "Default Bridge Base URL (leave empty to require mDNS or manual config)"
     default ""
 
+config RK_DEFAULT_ZONE_ID
+    string "Default Roon zone ID (leave empty to require picking one)"
+    default ""
+    help
+        Used when no zone_id is stored in NVS (fresh device, or a config
+        reset) - the device matches this ID against the live zone list
+        from the bridge instead of falling back to whatever zone happens
+        to be listed first. Overridden by whatever zone_id ends up
+        actually stored in NVS (e.g. via the device's config page).
+
 endmenu
 
 menu "Display Sleep Settings"
