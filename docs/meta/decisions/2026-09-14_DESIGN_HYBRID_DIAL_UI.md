@@ -173,6 +173,46 @@ avoided.
   with the three transport touch targets in this region).
 - Long-press, lower third → open source selection.
 
+**Implemented and tested on hardware 2026-09-15** (PR #11, tracking
+issue #10). The thirds layout, lower-third-only tint, edge-to-edge full-
+brightness artwork, and zone-selector removal all landed as spec'd.
+Everything below is what changed *from* the spec, found only by
+iterating on the real 360×360 SH8601 round display rather than assumed
+up front:
+
+- **Outer volume ring**: this doc says "retained exactly as stock," but
+  in practice a plain continuous arc gave no sense of the underlying
+  0.5dB/click resolution, so it's now a ring of discrete ticks instead —
+  currently 128 of them (1dB/2-click each; a first pass at 256 turned
+  out to be both visually too dense for this display and, via a
+  scroll-animation redraw-cost interaction, the cause of visible tearing
+  in the scrolling title text — see `common/ui.c`'s `redraw_volume_ring()`
+  comment for the full mechanism). Ticks are hand-drawn to a cached
+  `lv_canvas` rather than a live `lv_scale` widget specifically to avoid
+  that redraw-cost coupling. Lit ticks are bright blue
+  (`0x4dabff`); unlit ticks aren't drawn at all, matching a parallel
+  decision to drop the progress ring's unplayed-track background too —
+  both read as more legible than any dark/grey "remaining" treatment
+  that was tried first.
+- **Volume number**: real bold 56px Noto Sans (`font_manager_get_xlarge()`,
+  `idf_app/main/fonts/notosans_bold_56.c`) rather than whatever default
+  size the spec implied, with an 8-directional dark halo (the same
+  tint color/opacity as the lower-third darkening) behind it for
+  legibility over busy album art. A dB-equivalent readout sits above it
+  at smaller size, derived from the 0-255 position (see
+  `derive_volume_db_equivalent()`) since the direct-to-HA volume path
+  doesn't carry a raw dB value through to the UI layer.
+- **Art mode** (controls hidden after the idle timeout): narrowed to
+  hiding only the volume display, battery icon, and transport buttons.
+  The lower-third tint and track/artist text now stay visible in art
+  mode too, rather than disappearing with everything else.
+- One dead end worth recording: an early attempt to fake a bigger
+  volume font via LVGL's `transform_scale` style property crashed on
+  hardware (Guru Meditation Error / null pointer in glyph blending) —
+  LVGL's software renderer here doesn't safely handle a transform-scaled,
+  auto-sized label. A real bitmap font generated at the target size is
+  the fix, not a runtime scale trick.
+
 ## Screen 2: TV and Vinyl inputs
 
 Shared layout, differing only in background image and label text.
