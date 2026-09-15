@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "os_mutex.h"
 #include "platform/platform_task.h"
@@ -17,6 +18,7 @@
 
 #ifdef ESP_PLATFORM
 #include "esp_log.h"
+#include "esp_heap_caps.h"  // PSRAM allocation for the volume ring's canvas buffer
 #include "battery.h"
 #include "ui_jpeg.h"  // JPEG decoder helper
 #define UI_TAG "ui"
@@ -56,13 +58,20 @@ struct ui_state {
 // UI widgets - Blue Knob inspired design
 static lv_obj_t *s_track_label;        // Main track name
 static lv_obj_t *s_artist_label;       // Artist/album
-static lv_obj_t *s_volume_arc;         // Outer arc for volume
+static lv_obj_t *s_volume_canvas;      // Outer volume ring - 256 dots, one per HA click (0.5dB),
+                                        // hand-drawn to a cached canvas (see redraw_volume_ring)
+                                        // rather than a live lv_scale, so it doesn't get swept into
+                                        // every redraw the scrolling title's animation triggers
+static void *s_volume_canvas_buf;      // PSRAM pixel buffer backing s_volume_canvas
+static int s_volume_canvas_lit_ticks = -1;  // Last-drawn lit-tick count; -1 forces the first draw
 static lv_obj_t *s_progress_arc;       // Inner arc for track progress
 static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - primary display
+static lv_obj_t *s_volume_label_halo[8]; // 8-directional legibility halo behind s_volume_label_large
+static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old position
 static lv_timer_t *s_volume_emphasis_timer;  // Timer to reset volume emphasis after adjustment
 static lv_obj_t *s_status_dot;         // Online/offline indicator
 static lv_obj_t *s_battery_icon;       // Battery icon (Material Symbols)
-static lv_obj_t *s_zone_label;         // Zone name
+static lv_obj_t *s_lower_tint;         // Lower-third darkening tint for text legibility
 static lv_obj_t *s_btn_prev;           // Previous track button
 static lv_obj_t *s_btn_play;           // Play/pause button (center, large)
 static lv_obj_t *s_btn_next;           // Next track button
@@ -136,6 +145,7 @@ static char *s_artwork_data = NULL;  // Raw JPEG data for PC simulator
 static inline const lv_font_t *font_small(void) { return font_manager_get_small(); }
 static inline const lv_font_t *font_normal(void) { return font_manager_get_normal(); }
 static inline const lv_font_t *font_large(void) { return font_manager_get_large(); }
+static inline const lv_font_t *font_xlarge(void) { return font_manager_get_xlarge(); }
 // Icon fonts for UI controls
 static inline const lv_font_t *font_icon_small(void) { return font_manager_get_icon_small(); }
 static inline const lv_font_t *font_icon_normal(void) { return font_manager_get_icon_normal(); }
@@ -147,6 +157,7 @@ static inline const lv_font_t *font_icon_large(void) { return font_manager_get_i
 static inline const lv_font_t *font_small(void) { return &lv_font_montserrat_20; }
 static inline const lv_font_t *font_normal(void) { return &lv_font_montserrat_28; }
 static inline const lv_font_t *font_large(void) { return &lv_font_montserrat_48; }
+static inline const lv_font_t *font_xlarge(void) { return &lv_font_montserrat_48; }  // PC sim has no 56px asset
 static inline const lv_font_t *font_icon_small(void) { return &lv_font_montserrat_20; }
 static inline const lv_font_t *font_icon_normal(void) { return &lv_font_montserrat_28; }
 static inline const lv_font_t *font_icon_large(void) { return &lv_font_montserrat_48; }
@@ -159,8 +170,6 @@ static void apply_state(const struct ui_state *state);
 static void build_layout(void);
 static void poll_pending(lv_timer_t *timer);
 static void set_status_dot(bool online);
-static void zone_label_event_cb(lv_event_t *e);
-static void zone_label_long_press_cb(lv_event_t *e);
 static void mute_region_long_press_cb(lv_event_t *e);
 static void source_region_long_press_cb(lv_event_t *e);
 static void btn_prev_event_cb(lv_event_t *e);
@@ -197,14 +206,210 @@ static inline void format_volume_text(char *buf, size_t len, float volume, float
     }
 }
 
-static inline int calculate_volume_percentage(float volume, float volume_min, float volume_max) {
-    float vol_range = volume_max - volume_min;
-    if (vol_range < 0.01f) return 0;
+// The big on-screen number is "volume" as reported by whichever backend is
+// active: on Dial's direct-to-HA path that's a 0-255 position, not dB (see
+// ha_volume_client.c's db_to_position() / controller_presentation_set_volume_range(
+// position, 0, 255, 1) call) - everywhere else (Roon-relative volume on
+// Frame/RLCD, or Dial's own Roon fallback) "volume" already *is* dB.
+// Detecting the Dial position-scale case by its exact 0..255 range (rather
+// than adding a target-specific #ifdef to this shared file) and inverting
+// db_to_position's formula gets us the dB-equivalent without new plumbing
+// across the controller-boundary layers for a display-only value.
+static inline float derive_volume_db_equivalent(float volume, float volume_min, float volume_max) {
+    if (volume_min == 0.0f && volume_max == 255.0f) {
+        return volume / 2.0f - 127.5f;
+    }
+    return volume;
+}
 
-    int vol_pct = (int)(((volume - volume_min) * 100.0f) / vol_range);
-    if (vol_pct < 0) return 0;
-    if (vol_pct > 100) return 100;
-    return vol_pct;
+// Earlier versions of this tried a dark offset duplicate-label shadow
+// (visible gap between the number and its shifted ghost - no blur to sell
+// the effect), then a black/60%-opacity backdrop panel behind the text
+// (owner feedback: read as a big panel, not a shadow - not the intent).
+// Currently plain, undecorated text - the bold 56px font on its own
+// (font_manager_get_xlarge()) reads fine without either.
+//
+// NOTE: an even earlier version applied a style-transform scale (2x/1.5x)
+// to fake a bigger font (no lv_font_conv toolchain available in this
+// build environment at the time to generate a real larger bitmap font).
+// That crashed on hardware on the very first frame - Guru Meditation
+// Error, LoadProhibited (EXCVADDR 0x0), inside
+// lv_draw_sw_blend_color_to_rgb565 <- draw_letter_cb <- lv_draw_label,
+// i.e. a null pointer during glyph blending for exactly one of those
+// scaled labels. LVGL's software renderer here doesn't safely handle a
+// transform-scaled, auto-sized (LV_SIZE_CONTENT) label - most likely the
+// widget's logical layout box doesn't grow to match the transform, so the
+// draw/layer code sizes its buffer for the small untransformed box and
+// then blends into it using the larger transformed coordinates. A real
+// bitmap font generated at the target size (see font_manager_get_xlarge())
+// is what actually fixed that.
+static lv_obj_t *create_number_label(lv_obj_t *parent, const lv_font_t *font,
+                                      lv_color_t color, int32_t top_y) {
+    lv_obj_t *label = lv_label_create(parent);
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, color, 0);
+    lv_label_set_text(label, "--");
+    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, top_y);
+
+    return label;
+}
+
+// Halo for the big volume number specifically (busy album art can still
+// wash it out even bold/white) - 8 dark copies of the same text at small
+// symmetric offsets all the way around the glyphs, in the exact tint
+// already used for the lower-third darkening (black @ 60% opacity), drawn
+// before (so it renders behind) the real label. Two earlier attempts at
+// this didn't land: a single offset dark copy read as a shifted ghost
+// with a visible gap, not a shadow; a solid tint panel behind the text
+// read as a big rectangle, not a shadow either. Surrounding the glyphs
+// symmetrically on all sides, instead of to one side or as a filled box,
+// is what actually reads as a halo.
+#define VOLUME_HALO_OFFSET_PX 2
+static const int32_t VOLUME_HALO_OFFSETS[8][2] = {
+    {-VOLUME_HALO_OFFSET_PX, 0}, {VOLUME_HALO_OFFSET_PX, 0},
+    {0, -VOLUME_HALO_OFFSET_PX}, {0, VOLUME_HALO_OFFSET_PX},
+    {-VOLUME_HALO_OFFSET_PX, -VOLUME_HALO_OFFSET_PX}, {VOLUME_HALO_OFFSET_PX, -VOLUME_HALO_OFFSET_PX},
+    {-VOLUME_HALO_OFFSET_PX, VOLUME_HALO_OFFSET_PX}, {VOLUME_HALO_OFFSET_PX, VOLUME_HALO_OFFSET_PX},
+};
+
+static lv_obj_t *create_haloed_number_label(lv_obj_t *parent, const lv_font_t *font,
+                                             lv_color_t color, int32_t top_y,
+                                             lv_obj_t *out_halo[8]) {
+    for (int i = 0; i < 8; i++) {
+        lv_obj_t *halo = lv_label_create(parent);
+        lv_obj_set_style_text_font(halo, font, 0);
+        lv_obj_set_style_text_color(halo, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_text_opa(halo, LV_OPA_60, 0);
+        lv_label_set_text(halo, "--");
+        lv_obj_align(halo, LV_ALIGN_TOP_MID, VOLUME_HALO_OFFSETS[i][0], top_y + VOLUME_HALO_OFFSETS[i][1]);
+        out_halo[i] = halo;
+    }
+
+    return create_number_label(parent, font, color, top_y);
+}
+
+static inline void set_haloed_label_text(lv_obj_t *label, lv_obj_t *halo[8], const char *text) {
+    if (label) lv_label_set_text(label, text);
+    for (int i = 0; i < 8; i++) {
+        if (halo[i]) lv_label_set_text(halo[i], text);
+    }
+}
+
+// ============================================================================
+// Volume Ring - hand-drawn 256-dot ring, cached to a canvas
+// ============================================================================
+//
+// This used to be a live lv_scale widget (built-in tick rendering). That
+// looked right but its bounding box is a near-full-screen square (its
+// visible ring is thin, but LVGL invalidates the whole declared widget
+// size, not the painted pixels), and the scrolling title sits inside that
+// square - so every scroll-animation frame's invalidated area overlapped
+// the ring's, and LVGL redrew all 256 ticks (plus a baseline arc) on
+// every one of those frames, not just when the volume changed. That's a
+// real chunk of extra per-frame work landing right on top of the
+// scrolling animation, and is the likely cause of the tearing seen on
+// hardware (this display flushes in ~36-row strips - see main_idf.c's
+// draw buffer allocation - so a frame that takes too long can leave the
+// strips visibly out of sync with each other).
+//
+// Fix: draw the ticks into an off-screen canvas once, only when the
+// volume actually changes (redraw_volume_ring below, gated on
+// s_volume_canvas_lit_ticks actually changing) rather than on every LVGL
+// refresh. A scroll-animation frame that happens to overlap the canvas
+// still has to composite it, but that's now a plain image blit - the
+// same cost as the album art already redrawing behind everything - not
+// dozens of fresh line-draw calls.
+// Full screen diameter, not inset - owner feedback wanted ticks reaching
+// the physical edge of the display, not stopping short of it.
+#define VOLUME_RING_SIZE SCREEN_SIZE
+// 1dB per tick (2 clicks), not 0.5dB/1 click - owner feedback that 256
+// ticks was past this display's usable resolution. Dial's native range is
+// -127.5..0dB, so 128 ticks over that range is ~1dB/tick.
+#define VOLUME_RING_TICK_COUNT 128
+#define VOLUME_RING_TICK_WIDTH 4              // Was 2 - owner feedback that fewer (128) ticks needed to be thicker
+// Outer end stays at the true screen edge (radius_edge, from the previous
+// pass). Inner end is back to 169 - what radius_edge - 6 worked out to
+// before that pass enlarged VOLUME_RING_SIZE from SCREEN_SIZE-10 to
+// SCREEN_SIZE - because the longer ticks were now reaching inward past
+// the progress ring's own radius (165, SCREEN_SIZE-30 sized) and visibly
+// crossing it. 180 - 169 = 11.
+#define VOLUME_RING_TICK_LEN 11
+#define VOLUME_RING_ANGLE_RANGE 359           // Nearly full circle, matches the old arc/scale
+#define VOLUME_RING_ROTATION 270              // Start at top (12 o'clock)
+
+// Fraction-of-range -> lit tick count, computed directly from the raw
+// volume/min/max rather than through calculate_volume_percentage()'s 0-100
+// integer percentage. That 0-100 rounding was an earlier "two ticks per
+// click" bug: at VOLUME_RING_TICK_COUNT=256 (one tick per click), an
+// integer 0-100 range meant each whole percentage-point step covered
+// ~2.56 ticks, so crossing one integer percent (what one volume click
+// did, most of the time) lit 2-3 ticks at once. Going straight from the
+// native range to a float fraction of VOLUME_RING_TICK_COUNT avoids that
+// quantization regardless of what the tick count is currently set to.
+static inline int calculate_volume_lit_ticks(float volume, float volume_min, float volume_max) {
+    float range = volume_max - volume_min;
+    if (range < 0.01f) return 0;
+    float frac = (volume - volume_min) / range;
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    int ticks = (int)lroundf(frac * VOLUME_RING_TICK_COUNT);
+    if (ticks < 0) ticks = 0;
+    if (ticks > VOLUME_RING_TICK_COUNT) ticks = VOLUME_RING_TICK_COUNT;
+    return ticks;
+}
+
+static void redraw_volume_ring(float volume, float volume_min, float volume_max) {
+    if (!s_volume_canvas) return;
+
+    int lit_ticks = calculate_volume_lit_ticks(volume, volume_min, volume_max);
+    if (lit_ticks == s_volume_canvas_lit_ticks) return;  // No visible change - skip the redraw
+    s_volume_canvas_lit_ticks = lit_ticks;
+
+    lv_canvas_fill_bg(s_volume_canvas, lv_color_black(), LV_OPA_TRANSP);
+
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_volume_canvas, &layer);
+
+    lv_draw_line_dsc_t dsc;
+    lv_draw_line_dsc_init(&dsc);
+
+    const int32_t radius_edge = VOLUME_RING_SIZE / 2;
+    const lv_point_t center = { radius_edge, radius_edge };
+
+    // Bright blue (owner-confirmed: size/weight/color are good as of this
+    // pass), no glow - a glow pass was tried here and reverted (owner
+    // feedback: "just looks blurred").
+    dsc.color = lv_color_hex(0x4dabff);
+    dsc.opa = LV_OPA_COVER;
+    dsc.width = VOLUME_RING_TICK_WIDTH;
+    dsc.round_start = false;
+    dsc.round_end = false;
+
+    // Unlit ticks aren't drawn at all (owner feedback: the dark tint
+    // there was "distracting and adds no value") - only the lit 0..
+    // lit_ticks range gets a line.
+    for (int tick_idx = 0; tick_idx < lit_ticks; tick_idx++) {
+        // Same angle math as lv_scale's own ROUND_INNER tick placement
+        // (lv_scale.c's scale_get_tick_points) - tenths of a degree,
+        // tick 0 at VOLUME_RING_ROTATION, tick (count-1) at
+        // ROTATION+ANGLE_RANGE, then lv_point_transform rotates a point
+        // starting due "east" of center by that angle.
+        int32_t angle_tenths = (int32_t)(((int64_t)tick_idx * VOLUME_RING_ANGLE_RANGE * 10) /
+                                          (VOLUME_RING_TICK_COUNT - 1)) +
+                                VOLUME_RING_ROTATION * 10;
+
+        lv_point_t pa = { center.x + radius_edge, center.y };
+        lv_point_transform(&pa, angle_tenths, LV_SCALE_NONE, LV_SCALE_NONE, &center, false);
+
+        lv_point_t pb = { center.x + (radius_edge - VOLUME_RING_TICK_LEN), center.y };
+        lv_point_transform(&pb, angle_tenths, LV_SCALE_NONE, LV_SCALE_NONE, &center, false);
+
+        dsc.p1 = lv_point_to_precise(&pa);
+        dsc.p2 = lv_point_to_precise(&pb);
+        lv_draw_line(&layer, &dsc);
+    }
+
+    lv_canvas_finish_layer(s_volume_canvas, &layer);
 }
 
 // ============================================================================
@@ -300,8 +505,10 @@ static void build_layout(void) {
     lv_obj_set_size(s_artwork_image, SCREEN_SIZE, SCREEN_SIZE);
     lv_obj_center(s_artwork_image);
     lv_obj_add_flag(s_artwork_image, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads
-    // Dim the artwork for better text contrast (avoid overlay layer)
-    lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_40, 0);  // 40% opacity = 60% dimming
+    // Full brightness, edge-to-edge (ADR: no full-screen darkening mask -
+    // only the lower third gets a tint, added below, just for text
+    // legibility over whatever's there).
+    lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
 
     // Create UI container directly (no intermediate overlay layer)
     s_ui_container = lv_obj_create(s_artwork_container);
@@ -341,26 +548,48 @@ static void build_layout(void) {
     lv_obj_add_event_cb(source_region, source_region_long_press_cb,
                         LV_EVENT_LONG_PRESSED, NULL);
 
-    // Outer volume arc - full circle ring around the display edge
-    s_volume_arc = lv_arc_create(s_ui_container);
-    lv_obj_set_size(s_volume_arc, SCREEN_SIZE - 10, SCREEN_SIZE - 10);
-    lv_obj_center(s_volume_arc);
-    lv_arc_set_range(s_volume_arc, 0, 100);
-    lv_arc_set_value(s_volume_arc, 0);
-    lv_arc_set_bg_angles(s_volume_arc, 0, 359);  // Nearly full circle (360 causes rendering issues)
-    lv_arc_set_rotation(s_volume_arc, 270);  // Start at top (12 o'clock)
-    lv_arc_set_mode(s_volume_arc, LV_ARC_MODE_NORMAL);
-    lv_obj_set_style_arc_width(s_volume_arc, 8, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_volume_arc, 8, LV_PART_INDICATOR);
-    lv_obj_remove_flag(s_volume_arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_opa(s_volume_arc, LV_OPA_TRANSP, LV_PART_KNOB);
-    lv_obj_set_style_pad_all(s_volume_arc, 0, LV_PART_KNOB);
+    // Lower-third darkening tint - just enough for track/artist text
+    // legibility over the artwork; the upper two-thirds stay fully
+    // undimmed (unlike the removed full-screen mask). Created before the
+    // volume ring/progress arc below (moved here from just before the
+    // track/artist labels, owner feedback) so those render on top of the
+    // tint rather than under it - the portion of each that crosses the
+    // lower third now stays at full brightness instead of getting dimmed
+    // along with the artwork. Track/artist labels still render after
+    // everything else, so they stay on top as before.
+    s_lower_tint = lv_obj_create(s_ui_container);
+    lv_obj_set_size(s_lower_tint, SCREEN_SIZE, SCREEN_SIZE / 3);
+    lv_obj_align(s_lower_tint, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(s_lower_tint, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_lower_tint, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_lower_tint, 0, 0);
+    lv_obj_set_style_radius(s_lower_tint, 0, 0);
+    lv_obj_remove_flag(s_lower_tint, LV_OBJ_FLAG_CLICKABLE);  // Let long-press reach source_region beneath it
 
-    // Arc colors - dark grey background track, blue indicator
-    lv_obj_set_style_arc_color(s_volume_arc, lv_color_hex(0x3a3a3a), LV_PART_MAIN);  // Lighter grey for visibility
-    lv_obj_set_style_arc_color(s_volume_arc, lv_color_hex(0x5a9fd4), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(s_volume_arc, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_arc_opa(s_volume_arc, LV_OPA_COVER, LV_PART_INDICATOR);
+    // Outer volume ring - 256 dots around the display edge (one per HA
+    // volume click, i.e. every 0.5dB on the direct-to-HA Nexus path),
+    // hand-drawn once per volume change into a canvas rather than redrawn
+    // live every LVGL refresh - see redraw_volume_ring() above for why.
+    {
+        uint32_t stride = lv_draw_buf_width_to_stride(VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
+        size_t buf_size = (size_t)stride * VOLUME_RING_SIZE;
+#ifdef ESP_PLATFORM
+        s_volume_canvas_buf = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+        s_volume_canvas_buf = malloc(buf_size);
+#endif
+        if (!s_volume_canvas_buf) {
+            ESP_LOGE(UI_TAG, "Failed to allocate %u-byte volume ring canvas buffer",
+                     (unsigned)buf_size);
+        } else {
+            s_volume_canvas = lv_canvas_create(s_ui_container);
+            lv_canvas_set_buffer(s_volume_canvas, s_volume_canvas_buf, VOLUME_RING_SIZE,
+                                 VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
+            lv_obj_center(s_volume_canvas);
+            lv_obj_remove_flag(s_volume_canvas, LV_OBJ_FLAG_CLICKABLE);
+            redraw_volume_ring(0.0f, 0.0f, 0.0f);  // Forces the canvas's first real draw (transparent/empty until real data arrives)
+        }
+    }
 
     // Inner progress arc - full circle for track playback progress
     s_progress_arc = lv_arc_create(s_ui_container);
@@ -377,10 +606,12 @@ static void build_layout(void) {
     lv_obj_set_style_bg_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_set_style_pad_all(s_progress_arc, 0, LV_PART_KNOB);
 
-    // Progress arc colors - subtle grey track, lighter blue indicator
-    lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(0x2a2a2a), LV_PART_MAIN);  // Slightly lighter
+    // Progress arc colors - unplayed track isn't drawn at all (owner
+    // feedback: the dark tint there, tried in an earlier pass, was "just
+    // distracting and adds no value") - only the played/blue indicator
+    // shows.
+    lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(0x7bb9e8), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_COVER, LV_PART_INDICATOR);
 
 
@@ -392,102 +623,93 @@ static void build_layout(void) {
     lv_obj_set_style_border_width(s_status_dot, 0, 0);
     lv_obj_align(s_status_dot, LV_ALIGN_TOP_RIGHT, -35, 35);
 
-    // ========================================================================
-    // Header group - battery + zone at top (flex column, explicit position)
-    // ========================================================================
-    lv_obj_t *header = lv_obj_create(s_ui_container);
-    lv_obj_set_size(header, SCREEN_SIZE - 60, 95);  // Tall tap zone extending toward volume
-    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_pad_all(header, 0, 0);
-    lv_obj_set_layout(header, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);  // Content at top, tap zone extends down
-    lv_obj_set_style_pad_row(header, 0, 0);  // Tight - battery and zone close together
-    lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 28);  // Explicit position at top
-
+    // Battery icon - top left, mirroring the status dot. Independent of
+    // the (now removed) zone header: the ADR removes the zone
+    // selector/current-zone display entirely from this screen, but says
+    // nothing about battery status, so this stays as its own small
+    // top-area indicator rather than disappearing along with the header.
 #if !TARGET_PC
-    s_battery_icon = lv_label_create(header);
+    s_battery_icon = lv_label_create(s_ui_container);
     lv_label_set_text(s_battery_icon, ICON_BATTERY_FULL);
     lv_obj_set_style_text_font(s_battery_icon, font_manager_get_lucide_battery(), 0);
     lv_obj_set_style_text_color(s_battery_icon, lv_color_hex(0x888888), 0);
+    // Top-center, not top-left: on a round display, a corner-offset
+    // position like the old (35,35) falls in the square canvas's clipped
+    // corner - outside the visible circle - which is why the icon read as
+    // "missing" on hardware rather than just misplaced.
+    lv_obj_align(s_battery_icon, LV_ALIGN_TOP_MID, 0, 25);
 #endif
 
-    // Make entire header tappable for zone selection
-    lv_obj_add_flag(header, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(header, zone_label_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(header, zone_label_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
-    // Visual feedback on press
-    lv_obj_set_style_bg_color(header, lv_color_hex(0x333333), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(header, LV_OPA_50, LV_STATE_PRESSED);
-
-    s_zone_label = lv_label_create(header);
-    lv_label_set_text(s_zone_label, s_pending.zone_name);
-    lv_obj_set_style_text_font(s_zone_label, font_small(), 0);
-    lv_obj_set_style_text_color(s_zone_label, lv_color_hex(0xbbbbbb), 0);
-    lv_obj_set_width(s_zone_label, SCREEN_SIZE - 120);
-    lv_obj_set_style_text_align(s_zone_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(s_zone_label, LV_LABEL_LONG_DOT);
-
     // ========================================================================
-    // Now Playing group - volume, artist, track, controls (flex column, centered)
+    // Now Playing layout (ADR: docs/meta/decisions/
+    // 2026-09-14_DESIGN_HYBRID_DIAL_UI.md) - volume/controls/track-info
+    // independently positioned in their own thirds (matching the
+    // long-press gesture regions' exact boundaries) rather than clustered
+    // in one centered flex column. Y-offsets below are a first pass, not
+    // pixel-verified against the round display's usable width at each
+    // row - expect to tune these by eye on hardware.
     // ========================================================================
-    lv_obj_t *now_playing = lv_obj_create(s_ui_container);
-    lv_obj_set_size(now_playing, SCREEN_SIZE - 80, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(now_playing, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(now_playing, 0, 0);
-    lv_obj_set_style_pad_all(now_playing, 0, 0);
-    lv_obj_set_layout(now_playing, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(now_playing, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(now_playing, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(now_playing, 6, 0);
-    lv_obj_align(now_playing, LV_ALIGN_CENTER, 0, 20);  // Centered with slight down offset
 
-    // Volume display - large and prominent (primary use case)
-    s_volume_label_large = lv_label_create(now_playing);
-    lv_label_set_text(s_volume_label_large, "-- dB");
-    lv_obj_set_style_text_font(s_volume_label_large, font_normal(), 0);
-    lv_obj_set_style_text_color(s_volume_label_large, lv_color_hex(0xfafafa), 0);
-    lv_obj_set_style_margin_bottom(s_volume_label_large, 4, 0);  // Extra gap below volume
+    // Volume position - a real bold 56px bitmap font now (idf_app/main/fonts/
+    // notosans_bold_56.c, generated via lv_font_conv from a fonttools-
+    // instanced static Bold weight - see font_manager_get_xlarge()), not
+    // the render-time scale trick that crashed on hardware (see
+    // create_number_label's comment above). Bold rather than
+    // Regular per owner feedback that the regular weight read too thin at
+    // this size. Bottom edge sits ~3mm above the transport buttons (88px
+    // tall post owner-requested enlargement, centered on screen -
+    // TRANSPORT_BTN_SIZE is defined just below, not yet in scope here),
+    // plus a further 1mm (10px) down nudge - owner feedback that it was
+    // overlapping the dB label above it. 3mm/1mm assume this is the
+    // common 360x360 SH8601 1.43" round AMOLED (~10px/mm) - re-tune
+    // PX_PER_MM if that's wrong for this exact panel.
+#define PX_PER_MM 10
+    {
+        const int32_t transport_top_y = SCREEN_SIZE / 2 - 44;
+        const int32_t gap_px = 3 * PX_PER_MM;
+        const int32_t visual_height = 43;  // notosans_bold_56 line_height (real metric, not scaled/estimated)
+        const int32_t overlap_fix_px = 1 * PX_PER_MM;
+        const int32_t top_y = transport_top_y - gap_px - visual_height + overlap_fix_px;
+        s_volume_label_large = create_haloed_number_label(s_ui_container, font_xlarge(),
+                                                            lv_color_hex(0xfafafa), top_y,
+                                                            s_volume_label_halo);
+    }
 
-    // Artist label - smaller font, secondary text
-    s_artist_label = lv_label_create(now_playing);
-    lv_obj_set_width(s_artist_label, SCREEN_SIZE - 100);
-    lv_obj_set_style_text_font(s_artist_label, font_small(), 0);
-    lv_obj_set_style_text_align(s_artist_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_artist_label, lv_color_hex(0xaaaaaa), 0);
-    lv_label_set_long_mode(s_artist_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_style_anim_time(s_artist_label, 25000, LV_PART_MAIN);
-    lv_label_set_text(s_artist_label, s_pending.line2);
+    // dB-equivalent readout, at the volume number's old position minus a
+    // 1.5mm (15px) upward nudge - owner feedback that it was overlapping
+    // the (now bigger) volume number below it - in the smaller of the two
+    // text fonts this file already uses (font_small(), 22px vs. the
+    // volume number's 56px) so it still reads as secondary.
+    s_volume_db_label = create_number_label(s_ui_container, font_small(),
+                                             lv_color_hex(0xcccccc), 55 - (PX_PER_MM + PX_PER_MM / 2));
+#undef PX_PER_MM
 
-    // Track label - larger font, primary text
-    s_track_label = lv_label_create(now_playing);
-    lv_obj_set_width(s_track_label, SCREEN_SIZE - 100);
-    lv_obj_set_style_text_font(s_track_label, font_normal(), 0);
-    lv_obj_set_style_text_align(s_track_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_track_label, lv_color_hex(0xfafafa), 0);
-    lv_label_set_long_mode(s_track_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_style_anim_time(s_track_label, 25000, LV_PART_MAIN);
-    lv_label_set_text(s_track_label, s_pending.line1);
-
-    // Controls row - flex row for transport buttons
-    lv_obj_t *controls = lv_obj_create(now_playing);
-    lv_obj_set_size(controls, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(controls, 0, 0);
-    lv_obj_set_style_pad_all(controls, 0, 0);
-    lv_obj_set_layout(controls, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(controls, 14, 0);  // Spacing between buttons
-    lv_obj_set_style_margin_top(controls, 8, 0);   // Extra gap above controls
+    // Controls row - middle third, transport buttons (touch remains
+    // reliable per stock testing, so these stay touch targets rather than
+    // moving to rotate/click).
+    // Positioned manually (not LV_FLEX_ALIGN_SPACE_EVENLY, used in an
+    // earlier pass) because the owner wants prev/next pulled in 1mm
+    // toward play specifically, not all four gaps shrinking together the
+    // way space-evenly would. TRANSPORT_CENTER_OFFSET_PX is the resulting
+    // play-to-prev / play-to-next center distance: it started as
+    // space-evenly's own math - (SCREEN_SIZE - 3*TRANSPORT_BTN_SIZE)/4 gap
+    // between edge and button, so button-center-to-button-center is
+    // TRANSPORT_BTN_SIZE + gap - then had the 1mm (10px) inward nudge
+    // subtracted.
+#define TRANSPORT_BTN_SIZE 88  // +20px (2mm @ ~10px/mm) diameter over the original 68px, per owner feedback
+#define TRANSPORT_CENTER_OFFSET_PX 102  // was 112 (88 + 24 gap), minus 10px (1mm) inward nudge
 
     // Previous button
-    s_btn_prev = lv_btn_create(controls);
-    lv_obj_set_size(s_btn_prev, 60, 60);
+    s_btn_prev = lv_btn_create(s_ui_container);
+    lv_obj_set_size(s_btn_prev, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE);
     lv_obj_add_style(s_btn_prev, &style_button_secondary, 0);
     lv_obj_add_event_cb(s_btn_prev, btn_prev_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_style_bg_color(s_btn_prev, lv_color_hex(0x1a1a1a), LV_STATE_DEFAULT);
+    lv_obj_align(s_btn_prev, LV_ALIGN_CENTER, -TRANSPORT_CENTER_OFFSET_PX, 0);
+    // Same tint as the lower-third darkening (black, 60% opa) rather than
+    // an opaque dark grey, so the buttons read as part of the artwork
+    // dimming rather than solid discs sitting on top of it.
+    lv_obj_set_style_bg_color(s_btn_prev, lv_color_hex(0x000000), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(s_btn_prev, LV_OPA_60, LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(s_btn_prev, lv_color_hex(0x3c3c3c), LV_STATE_PRESSED);
     lv_obj_set_style_border_color(s_btn_prev, COLOR_GREY, LV_STATE_DEFAULT);
     lv_obj_set_style_border_color(s_btn_prev, lv_color_hex(0x5a9fd4), LV_STATE_PRESSED);
@@ -503,12 +725,16 @@ static void build_layout(void) {
     lv_obj_add_style(prev_label, &style_button_label, 0);
     lv_obj_center(prev_label);
 
-    // Play/Pause button (center, larger)
-    s_btn_play = lv_btn_create(controls);
-    lv_obj_set_size(s_btn_play, 80, 80);
+    // Play/Pause button (center) - same size as prev/next now, kept
+    // visually distinguished as the primary action via style_button_primary
+    // (accent border) rather than by being physically bigger.
+    s_btn_play = lv_btn_create(s_ui_container);
+    lv_obj_set_size(s_btn_play, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE);
     lv_obj_add_style(s_btn_play, &style_button_primary, 0);
     lv_obj_add_event_cb(s_btn_play, btn_play_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_style_bg_color(s_btn_play, lv_color_hex(0x2c2c2c), LV_STATE_DEFAULT);
+    lv_obj_align(s_btn_play, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(s_btn_play, lv_color_hex(0x000000), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(s_btn_play, LV_OPA_60, LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(s_btn_play, lv_color_hex(0x3c3c3c), LV_STATE_PRESSED);
     lv_obj_set_style_border_color(s_btn_play, lv_color_hex(0x5a9fd4), LV_STATE_DEFAULT);
     lv_obj_set_style_border_color(s_btn_play, lv_color_hex(0x7bb9e8), LV_STATE_PRESSED);
@@ -516,20 +742,22 @@ static void build_layout(void) {
     s_play_icon = lv_label_create(s_btn_play);
 #if !TARGET_PC
     lv_label_set_text(s_play_icon, ICON_PLAY);
-    lv_obj_set_style_text_font(s_play_icon, font_icon_large(), 0);
+    lv_obj_set_style_text_font(s_play_icon, font_icon_normal(), 0);
 #else
     lv_label_set_text(s_play_icon, LV_SYMBOL_PLAY);
-    lv_obj_set_style_text_font(s_play_icon, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(s_play_icon, &lv_font_montserrat_28, 0);
 #endif
     lv_obj_add_style(s_play_icon, &style_button_label, 0);
     lv_obj_center(s_play_icon);
 
     // Next button
-    s_btn_next = lv_btn_create(controls);
-    lv_obj_set_size(s_btn_next, 60, 60);
+    s_btn_next = lv_btn_create(s_ui_container);
+    lv_obj_set_size(s_btn_next, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE);
     lv_obj_add_style(s_btn_next, &style_button_secondary, 0);
     lv_obj_add_event_cb(s_btn_next, btn_next_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_style_bg_color(s_btn_next, lv_color_hex(0x1a1a1a), LV_STATE_DEFAULT);
+    lv_obj_align(s_btn_next, LV_ALIGN_CENTER, TRANSPORT_CENTER_OFFSET_PX, 0);
+    lv_obj_set_style_bg_color(s_btn_next, lv_color_hex(0x000000), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(s_btn_next, LV_OPA_60, LV_STATE_DEFAULT);
     lv_obj_set_style_bg_color(s_btn_next, lv_color_hex(0x3c3c3c), LV_STATE_PRESSED);
     lv_obj_set_style_border_color(s_btn_next, COLOR_GREY, LV_STATE_DEFAULT);
     lv_obj_set_style_border_color(s_btn_next, lv_color_hex(0x5a9fd4), LV_STATE_PRESSED);
@@ -544,6 +772,49 @@ static void build_layout(void) {
 #endif
     lv_obj_add_style(next_label, &style_button_label, 0);
     lv_obj_center(next_label);
+
+#undef TRANSPORT_BTN_SIZE
+#undef TRANSPORT_CENTER_OFFSET_PX
+
+    // Track/title label - upper row of the lower-third pair (owner
+    // feedback: title above artist, not below). Wider than the artist
+    // row below: on a round display the chord width available at this
+    // height (closer to the screen's vertical center) is noticeably more
+    // than at the row below it (closer to the bottom edge, where the
+    // circle narrows) - SCREEN_SIZE-100 under-uses it here even though
+    // it's the right width one row down. Offset -67: owner feedback said
+    // the first pass (-87, 5px clearance) was still too tight against
+    // s_lower_tint's top edge, so the whole title/artist pair moved down
+    // 2mm (20px @ ~10px/mm) together, preserving their relative spacing.
+    s_track_label = lv_label_create(s_ui_container);
+    lv_obj_set_width(s_track_label, SCREEN_SIZE - 60);
+    lv_obj_set_style_text_font(s_track_label, font_normal(), 0);
+    lv_obj_set_style_text_align(s_track_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_track_label, lv_color_hex(0xfafafa), 0);
+    lv_label_set_long_mode(s_track_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_track_label, 25000, LV_PART_MAIN);
+    lv_label_set_text(s_track_label, s_pending.line1);
+    lv_obj_align(s_track_label, LV_ALIGN_BOTTOM_MID, 0, -67);
+
+    // Artist label - lower row of the pair, closer to the bottom edge
+    // where the circle narrows; SCREEN_SIZE-100 matched that available
+    // width correctly at its original -58 offset (owner-confirmed on
+    // hardware). Moved down the same 2mm as the title above, to -38 -
+    // note this does mean the visible chord at this new, lower height is
+    // narrower than SCREEN_SIZE-100 (~221px vs. 260px), so a
+    // near-maximum-length artist name may now clip its outermost few
+    // pixels against the round bezel before its own scroll animation
+    // kicks in. Only worth revisiting if that's actually visible on
+    // hardware with a long real artist name.
+    s_artist_label = lv_label_create(s_ui_container);
+    lv_obj_set_width(s_artist_label, SCREEN_SIZE - 100);
+    lv_obj_set_style_text_font(s_artist_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_artist_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_artist_label, lv_color_hex(0xaaaaaa), 0);
+    lv_label_set_long_mode(s_artist_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_artist_label, 25000, LV_PART_MAIN);
+    lv_label_set_text(s_artist_label, s_pending.line2);
+    lv_obj_align(s_artist_label, LV_ALIGN_BOTTOM_MID, 0, -38);
 
     // Status bar at bottom - for transient messages like "Hi-Fi Control: Connected"
     s_status_bar = lv_label_create(s_ui_container);
@@ -566,47 +837,14 @@ static void build_layout(void) {
 // Event Handlers
 // ============================================================================
 
-static bool s_zone_long_pressed = false;  // Prevent click after long press
-
-static void zone_label_event_cb(lv_event_t *e) {
-    (void)e;
-    // Skip click if it came from a long press release
-    if (s_zone_long_pressed) {
-        s_zone_long_pressed = false;
-        return;
-    }
-    controller_action_t action = controller_action_simple(
-        CONTROLLER_ACTION_OPEN_ZONE_PICKER);
-    (void)controller_input_dispatch_action(&action);
-}
-
-static void zone_label_long_press_cb(lv_event_t *e) {
-    (void)e;
-    s_zone_long_pressed = true;  // Mark that we handled a long press
-    /* Settings used to live here; now reachable via the source picker's
-     * own Settings entry (see source_picker_client.c), so this dispatches
-     * the same top-third mute gesture as mute_region_long_press_cb below
-     * instead - otherwise the header (which sits on top of, and covers
-     * most of, the top third) would keep intercepting long-presses there
-     * for a now-redundant action, leaving mute reachable only in the
-     * narrow margin outside the header's own bounding box. */
-    controller_action_t action =
-        controller_action_simple(CONTROLLER_ACTION_TOGGLE_MUTE);
-    (void)controller_input_dispatch_action(&action);
-}
-
 // Long-press-by-region gestures (ADR: docs/meta/decisions/
 // 2026-09-14_DESIGN_HYBRID_DIAL_UI.md). These regions are invisible,
 // full-width bands created early (right after s_ui_container) so every
-// other widget - header, now_playing's volume/track/controls cluster -
-// sits above them in z-order and keeps handling its own taps/long-presses
-// exactly as before; these only ever see a long-press that lands on
-// otherwise-empty background. The header (which covers most of the
-// physical top third until the Now Playing layout rework removes it)
-// dispatches this same action from its own long-press handler
-// (zone_label_long_press_cb above) rather than leaving a competing
-// Settings gesture there, so the whole top third behaves consistently
-// regardless of whether the header happens to be under the touch point.
+// other widget sits above them in z-order and keeps handling its own
+// taps/long-presses exactly as before; these only ever see a long-press
+// that lands on otherwise-empty background. Now that the Now Playing
+// layout rework has removed the old header entirely, these regions are
+// the only long-press handlers left covering the top/bottom thirds.
 static void mute_region_long_press_cb(lv_event_t *e) {
     (void)e;
     controller_action_t action =
@@ -686,15 +924,18 @@ static void apply_state(const struct ui_state *state) {
     volume_initialized = true;
     last_volume = state->volume;
 
-    // Convert to 0-100 scale for arc display using zone's actual min/max
-    int vol_pct = calculate_volume_percentage(state->volume, state->volume_min, state->volume_max);
-    lv_arc_set_value(s_volume_arc, vol_pct);
+    redraw_volume_ring(state->volume, state->volume_min, state->volume_max);
 
     // Display volume (format matches zone's step precision)
     char vol_text[16];
     // Note: volume_min is atomic float read; no lock needed (self-corrects on next poll if stale)
     format_volume_text(vol_text, sizeof(vol_text), state->volume, state->volume_min, state->volume_step);
-    lv_label_set_text(s_volume_label_large, vol_text);
+    set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
+
+    char db_text[16];
+    snprintf(db_text, sizeof(db_text), "%.1f dB",
+             derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max));
+    lv_label_set_text(s_volume_db_label, db_text);
 
     // Update progress arc based on seek position and track length
     if (s_progress_arc && state->length > 0) {
@@ -748,13 +989,11 @@ static void poll_pending(lv_timer_t *timer) {
         s_message_dirty = false;
     }
 
-    bool zone_name_changed = s_zone_name_dirty;
-    char zone_name[64];
-    if (zone_name_changed) {
-        strncpy(zone_name, s_pending.zone_name, sizeof(zone_name) - 1);
-        zone_name[sizeof(zone_name) - 1] = '\0';
-        s_zone_name_dirty = false;
-    }
+    // Zone name is still tracked in s_pending (ui_set_zone_name remains a
+    // public API used by controller_presentation_dial.c and the WiFi-setup
+    // path in main_idf.c), but the Now Playing screen no longer renders it
+    // per the ADR, so there is nothing left here to apply to a widget.
+    s_zone_name_dirty = false;
 
     bool network_status_changed = s_network_status_dirty;
     char net_status[128];
@@ -770,9 +1009,6 @@ static void poll_pending(lv_timer_t *timer) {
     }
     if (show_message) {
         show_status_message(message);
-    }
-    if (zone_name_changed && s_zone_label) {
-        lv_label_set_text(s_zone_label, zone_name);
     }
     if (network_status_changed && s_status_bar) {
         // Set network status directly without auto-clear timer
@@ -1140,20 +1376,22 @@ void ui_show_volume_change(float vol, float vol_step) {
 
     // Note: Reading volume_min/volume_max without lock (atomic float reads, self-correct on next poll if stale)
 
-    // Update volume arc immediately (optimistic)
-    if (s_volume_arc) {
-        int vol_pct = calculate_volume_percentage(vol, s_pending.volume_min, s_pending.volume_max);
-        lv_arc_set_value(s_volume_arc, vol_pct);
-    }
+    // Update volume ring immediately (optimistic)
+    redraw_volume_ring(vol, s_pending.volume_min, s_pending.volume_max);
 
     // Update volume label immediately (optimistic)
     char vol_text[16];
     format_volume_text(vol_text, sizeof(vol_text), vol, s_pending.volume_min, vol_step);
 
     if (s_volume_label_large) {
-        lv_label_set_text(s_volume_label_large, vol_text);
+        set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
         emphasize_volume_label();
     }
+
+    char db_text[16];
+    snprintf(db_text, sizeof(db_text), "%.1f dB",
+             derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max));
+    lv_label_set_text(s_volume_db_label, db_text);
 }
 
 void ui_set_playing(bool playing) {
@@ -1531,29 +1769,37 @@ void ui_set_controls_visible(bool visible) {
         if (s_btn_prev) lv_obj_clear_flag(s_btn_prev, LV_OBJ_FLAG_HIDDEN);
         if (s_btn_play) lv_obj_clear_flag(s_btn_play, LV_OBJ_FLAG_HIDDEN);
         if (s_btn_next) lv_obj_clear_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
-        if (s_track_label) lv_obj_clear_flag(s_track_label, LV_OBJ_FLAG_HIDDEN);
-        if (s_artist_label) lv_obj_clear_flag(s_artist_label, LV_OBJ_FLAG_HIDDEN);
-        if (s_zone_label) lv_obj_clear_flag(s_zone_label, LV_OBJ_FLAG_HIDDEN);
+        // Track/artist/tint are never hidden by this function at all (see
+        // the else branch) - no need to show them here either.
         if (s_volume_label_large) lv_obj_clear_flag(s_volume_label_large, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 8; i++) {
+            if (s_volume_label_halo[i]) lv_obj_clear_flag(s_volume_label_halo[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_volume_db_label) lv_obj_clear_flag(s_volume_db_label, LV_OBJ_FLAG_HIDDEN);
         if (s_battery_icon) lv_obj_clear_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
         if (s_status_dot) lv_obj_clear_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
         if (s_status_bar) lv_obj_clear_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
-        // Restore artwork dimming for text contrast
-        if (s_artwork_image) lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_40, 0);
+        // Artwork stays full brightness (ADR: no full-screen darkening mask) -
+        // legibility comes from the lower-third tint object, not image opacity.
+        if (s_artwork_image) lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
         ESP_LOGI(UI_TAG, "Controls shown");
         // Force battery display update after showing controls (GH-86)
         // Without this, hysteresis in update_battery_display() prevents the icon from reappearing
         s_last_battery_level = -1;
         update_battery_display();
     } else {
-        // Hide controls for art mode - show only artwork and arcs
+        // Hide controls for art mode - owner feedback: only the volume
+        // display (number + dB), battery icon, and transport buttons
+        // should disappear here. Track/artist text and the lower-third
+        // tint behind them stay exactly as in normal mode.
         if (s_btn_prev) lv_obj_add_flag(s_btn_prev, LV_OBJ_FLAG_HIDDEN);
         if (s_btn_play) lv_obj_add_flag(s_btn_play, LV_OBJ_FLAG_HIDDEN);
         if (s_btn_next) lv_obj_add_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
-        if (s_track_label) lv_obj_add_flag(s_track_label, LV_OBJ_FLAG_HIDDEN);
-        if (s_artist_label) lv_obj_add_flag(s_artist_label, LV_OBJ_FLAG_HIDDEN);
-        if (s_zone_label) lv_obj_add_flag(s_zone_label, LV_OBJ_FLAG_HIDDEN);
         if (s_volume_label_large) lv_obj_add_flag(s_volume_label_large, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 8; i++) {
+            if (s_volume_label_halo[i]) lv_obj_add_flag(s_volume_label_halo[i], LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_volume_db_label) lv_obj_add_flag(s_volume_db_label, LV_OBJ_FLAG_HIDDEN);
         if (s_battery_icon) lv_obj_add_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
         if (s_status_dot) lv_obj_add_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
         if (s_status_bar) lv_obj_add_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);

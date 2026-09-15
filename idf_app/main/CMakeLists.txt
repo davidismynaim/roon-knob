@@ -24,6 +24,7 @@ set(SRC_FILES
     # Typography: Lato for metadata, Noto Sans for content (matches Roon's design)
     "fonts/lato_22.c"
     "fonts/notosans_28.c"
+    "fonts/notosans_bold_56.c"
     "fonts/material_icons_22.c"
     "fonts/material_icons_28.c"
     "fonts/material_icons_44.c"
