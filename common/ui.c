@@ -62,7 +62,7 @@ static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - pr
 static lv_timer_t *s_volume_emphasis_timer;  // Timer to reset volume emphasis after adjustment
 static lv_obj_t *s_status_dot;         // Online/offline indicator
 static lv_obj_t *s_battery_icon;       // Battery icon (Material Symbols)
-static lv_obj_t *s_zone_label;         // Zone name
+static lv_obj_t *s_lower_tint;         // Lower-third darkening tint for text legibility
 static lv_obj_t *s_btn_prev;           // Previous track button
 static lv_obj_t *s_btn_play;           // Play/pause button (center, large)
 static lv_obj_t *s_btn_next;           // Next track button
@@ -159,8 +159,6 @@ static void apply_state(const struct ui_state *state);
 static void build_layout(void);
 static void poll_pending(lv_timer_t *timer);
 static void set_status_dot(bool online);
-static void zone_label_event_cb(lv_event_t *e);
-static void zone_label_long_press_cb(lv_event_t *e);
 static void mute_region_long_press_cb(lv_event_t *e);
 static void source_region_long_press_cb(lv_event_t *e);
 static void btn_prev_event_cb(lv_event_t *e);
@@ -300,8 +298,10 @@ static void build_layout(void) {
     lv_obj_set_size(s_artwork_image, SCREEN_SIZE, SCREEN_SIZE);
     lv_obj_center(s_artwork_image);
     lv_obj_add_flag(s_artwork_image, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads
-    // Dim the artwork for better text contrast (avoid overlay layer)
-    lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_40, 0);  // 40% opacity = 60% dimming
+    // Full brightness, edge-to-edge (ADR: no full-screen darkening mask -
+    // only the lower third gets a tint, added below, just for text
+    // legibility over whatever's there).
+    lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
 
     // Create UI container directly (no intermediate overlay layer)
     s_ui_container = lv_obj_create(s_artwork_container);
@@ -392,86 +392,40 @@ static void build_layout(void) {
     lv_obj_set_style_border_width(s_status_dot, 0, 0);
     lv_obj_align(s_status_dot, LV_ALIGN_TOP_RIGHT, -35, 35);
 
-    // ========================================================================
-    // Header group - battery + zone at top (flex column, explicit position)
-    // ========================================================================
-    lv_obj_t *header = lv_obj_create(s_ui_container);
-    lv_obj_set_size(header, SCREEN_SIZE - 60, 95);  // Tall tap zone extending toward volume
-    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_pad_all(header, 0, 0);
-    lv_obj_set_layout(header, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);  // Content at top, tap zone extends down
-    lv_obj_set_style_pad_row(header, 0, 0);  // Tight - battery and zone close together
-    lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 28);  // Explicit position at top
-
+    // Battery icon - top left, mirroring the status dot. Independent of
+    // the (now removed) zone header: the ADR removes the zone
+    // selector/current-zone display entirely from this screen, but says
+    // nothing about battery status, so this stays as its own small
+    // top-area indicator rather than disappearing along with the header.
 #if !TARGET_PC
-    s_battery_icon = lv_label_create(header);
+    s_battery_icon = lv_label_create(s_ui_container);
     lv_label_set_text(s_battery_icon, ICON_BATTERY_FULL);
     lv_obj_set_style_text_font(s_battery_icon, font_manager_get_lucide_battery(), 0);
     lv_obj_set_style_text_color(s_battery_icon, lv_color_hex(0x888888), 0);
+    lv_obj_align(s_battery_icon, LV_ALIGN_TOP_LEFT, 35, 35);
 #endif
 
-    // Make entire header tappable for zone selection
-    lv_obj_add_flag(header, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(header, zone_label_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(header, zone_label_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
-    // Visual feedback on press
-    lv_obj_set_style_bg_color(header, lv_color_hex(0x333333), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(header, LV_OPA_50, LV_STATE_PRESSED);
-
-    s_zone_label = lv_label_create(header);
-    lv_label_set_text(s_zone_label, s_pending.zone_name);
-    lv_obj_set_style_text_font(s_zone_label, font_small(), 0);
-    lv_obj_set_style_text_color(s_zone_label, lv_color_hex(0xbbbbbb), 0);
-    lv_obj_set_width(s_zone_label, SCREEN_SIZE - 120);
-    lv_obj_set_style_text_align(s_zone_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(s_zone_label, LV_LABEL_LONG_DOT);
-
     // ========================================================================
-    // Now Playing group - volume, artist, track, controls (flex column, centered)
+    // Now Playing layout (ADR: docs/meta/decisions/
+    // 2026-09-14_DESIGN_HYBRID_DIAL_UI.md) - volume/controls/track-info
+    // independently positioned in their own thirds (matching the
+    // long-press gesture regions' exact boundaries) rather than clustered
+    // in one centered flex column. Y-offsets below are a first pass, not
+    // pixel-verified against the round display's usable width at each
+    // row - expect to tune these by eye on hardware.
     // ========================================================================
-    lv_obj_t *now_playing = lv_obj_create(s_ui_container);
-    lv_obj_set_size(now_playing, SCREEN_SIZE - 80, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(now_playing, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(now_playing, 0, 0);
-    lv_obj_set_style_pad_all(now_playing, 0, 0);
-    lv_obj_set_layout(now_playing, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(now_playing, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(now_playing, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(now_playing, 6, 0);
-    lv_obj_align(now_playing, LV_ALIGN_CENTER, 0, 20);  // Centered with slight down offset
 
-    // Volume display - large and prominent (primary use case)
-    s_volume_label_large = lv_label_create(now_playing);
-    lv_label_set_text(s_volume_label_large, "-- dB");
-    lv_obj_set_style_text_font(s_volume_label_large, font_normal(), 0);
+    // Volume display - top third, large and prominent (primary use case)
+    s_volume_label_large = lv_label_create(s_ui_container);
+    lv_label_set_text(s_volume_label_large, "--");
+    lv_obj_set_style_text_font(s_volume_label_large, font_large(), 0);
     lv_obj_set_style_text_color(s_volume_label_large, lv_color_hex(0xfafafa), 0);
-    lv_obj_set_style_margin_bottom(s_volume_label_large, 4, 0);  // Extra gap below volume
+    lv_obj_align(s_volume_label_large, LV_ALIGN_TOP_MID, 0, 55);
 
-    // Artist label - smaller font, secondary text
-    s_artist_label = lv_label_create(now_playing);
-    lv_obj_set_width(s_artist_label, SCREEN_SIZE - 100);
-    lv_obj_set_style_text_font(s_artist_label, font_small(), 0);
-    lv_obj_set_style_text_align(s_artist_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_artist_label, lv_color_hex(0xaaaaaa), 0);
-    lv_label_set_long_mode(s_artist_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_style_anim_time(s_artist_label, 25000, LV_PART_MAIN);
-    lv_label_set_text(s_artist_label, s_pending.line2);
-
-    // Track label - larger font, primary text
-    s_track_label = lv_label_create(now_playing);
-    lv_obj_set_width(s_track_label, SCREEN_SIZE - 100);
-    lv_obj_set_style_text_font(s_track_label, font_normal(), 0);
-    lv_obj_set_style_text_align(s_track_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_track_label, lv_color_hex(0xfafafa), 0);
-    lv_label_set_long_mode(s_track_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_style_anim_time(s_track_label, 25000, LV_PART_MAIN);
-    lv_label_set_text(s_track_label, s_pending.line1);
-
-    // Controls row - flex row for transport buttons
-    lv_obj_t *controls = lv_obj_create(now_playing);
+    // Controls row - middle third, flex row for transport buttons, all
+    // three the same size (touch remains reliable per stock testing, so
+    // these stay touch targets rather than moving to rotate/click).
+    lv_obj_t *controls = lv_obj_create(s_ui_container);
     lv_obj_set_size(controls, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(controls, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(controls, 0, 0);
@@ -480,11 +434,13 @@ static void build_layout(void) {
     lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(controls, 14, 0);  // Spacing between buttons
-    lv_obj_set_style_margin_top(controls, 8, 0);   // Extra gap above controls
+    lv_obj_align(controls, LV_ALIGN_CENTER, 0, 0);  // Middle third's center is screen center
+
+#define TRANSPORT_BTN_SIZE 68
 
     // Previous button
     s_btn_prev = lv_btn_create(controls);
-    lv_obj_set_size(s_btn_prev, 60, 60);
+    lv_obj_set_size(s_btn_prev, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE);
     lv_obj_add_style(s_btn_prev, &style_button_secondary, 0);
     lv_obj_add_event_cb(s_btn_prev, btn_prev_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_set_style_bg_color(s_btn_prev, lv_color_hex(0x1a1a1a), LV_STATE_DEFAULT);
@@ -503,9 +459,11 @@ static void build_layout(void) {
     lv_obj_add_style(prev_label, &style_button_label, 0);
     lv_obj_center(prev_label);
 
-    // Play/Pause button (center, larger)
+    // Play/Pause button (center) - same size as prev/next now, kept
+    // visually distinguished as the primary action via style_button_primary
+    // (accent border) rather than by being physically bigger.
     s_btn_play = lv_btn_create(controls);
-    lv_obj_set_size(s_btn_play, 80, 80);
+    lv_obj_set_size(s_btn_play, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE);
     lv_obj_add_style(s_btn_play, &style_button_primary, 0);
     lv_obj_add_event_cb(s_btn_play, btn_play_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_set_style_bg_color(s_btn_play, lv_color_hex(0x2c2c2c), LV_STATE_DEFAULT);
@@ -516,17 +474,17 @@ static void build_layout(void) {
     s_play_icon = lv_label_create(s_btn_play);
 #if !TARGET_PC
     lv_label_set_text(s_play_icon, ICON_PLAY);
-    lv_obj_set_style_text_font(s_play_icon, font_icon_large(), 0);
+    lv_obj_set_style_text_font(s_play_icon, font_icon_normal(), 0);
 #else
     lv_label_set_text(s_play_icon, LV_SYMBOL_PLAY);
-    lv_obj_set_style_text_font(s_play_icon, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(s_play_icon, &lv_font_montserrat_28, 0);
 #endif
     lv_obj_add_style(s_play_icon, &style_button_label, 0);
     lv_obj_center(s_play_icon);
 
     // Next button
     s_btn_next = lv_btn_create(controls);
-    lv_obj_set_size(s_btn_next, 60, 60);
+    lv_obj_set_size(s_btn_next, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE);
     lv_obj_add_style(s_btn_next, &style_button_secondary, 0);
     lv_obj_add_event_cb(s_btn_next, btn_next_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_set_style_bg_color(s_btn_next, lv_color_hex(0x1a1a1a), LV_STATE_DEFAULT);
@@ -544,6 +502,43 @@ static void build_layout(void) {
 #endif
     lv_obj_add_style(next_label, &style_button_label, 0);
     lv_obj_center(next_label);
+
+#undef TRANSPORT_BTN_SIZE
+
+    // Lower-third darkening tint - just enough for track/artist text
+    // legibility over the artwork; the upper two-thirds stay fully
+    // undimmed (unlike the removed full-screen mask). Created before the
+    // labels below so they render on top of it.
+    s_lower_tint = lv_obj_create(s_ui_container);
+    lv_obj_set_size(s_lower_tint, SCREEN_SIZE, SCREEN_SIZE / 3);
+    lv_obj_align(s_lower_tint, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(s_lower_tint, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_lower_tint, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_lower_tint, 0, 0);
+    lv_obj_set_style_radius(s_lower_tint, 0, 0);
+    lv_obj_remove_flag(s_lower_tint, LV_OBJ_FLAG_CLICKABLE);  // Let long-press reach source_region beneath it
+
+    // Artist label - lower third, smaller font, secondary text
+    s_artist_label = lv_label_create(s_ui_container);
+    lv_obj_set_width(s_artist_label, SCREEN_SIZE - 100);
+    lv_obj_set_style_text_font(s_artist_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_artist_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_artist_label, lv_color_hex(0xaaaaaa), 0);
+    lv_label_set_long_mode(s_artist_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_artist_label, 25000, LV_PART_MAIN);
+    lv_label_set_text(s_artist_label, s_pending.line2);
+    lv_obj_align(s_artist_label, LV_ALIGN_BOTTOM_MID, 0, -92);
+
+    // Track label - lower third, larger font, primary text
+    s_track_label = lv_label_create(s_ui_container);
+    lv_obj_set_width(s_track_label, SCREEN_SIZE - 100);
+    lv_obj_set_style_text_font(s_track_label, font_normal(), 0);
+    lv_obj_set_style_text_align(s_track_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_track_label, lv_color_hex(0xfafafa), 0);
+    lv_label_set_long_mode(s_track_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_track_label, 25000, LV_PART_MAIN);
+    lv_label_set_text(s_track_label, s_pending.line1);
+    lv_obj_align(s_track_label, LV_ALIGN_BOTTOM_MID, 0, -58);
 
     // Status bar at bottom - for transient messages like "Hi-Fi Control: Connected"
     s_status_bar = lv_label_create(s_ui_container);
@@ -566,47 +561,14 @@ static void build_layout(void) {
 // Event Handlers
 // ============================================================================
 
-static bool s_zone_long_pressed = false;  // Prevent click after long press
-
-static void zone_label_event_cb(lv_event_t *e) {
-    (void)e;
-    // Skip click if it came from a long press release
-    if (s_zone_long_pressed) {
-        s_zone_long_pressed = false;
-        return;
-    }
-    controller_action_t action = controller_action_simple(
-        CONTROLLER_ACTION_OPEN_ZONE_PICKER);
-    (void)controller_input_dispatch_action(&action);
-}
-
-static void zone_label_long_press_cb(lv_event_t *e) {
-    (void)e;
-    s_zone_long_pressed = true;  // Mark that we handled a long press
-    /* Settings used to live here; now reachable via the source picker's
-     * own Settings entry (see source_picker_client.c), so this dispatches
-     * the same top-third mute gesture as mute_region_long_press_cb below
-     * instead - otherwise the header (which sits on top of, and covers
-     * most of, the top third) would keep intercepting long-presses there
-     * for a now-redundant action, leaving mute reachable only in the
-     * narrow margin outside the header's own bounding box. */
-    controller_action_t action =
-        controller_action_simple(CONTROLLER_ACTION_TOGGLE_MUTE);
-    (void)controller_input_dispatch_action(&action);
-}
-
 // Long-press-by-region gestures (ADR: docs/meta/decisions/
 // 2026-09-14_DESIGN_HYBRID_DIAL_UI.md). These regions are invisible,
 // full-width bands created early (right after s_ui_container) so every
-// other widget - header, now_playing's volume/track/controls cluster -
-// sits above them in z-order and keeps handling its own taps/long-presses
-// exactly as before; these only ever see a long-press that lands on
-// otherwise-empty background. The header (which covers most of the
-// physical top third until the Now Playing layout rework removes it)
-// dispatches this same action from its own long-press handler
-// (zone_label_long_press_cb above) rather than leaving a competing
-// Settings gesture there, so the whole top third behaves consistently
-// regardless of whether the header happens to be under the touch point.
+// other widget sits above them in z-order and keeps handling its own
+// taps/long-presses exactly as before; these only ever see a long-press
+// that lands on otherwise-empty background. Now that the Now Playing
+// layout rework has removed the old header entirely, these regions are
+// the only long-press handlers left covering the top/bottom thirds.
 static void mute_region_long_press_cb(lv_event_t *e) {
     (void)e;
     controller_action_t action =
@@ -748,13 +710,11 @@ static void poll_pending(lv_timer_t *timer) {
         s_message_dirty = false;
     }
 
-    bool zone_name_changed = s_zone_name_dirty;
-    char zone_name[64];
-    if (zone_name_changed) {
-        strncpy(zone_name, s_pending.zone_name, sizeof(zone_name) - 1);
-        zone_name[sizeof(zone_name) - 1] = '\0';
-        s_zone_name_dirty = false;
-    }
+    // Zone name is still tracked in s_pending (ui_set_zone_name remains a
+    // public API used by controller_presentation_dial.c and the WiFi-setup
+    // path in main_idf.c), but the Now Playing screen no longer renders it
+    // per the ADR, so there is nothing left here to apply to a widget.
+    s_zone_name_dirty = false;
 
     bool network_status_changed = s_network_status_dirty;
     char net_status[128];
@@ -770,9 +730,6 @@ static void poll_pending(lv_timer_t *timer) {
     }
     if (show_message) {
         show_status_message(message);
-    }
-    if (zone_name_changed && s_zone_label) {
-        lv_label_set_text(s_zone_label, zone_name);
     }
     if (network_status_changed && s_status_bar) {
         // Set network status directly without auto-clear timer
@@ -1533,13 +1490,14 @@ void ui_set_controls_visible(bool visible) {
         if (s_btn_next) lv_obj_clear_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
         if (s_track_label) lv_obj_clear_flag(s_track_label, LV_OBJ_FLAG_HIDDEN);
         if (s_artist_label) lv_obj_clear_flag(s_artist_label, LV_OBJ_FLAG_HIDDEN);
-        if (s_zone_label) lv_obj_clear_flag(s_zone_label, LV_OBJ_FLAG_HIDDEN);
+        if (s_lower_tint) lv_obj_clear_flag(s_lower_tint, LV_OBJ_FLAG_HIDDEN);
         if (s_volume_label_large) lv_obj_clear_flag(s_volume_label_large, LV_OBJ_FLAG_HIDDEN);
         if (s_battery_icon) lv_obj_clear_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
         if (s_status_dot) lv_obj_clear_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
         if (s_status_bar) lv_obj_clear_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
-        // Restore artwork dimming for text contrast
-        if (s_artwork_image) lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_40, 0);
+        // Artwork stays full brightness (ADR: no full-screen darkening mask) -
+        // legibility comes from the lower-third tint object, not image opacity.
+        if (s_artwork_image) lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
         ESP_LOGI(UI_TAG, "Controls shown");
         // Force battery display update after showing controls (GH-86)
         // Without this, hysteresis in update_battery_display() prevents the icon from reappearing
@@ -1552,7 +1510,7 @@ void ui_set_controls_visible(bool visible) {
         if (s_btn_next) lv_obj_add_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
         if (s_track_label) lv_obj_add_flag(s_track_label, LV_OBJ_FLAG_HIDDEN);
         if (s_artist_label) lv_obj_add_flag(s_artist_label, LV_OBJ_FLAG_HIDDEN);
-        if (s_zone_label) lv_obj_add_flag(s_zone_label, LV_OBJ_FLAG_HIDDEN);
+        if (s_lower_tint) lv_obj_add_flag(s_lower_tint, LV_OBJ_FLAG_HIDDEN);
         if (s_volume_label_large) lv_obj_add_flag(s_volume_label_large, LV_OBJ_FLAG_HIDDEN);
         if (s_battery_icon) lv_obj_add_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
         if (s_status_dot) lv_obj_add_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
