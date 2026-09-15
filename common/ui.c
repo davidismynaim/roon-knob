@@ -15,6 +15,7 @@
 #include "lvgl.h"
 #include "ui.h"
 #include "bridge_client.h"
+#include "ha_volume_client.h"
 #include "track_title_filter.h"
 
 #ifdef ESP_PLATFORM
@@ -82,7 +83,32 @@ static lv_obj_t *s_background;         // Light background container
 // Artwork layers
 static lv_obj_t *s_artwork_container;  // Container for artwork layers
 static lv_obj_t *s_artwork_image;      // Album art image
-static lv_obj_t *s_ui_container;       // Container for all UI widgets
+static lv_obj_t *s_ui_container;       // Container for all UI widgets (Music/Now Playing)
+
+// TV/Vinyl screens (ADR: docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md,
+// Screen 2). Sibling of s_ui_container rather than reusing it - no track/
+// timeline concept, no transport controls, different volume treatment
+// entirely (bigger, centered, no halo - the background photo is already
+// dark, unlike variable-brightness album art). s_volume_canvas (the outer
+// ring) is shared between all three screens - see its own comment below
+// for why it moved out of s_ui_container to make that possible.
+static lv_obj_t *s_tv_vinyl_bg;             // Background photo (placeholder color until real photos are wired in)
+static lv_obj_t *s_tv_vinyl_container;      // Everything else: labels, gesture regions
+static lv_obj_t *s_tv_vinyl_volume_label;   // Hero volume number - 2x xlarge, no halo
+static lv_obj_t *s_tv_vinyl_db_label;       // dB-equivalent, above the hero number - 2x font_small, no halo
+typedef enum {
+    DIAL_SCREEN_MUSIC = 0,
+    DIAL_SCREEN_TV,
+    DIAL_SCREEN_VINYL,
+} dial_screen_t;
+static dial_screen_t s_current_screen = DIAL_SCREEN_MUSIC;
+
+// Full-screen mute state (owner direction: roll into the same slice as
+// TV/Vinyl rather than as its own later one; shown regardless of which of
+// the three screens above is active underneath, since
+// input_boolean.audio_mute is a single global state, not per-input).
+static lv_obj_t *s_mute_overlay;
+static bool s_mute_overlay_visible = false;  // Avoid redundant show/hide calls every poll cycle
 
 // Reusable styles - smart-knob inspired
 static lv_style_t style_button_primary;    // Center play/pause button
@@ -147,6 +173,8 @@ static inline const lv_font_t *font_small(void) { return font_manager_get_small(
 static inline const lv_font_t *font_normal(void) { return font_manager_get_normal(); }
 static inline const lv_font_t *font_large(void) { return font_manager_get_large(); }
 static inline const lv_font_t *font_xlarge(void) { return font_manager_get_xlarge(); }
+static inline const lv_font_t *font_xxlarge(void) { return font_manager_get_xxlarge(); }
+static inline const lv_font_t *font_db_large(void) { return font_manager_get_db_large(); }
 // Icon fonts for UI controls
 static inline const lv_font_t *font_icon_small(void) { return font_manager_get_icon_small(); }
 static inline const lv_font_t *font_icon_normal(void) { return font_manager_get_icon_normal(); }
@@ -159,6 +187,8 @@ static inline const lv_font_t *font_small(void) { return &lv_font_montserrat_20;
 static inline const lv_font_t *font_normal(void) { return &lv_font_montserrat_28; }
 static inline const lv_font_t *font_large(void) { return &lv_font_montserrat_48; }
 static inline const lv_font_t *font_xlarge(void) { return &lv_font_montserrat_48; }  // PC sim has no 56px asset
+static inline const lv_font_t *font_xxlarge(void) { return &lv_font_montserrat_48; }  // PC sim has no 112px asset
+static inline const lv_font_t *font_db_large(void) { return &lv_font_montserrat_48; }  // PC sim has no 44px asset
 static inline const lv_font_t *font_icon_small(void) { return &lv_font_montserrat_20; }
 static inline const lv_font_t *font_icon_normal(void) { return &lv_font_montserrat_28; }
 static inline const lv_font_t *font_icon_large(void) { return &lv_font_montserrat_48; }
@@ -173,6 +203,10 @@ static void poll_pending(lv_timer_t *timer);
 static void set_status_dot(bool online);
 static void mute_region_long_press_cb(lv_event_t *e);
 static void source_region_long_press_cb(lv_event_t *e);
+static void build_tv_vinyl_layout(void);
+static void build_mute_overlay(void);
+static void apply_current_screen(void);
+static void apply_mute_overlay(void);
 static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
 static void btn_next_event_cb(lv_event_t *e);
@@ -511,6 +545,50 @@ static void build_layout(void) {
     // legibility over whatever's there).
     lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
 
+    // TV/Vinyl background - full-screen wallpaper (ADR Screen 2). Placeholder
+    // solid color until real photography is wired in; swapping in an actual
+    // photo later only needs to change what's drawn here (lv_img instead of
+    // a colored lv_obj), everything else in this file is unaffected. Hidden
+    // whenever Music is the active screen - see apply_current_screen().
+    s_tv_vinyl_bg = lv_obj_create(s_artwork_container);
+    lv_obj_set_size(s_tv_vinyl_bg, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_center(s_tv_vinyl_bg);
+    lv_obj_set_style_bg_color(s_tv_vinyl_bg, lv_color_hex(0x1a1a1a), 0);
+    lv_obj_set_style_bg_opa(s_tv_vinyl_bg, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_tv_vinyl_bg, 0, 0);
+    lv_obj_set_style_radius(s_tv_vinyl_bg, 0, 0);
+    lv_obj_remove_flag(s_tv_vinyl_bg, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_tv_vinyl_bg, LV_OBJ_FLAG_HIDDEN);
+
+    // Outer volume ring - 256 dots around the display edge (one per HA
+    // volume click, i.e. every 0.5dB on the direct-to-HA Nexus path),
+    // hand-drawn once per volume change into a canvas rather than redrawn
+    // live every LVGL refresh - see redraw_volume_ring() above for why.
+    // A sibling of s_ui_container/s_tv_vinyl_container (not a child of
+    // either) so it stays visible and on top of whichever background is
+    // active across all three screens (ADR: "outer volume ring retained,
+    // same behavior as Music" on TV/Vinyl too) without needing two copies.
+    {
+        uint32_t stride = lv_draw_buf_width_to_stride(VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
+        size_t buf_size = (size_t)stride * VOLUME_RING_SIZE;
+#ifdef ESP_PLATFORM
+        s_volume_canvas_buf = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+        s_volume_canvas_buf = malloc(buf_size);
+#endif
+        if (!s_volume_canvas_buf) {
+            ESP_LOGE(UI_TAG, "Failed to allocate %u-byte volume ring canvas buffer",
+                     (unsigned)buf_size);
+        } else {
+            s_volume_canvas = lv_canvas_create(s_artwork_container);
+            lv_canvas_set_buffer(s_volume_canvas, s_volume_canvas_buf, VOLUME_RING_SIZE,
+                                 VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
+            lv_obj_center(s_volume_canvas);
+            lv_obj_remove_flag(s_volume_canvas, LV_OBJ_FLAG_CLICKABLE);
+            redraw_volume_ring(0.0f, 0.0f, 0.0f);  // Forces the canvas's first real draw (transparent/empty until real data arrives)
+        }
+    }
+
     // Create UI container directly (no intermediate overlay layer)
     s_ui_container = lv_obj_create(s_artwork_container);
     lv_obj_set_size(s_ui_container, SCREEN_SIZE, SCREEN_SIZE);
@@ -566,31 +644,6 @@ static void build_layout(void) {
     lv_obj_set_style_border_width(s_lower_tint, 0, 0);
     lv_obj_set_style_radius(s_lower_tint, 0, 0);
     lv_obj_remove_flag(s_lower_tint, LV_OBJ_FLAG_CLICKABLE);  // Let long-press reach source_region beneath it
-
-    // Outer volume ring - 256 dots around the display edge (one per HA
-    // volume click, i.e. every 0.5dB on the direct-to-HA Nexus path),
-    // hand-drawn once per volume change into a canvas rather than redrawn
-    // live every LVGL refresh - see redraw_volume_ring() above for why.
-    {
-        uint32_t stride = lv_draw_buf_width_to_stride(VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
-        size_t buf_size = (size_t)stride * VOLUME_RING_SIZE;
-#ifdef ESP_PLATFORM
-        s_volume_canvas_buf = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-#else
-        s_volume_canvas_buf = malloc(buf_size);
-#endif
-        if (!s_volume_canvas_buf) {
-            ESP_LOGE(UI_TAG, "Failed to allocate %u-byte volume ring canvas buffer",
-                     (unsigned)buf_size);
-        } else {
-            s_volume_canvas = lv_canvas_create(s_ui_container);
-            lv_canvas_set_buffer(s_volume_canvas, s_volume_canvas_buf, VOLUME_RING_SIZE,
-                                 VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
-            lv_obj_center(s_volume_canvas);
-            lv_obj_remove_flag(s_volume_canvas, LV_OBJ_FLAG_CLICKABLE);
-            redraw_volume_ring(0.0f, 0.0f, 0.0f);  // Forces the canvas's first real draw (transparent/empty until real data arrives)
-        }
-    }
 
     // Inner progress arc - full circle for track playback progress
     s_progress_arc = lv_arc_create(s_ui_container);
@@ -832,6 +885,101 @@ static void build_layout(void) {
     lv_obj_set_style_pad_hor(s_status_bar, 12, 0);
     lv_obj_set_style_radius(s_status_bar, 8, 0);
     lv_obj_align(s_status_bar, LV_ALIGN_BOTTOM_MID, 0, -25);  // Higher up from edge
+
+    build_tv_vinyl_layout();
+    build_mute_overlay();
+}
+
+// TV/Vinyl screen (ADR Screen 2) - sibling of s_ui_container, built after
+// it so it draws on top (irrelevant while hidden, matters the instant
+// apply_current_screen() shows it). No progress ring, no transport
+// controls, no track/artist text, no input label (owner direction: "let
+// the photos do the talking") - just the background, the volume readout,
+// and the same two long-press gestures at different proportions (top
+// two-thirds/bottom-third instead of Music's thirds, since there's no
+// middle-third content to protect from an accidental long-press here).
+static void build_tv_vinyl_layout(void) {
+    s_tv_vinyl_container = lv_obj_create(s_artwork_container);
+    lv_obj_set_size(s_tv_vinyl_container, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_center(s_tv_vinyl_container);
+    lv_obj_set_style_bg_opa(s_tv_vinyl_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_tv_vinyl_container, 0, 0);
+    lv_obj_set_style_pad_all(s_tv_vinyl_container, 0, 0);
+    lv_obj_add_flag(s_tv_vinyl_container, LV_OBJ_FLAG_HIDDEN);
+
+    // Gesture regions first, same reasoning as Music's: everything created
+    // after sits above them in z-order and keeps first claim on taps.
+    lv_obj_t *mute_region = lv_obj_create(s_tv_vinyl_container);
+    lv_obj_set_size(mute_region, SCREEN_SIZE, SCREEN_SIZE * 2 / 3);
+    lv_obj_align(mute_region, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_opa(mute_region, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(mute_region, 0, 0);
+    lv_obj_set_style_pad_all(mute_region, 0, 0);
+    lv_obj_add_flag(mute_region, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(mute_region, mute_region_long_press_cb,
+                        LV_EVENT_LONG_PRESSED, NULL);
+
+    lv_obj_t *source_region = lv_obj_create(s_tv_vinyl_container);
+    lv_obj_set_size(source_region, SCREEN_SIZE, SCREEN_SIZE / 3);
+    lv_obj_align(source_region, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_opa(source_region, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(source_region, 0, 0);
+    lv_obj_set_style_pad_all(source_region, 0, 0);
+    lv_obj_add_flag(source_region, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(source_region, source_region_long_press_cb,
+                        LV_EVENT_LONG_PRESSED, NULL);
+
+    // Hero volume number - centered, double Music's xlarge size. No halo:
+    // the background photo is dark by design (owner direction), unlike
+    // variable-brightness album art, so the legibility problem the halo
+    // solves for Music doesn't exist here.
+    s_tv_vinyl_volume_label = lv_label_create(s_tv_vinyl_container);
+    lv_obj_set_style_text_font(s_tv_vinyl_volume_label, font_xxlarge(), 0);
+    lv_obj_set_style_text_color(s_tv_vinyl_volume_label, lv_color_hex(0xfafafa), 0);
+    lv_label_set_text(s_tv_vinyl_volume_label, "--");
+    lv_obj_center(s_tv_vinyl_volume_label);
+
+    // dB-equivalent, above the hero number - double font_small's size,
+    // same relative "secondary" role as Music's s_volume_db_label.
+    s_tv_vinyl_db_label = lv_label_create(s_tv_vinyl_container);
+    lv_obj_set_style_text_font(s_tv_vinyl_db_label, font_db_large(), 0);
+    lv_obj_set_style_text_color(s_tv_vinyl_db_label, lv_color_hex(0xcccccc), 0);
+    lv_label_set_text(s_tv_vinyl_db_label, "-- dB");
+    lv_obj_align_to(s_tv_vinyl_db_label, s_tv_vinyl_volume_label,
+                    LV_ALIGN_OUT_TOP_MID, 0, -10);
+}
+
+// Full-screen mute state (owner direction: same slice as TV/Vinyl, shown
+// regardless of which screen is active underneath - mute is a single
+// global HA state, not per-input). Simple by design (owner's own framing):
+// solid red background, unmissable regardless of what's behind it, plus
+// an icon and label so it reads as "muted" and not just "something's
+// wrong". Topmost object in s_artwork_container, so it covers whichever
+// of Music/TV/Vinyl is currently showing without needing to know which.
+static void build_mute_overlay(void) {
+    s_mute_overlay = lv_obj_create(s_artwork_container);
+    lv_obj_set_size(s_mute_overlay, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_center(s_mute_overlay);
+    lv_obj_set_style_bg_color(s_mute_overlay, lv_color_hex(0xb71c1c), 0);
+    lv_obj_set_style_bg_opa(s_mute_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_mute_overlay, 0, 0);
+    lv_obj_set_style_radius(s_mute_overlay, 0, 0);
+    lv_obj_remove_flag(s_mute_overlay, LV_OBJ_FLAG_CLICKABLE);  // Let long-press reach the region beneath to unmute
+    lv_obj_add_flag(s_mute_overlay, LV_OBJ_FLAG_HIDDEN);
+
+#if !TARGET_PC
+    lv_obj_t *icon = lv_label_create(s_mute_overlay);
+    lv_label_set_text(icon, ICON_VOLUME_OFF);
+    lv_obj_set_style_text_font(icon, font_icon_large(), 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xfafafa), 0);
+    lv_obj_align(icon, LV_ALIGN_CENTER, 0, -20);
+#endif
+
+    lv_obj_t *label = lv_label_create(s_mute_overlay);
+    lv_label_set_text(label, "MUTED");
+    lv_obj_set_style_text_font(label, font_normal(), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xfafafa), 0);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 40);
 }
 
 // ============================================================================
@@ -932,11 +1080,13 @@ static void apply_state(const struct ui_state *state) {
     // Note: volume_min is atomic float read; no lock needed (self-corrects on next poll if stale)
     format_volume_text(vol_text, sizeof(vol_text), state->volume, state->volume_min, state->volume_step);
     set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
+    if (s_tv_vinyl_volume_label) lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
 
     char db_text[16];
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max));
     lv_label_set_text(s_volume_db_label, db_text);
+    if (s_tv_vinyl_db_label) lv_label_set_text(s_tv_vinyl_db_label, db_text);
 
     // Update progress arc based on seek position and track length
     if (s_progress_arc && state->length > 0) {
@@ -971,6 +1121,83 @@ static void set_status_dot(bool online) {
         lv_obj_set_style_bg_color(s_status_dot, lv_color_hex(0x00ff00), 0);  // Green
     } else {
         lv_obj_set_style_bg_color(s_status_dot, COLOR_GREY, 0);
+    }
+}
+
+// Switches between the Music/TV/Vinyl screens based on the polled
+// input_select.audio_input value (ha_volume_client's existing poll cycle -
+// see its header comment on why this lives there rather than a second
+// task). Cheap to call every poll_pending() tick: just a cached-value
+// read plus, only on an actual change, a handful of show/hide calls.
+//
+// Doesn't touch s_artwork_image's own HIDDEN flag - ui_set_artwork() owns
+// that independently (based on whether artwork is currently loaded, not
+// which screen is active), and s_tv_vinyl_bg already sits above it in
+// z-order and is fully opaque, so showing s_tv_vinyl_bg is enough to
+// visually cover the artwork without the two pieces of code fighting
+// over the same flag.
+static void apply_current_screen(void) {
+    char source[32];
+    dial_screen_t new_screen = s_current_screen;
+    if (ha_volume_client_get_current_source(source, sizeof(source))) {
+        if (strcmp(source, "TV") == 0) {
+            new_screen = DIAL_SCREEN_TV;
+        } else if (strcmp(source, "Vinyl") == 0) {
+            new_screen = DIAL_SCREEN_VINYL;
+        } else {
+            new_screen = DIAL_SCREEN_MUSIC;
+        }
+    }
+    if (new_screen == s_current_screen) {
+        return;
+    }
+    s_current_screen = new_screen;
+    bool music = (new_screen == DIAL_SCREEN_MUSIC);
+
+    if (s_ui_container) {
+        if (music) {
+            lv_obj_remove_flag(s_ui_container, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_ui_container, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_tv_vinyl_container) {
+        if (music) {
+            lv_obj_add_flag(s_tv_vinyl_container, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_tv_vinyl_container, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_tv_vinyl_bg) {
+        if (music) {
+            lv_obj_add_flag(s_tv_vinyl_bg, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_tv_vinyl_bg, LV_OBJ_FLAG_HIDDEN);
+            // Placeholder colors distinguish TV vs Vinyl until real
+            // photography replaces this background entirely.
+            lv_obj_set_style_bg_color(
+                s_tv_vinyl_bg,
+                new_screen == DIAL_SCREEN_TV ? lv_color_hex(0x14181f)
+                                             : lv_color_hex(0x2a1f16),
+                0);
+        }
+    }
+}
+
+// Shows/hides the full-screen mute state based on the polled
+// input_boolean.audio_mute value (ha_mute_client.c's optimistic update
+// makes this feel instant on this dial's own toggle; the poll reconciles
+// it for a mute/unmute from anywhere else within one interval).
+static void apply_mute_overlay(void) {
+    bool muted = ha_volume_client_get_muted();
+    if (muted == s_mute_overlay_visible || !s_mute_overlay) {
+        return;
+    }
+    s_mute_overlay_visible = muted;
+    if (muted) {
+        lv_obj_remove_flag(s_mute_overlay, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_mute_overlay, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1022,6 +1249,9 @@ static void poll_pending(lv_timer_t *timer) {
             s_status_timer = NULL;
         }
     }
+
+    apply_current_screen();
+    apply_mute_overlay();
 }
 
 static int s_last_battery_level = -1;  // 0-3 levels for hysteresis
@@ -1392,11 +1622,17 @@ void ui_show_volume_change(float vol, float vol_step) {
         set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
         emphasize_volume_label();
     }
+    if (s_tv_vinyl_volume_label) {
+        lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
+    }
 
     char db_text[16];
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max));
     lv_label_set_text(s_volume_db_label, db_text);
+    if (s_tv_vinyl_db_label) {
+        lv_label_set_text(s_tv_vinyl_db_label, db_text);
+    }
 }
 
 void ui_set_playing(bool playing) {

@@ -1,6 +1,7 @@
 #include "ha_volume_client.h"
 
 #include "controller_presentation.h"
+#include "ha_mute_client.h"
 #include "os_mutex.h"
 #include "platform/platform_http.h"
 #include "platform/platform_log.h"
@@ -12,6 +13,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 // Poll cadence for number.hifi_volume. Independent of the UHC/Roon poll
 // loop in bridge_client.c on purpose - this must keep working even when
@@ -63,6 +65,16 @@ static bool s_have_position;  // true once a poll has succeeded at least once
 #define HA_CURRENT_SOURCE_MAX 16
 static char s_current_source[HA_CURRENT_SOURCE_MAX];
 static bool s_have_source;
+
+/* input_boolean.audio_mute's current value, polled in the same cycle as
+ * volume/source above - see ha_volume_client_get_muted's header comment.
+ * ha_mute_client.c sets s_muted optimistically the instant it fires a
+ * toggle (see ha_volume_client_set_muted_optimistic), so the mute screen
+ * appears immediately rather than lagging behind by up to one poll
+ * interval; poll_mute_once() below then reconciles it with the real
+ * state every cycle regardless of who changed it (this dial, Harmony,
+ * the HA dashboard). */
+static bool s_muted;
 
 static int32_t s_pending_ticks;    // accumulated, not-yet-sent raw ticks
 static uint64_t s_last_tick_ms;    // when a tick last landed in the burst
@@ -134,6 +146,26 @@ bool ha_volume_client_get_current_source(char *out, size_t len) {
     return have;
 }
 
+void ha_volume_client_set_current_source_optimistic(const char *source) {
+    if (!source) {
+        return;
+    }
+    set_cached_source(source);
+}
+
+bool ha_volume_client_get_muted(void) {
+    os_mutex_lock(&s_lock);
+    bool muted = s_muted;
+    os_mutex_unlock(&s_lock);
+    return muted;
+}
+
+void ha_volume_client_set_muted_optimistic(bool muted) {
+    os_mutex_lock(&s_lock);
+    s_muted = muted;
+    os_mutex_unlock(&s_lock);
+}
+
 static bool poll_once(const rk_ha_cfg_t *cfg) {
     char url[128];
     snprintf(url, sizeof(url), "http://%s/api/states/number.hifi_volume",
@@ -199,6 +231,37 @@ static bool poll_source_once(const rk_ha_cfg_t *cfg) {
     return ok;
 }
 
+static bool poll_mute_once(const rk_ha_cfg_t *cfg) {
+    char url[128];
+    snprintf(url, sizeof(url),
+             "http://%s/api/states/input_boolean.audio_mute", cfg->host);
+
+    char *resp = NULL;
+    size_t resp_len = 0;
+    int ret = platform_http_get_auth(url, cfg->token, &resp, &resp_len);
+    if (ret != 0 || !resp) {
+        platform_http_free(resp);
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(resp);
+    platform_http_free(resp);
+    if (!root) {
+        return false;
+    }
+
+    cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    bool ok = false;
+    if (cJSON_IsString(state) && state->valuestring) {
+        os_mutex_lock(&s_lock);
+        s_muted = (strcmp(state->valuestring, "on") == 0);
+        os_mutex_unlock(&s_lock);
+        ok = true;
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
 static void poll_task(void *arg) {
     (void)arg;
     while (true) {
@@ -209,6 +272,9 @@ static void poll_task(void *arg) {
             }
             if (!poll_source_once(&cfg)) {
                 LOGW("HA source poll failed (host='%s')", cfg.host);
+            }
+            if (!poll_mute_once(&cfg)) {
+                LOGW("HA mute poll failed (host='%s')", cfg.host);
             }
         }
         platform_sleep_ms(HA_VOLUME_POLL_INTERVAL_MS);
@@ -326,6 +392,17 @@ bool ha_volume_client_adjust(int32_t ticks) {
     }
     if (!ha_volume_client_is_active()) {
         return false;
+    }
+
+    /* Turning the knob while muted un-mutes first, same as most physical
+     * amps/receivers - the user turning it is clearly not trying to stay
+     * muted. ha_mute_client_toggle() reads the current cached mute state
+     * itself and flips it, so this only ever un-mutes here (never
+     * re-mutes: get_muted() is false immediately after). Best-effort -
+     * ignore failure and adjust the volume anyway rather than leaving the
+     * knob unresponsive because the unmute call happened to fail. */
+    if (ha_volume_client_get_muted()) {
+        (void)ha_mute_client_toggle();
     }
 
     /* Optimistic display update happens immediately, using the full raw

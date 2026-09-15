@@ -58,9 +58,15 @@ bool source_picker_select(void) {
             CONTROLLER_INTERACTION_CONTEXT_SETTINGS_RECOVERY);
     }
 
-    /* Music/TV/Vinyl. Stays on the current (Now Playing) layout either
-     * way for now - the distinct TV/Vinyl screens are a later slice. */
+    /* Music/TV/Vinyl. common/ui.c's apply_current_screen() switches to the
+     * matching screen based on ha_volume_client_get_current_source() - set
+     * it optimistically here so picking from this dial's own picker feels
+     * instant instead of waiting up to one poll interval (2s) for
+     * confirmation; the next poll reconciles it either way. */
     bool ok = ha_source_client_select(selected_id);
+    if (ok) {
+        ha_volume_client_set_current_source_optimistic(selected_id);
+    }
     controller_presentation_hide_zone_picker();
     (void)controller_input_set_context(CONTROLLER_INTERACTION_CONTEXT_MEDIA);
     return ok;

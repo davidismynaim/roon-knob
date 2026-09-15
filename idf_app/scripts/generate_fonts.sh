@@ -95,6 +95,40 @@ lv_font_conv \
     --no-prefilter \
     -o "$OUTPUT_DIR/notosans_bold_56.c"
 
+# Generate Noto Sans Bold at 112px (exactly double 56px) - TV/Vinyl
+# screens' hero volume number (docs/meta/decisions/
+# 2026-09-14_DESIGN_HYBRID_DIAL_UI.md). Same restricted character set as
+# notosans_bold_56 above - same reasoning, one place, no need for full
+# Unicode coverage at this size.
+echo "Converting Noto Sans Bold (TV/Vinyl volume readout, 112px)..."
+echo "  - notosans_bold_112.c"
+lv_font_conv \
+    --bpp 4 \
+    --size 112 \
+    --font "$SPIFFS_DIR/NotoSans-Bold.ttf" \
+    --range 0x20,0x2D,0x2E,0x30-0x39,0x42,0x64 \
+    --format lvgl \
+    --no-compress \
+    --no-prefilter \
+    -o "$OUTPUT_DIR/notosans_bold_112.c"
+
+# Generate Lato at 44px (exactly double the 22px font_small used for
+# Music's dB-equivalent label) - TV/Vinyl screens' dB-equivalent label.
+# Same restricted character set as notosans_bold_56/_112 (digits, ".",
+# "-", "dB") rather than the full TEXT_RANGES set, since it's used in
+# exactly one place.
+echo "Converting Lato (TV/Vinyl dB-equivalent label, 44px)..."
+echo "  - lato_44.c"
+lv_font_conv \
+    --bpp 4 \
+    --size 44 \
+    --font "$SPIFFS_DIR/Lato-Regular.ttf" \
+    --range 0x20,0x2D,0x2E,0x30-0x39,0x42,0x64 \
+    --format lvgl \
+    --no-compress \
+    --no-prefilter \
+    -o "$OUTPUT_DIR/lato_44.c"
+
 # Generate Material Icons icon fonts at 22, 28, 44, 60px
 # Sizes 44/60 match enlarged transport buttons (60px/80px backgrounds)
 echo "Converting Material Icons..."

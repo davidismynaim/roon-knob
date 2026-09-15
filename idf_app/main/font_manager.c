@@ -20,6 +20,8 @@ static const char *TAG = "font_manager";
 extern const lv_font_t lato_22;
 extern const lv_font_t notosans_28;
 extern const lv_font_t notosans_bold_56;  // Bold, restricted glyph set: digits, ".", "-", "dB" - see idf_app/main/fonts/notosans_bold_56.c
+extern const lv_font_t notosans_bold_112; // Same restricted glyph set, 2x size - TV/Vinyl hero volume readout
+extern const lv_font_t lato_44;           // Same restricted glyph set, 2x font_small - TV/Vinyl dB-equivalent label
 extern const lv_font_t material_icons_22;
 extern const lv_font_t material_icons_28;
 extern const lv_font_t material_icons_44;
@@ -57,6 +59,14 @@ const lv_font_t *font_manager_get_large(void) {
 
 const lv_font_t *font_manager_get_xlarge(void) {
     return &notosans_bold_56;
+}
+
+const lv_font_t *font_manager_get_xxlarge(void) {
+    return &notosans_bold_112;
+}
+
+const lv_font_t *font_manager_get_db_large(void) {
+    return &lato_44;
 }
 
 // Icon font getters (Material Symbols for UI controls)
