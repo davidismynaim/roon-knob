@@ -19,11 +19,35 @@
 #define HA_VOLUME_POLL_INTERVAL_MS 2000
 #define HA_VOLUME_POLL_TASK_STACK 4096
 
+// Rotation writes are accumulated and flushed as one HA call per burst
+// rather than one call per encoder dispatch, matching the owner's wiki
+// (§44.6/§47.4's Audio - Harmony Volume: accumulate, then flush on
+// inactivity). A physical knob should feel closer to instant than a
+// remote's held-button repeat, so this uses a much shorter quiet window
+// than that automation's 500ms - tune on real hardware once flashed.
+#define HA_VOLUME_DEBOUNCE_MS 90
+#define HA_VOLUME_FLUSH_POLL_MS 30
+#define HA_VOLUME_FLUSH_TASK_STACK 4096
+
+// common/controller_input.c's resolve_volume_ticks now passes the true
+// accumulated encoder tick count straight through as the step count
+// (see that file), uncapped. Whether one raw tick equals one physical
+// detent hasn't been confirmed on real hardware yet - this scales
+// firmware ticks to the "clicks" (0.5 dB each) audio_voice_volume
+// expects. Start at 1:1 and correct after checking on hardware (e.g. a
+// temporary log of raw ticks against a known number of manual clicks).
+#define HA_VOLUME_TICKS_PER_CLICK 1
+
 static os_mutex_t s_lock = OS_MUTEX_INITIALIZER;
 static rk_ha_cfg_t s_cfg;
 static bool s_configured;
 static int s_position;       // last-known volume, 0-255 position scale
 static bool s_have_position;  // true once a poll has succeeded at least once
+
+static int32_t s_pending_ticks;    // accumulated, not-yet-sent raw ticks
+static uint64_t s_last_tick_ms;    // when a tick last landed in the burst
+
+static void flush_task(void *arg);
 
 static float clamp_position(float value) {
     if (value < 0.0f) {
@@ -133,6 +157,12 @@ void ha_volume_client_init(void) {
     } else {
         LOGI("HA volume control active (host='%s')", cfg.host);
     }
+
+    if (platform_task_start_configured("ha_vol_flush",
+                                       HA_VOLUME_FLUSH_TASK_STACK, flush_task,
+                                       NULL) != 0) {
+        LOGE("Failed to start HA volume flush task");
+    }
 }
 
 bool ha_volume_client_is_active(void) {
@@ -142,18 +172,87 @@ bool ha_volume_client_is_active(void) {
     return configured;
 }
 
-bool ha_volume_client_adjust(int32_t steps) {
-    if (steps == 0) {
+/* One call to script.audio_voice_volume per burst, not per dispatch and
+ * not per step: that script resolves the currently-selected input's
+ * helper itself, clamps 0-255, and writes the new target in a single
+ * input_number.set_value. Audio - Volume Helper Changed then fires
+ * exactly one remote.send_command with num_repeats = the resulting
+ * delta - the same native-repeat batching already proven for Harmony's
+ * held-button case (wiki §44.9, §47.2/§47.4). */
+static bool send_clicks(const rk_ha_cfg_t *cfg, int32_t clicks) {
+    if (clicks == 0) {
+        return true;
+    }
+    int32_t magnitude = clicks < 0 ? -clicks : clicks;
+
+    char url[128];
+    snprintf(url, sizeof(url),
+             "http://%s/api/services/script/audio_voice_volume", cfg->host);
+    char body[96];
+    snprintf(body, sizeof(body),
+             "{\"action\":\"%s\",\"unit\":\"clicks\",\"amount\":%ld}",
+             clicks > 0 ? "increase" : "decrease", (long)magnitude);
+
+    char *resp = NULL;
+    size_t resp_len = 0;
+    int ret = platform_http_post_auth(url, cfg->token, body, &resp, &resp_len);
+    platform_http_free(resp);
+    if (ret != 0) {
+        LOGW("HA volume adjust: audio_voice_volume call failed");
         return false;
     }
+    return true;
+}
+
+static void flush_pending(void) {
     rk_ha_cfg_t cfg;
-    if (!snapshot_cfg(&cfg)) {
+    os_mutex_lock(&s_lock);
+    bool configured = s_configured;
+    int32_t ticks = s_pending_ticks;
+    if (configured) {
+        cfg = s_cfg;
+        s_pending_ticks = 0;
+    }
+    os_mutex_unlock(&s_lock);
+
+    if (!configured || ticks == 0) {
+        return;
+    }
+    int32_t clicks = ticks / HA_VOLUME_TICKS_PER_CLICK;
+    if (clicks != 0) {
+        (void)send_clicks(&cfg, clicks);
+    }
+}
+
+static void flush_task(void *arg) {
+    (void)arg;
+    while (true) {
+        platform_sleep_ms(HA_VOLUME_FLUSH_POLL_MS);
+        os_mutex_lock(&s_lock);
+        bool due = s_pending_ticks != 0 &&
+                   (platform_millis() - s_last_tick_ms) >=
+                       HA_VOLUME_DEBOUNCE_MS;
+        os_mutex_unlock(&s_lock);
+        if (due) {
+            flush_pending();
+        }
+    }
+}
+
+bool ha_volume_client_adjust(int32_t ticks) {
+    if (ticks == 0) {
+        return false;
+    }
+    if (!ha_volume_client_is_active()) {
         return false;
     }
 
-    int32_t magnitude = steps < 0 ? -steps : steps;
-
-    int new_position = get_cached_position() + steps;
+    /* Optimistic display update happens immediately, using the full raw
+     * tick count (matching the eventual click count 1:1 while
+     * HA_VOLUME_TICKS_PER_CLICK stays 1) - only the actual HA call is
+     * debounced, so the dial still feels instantly responsive even
+     * though the network write lags slightly behind a fast spin. */
+    int new_position = get_cached_position() + ticks / HA_VOLUME_TICKS_PER_CLICK;
     if (new_position < 0) {
         new_position = 0;
     } else if (new_position > 255) {
@@ -162,31 +261,10 @@ bool ha_volume_client_adjust(int32_t steps) {
     set_cached_position(new_position);
     controller_presentation_show_volume_change((float)new_position, 1.0f);
 
-    /* One call to script.audio_voice_volume per dispatch, not one call
-     * per step: that script resolves the currently-selected input's
-     * helper itself, clamps 0-255, and writes the new target in a single
-     * input_number.set_value. Audio - Volume Helper Changed then fires
-     * exactly one remote.send_command with num_repeats = the resulting
-     * delta - the same native-repeat batching already proven for
-     * Harmony's held-button case (wiki §44.9, §47.2/§47.4), rather than
-     * this firmware looping individual nexus_volume_up/down calls and
-     * producing one IR transaction per step. */
-    char url[128];
-    snprintf(url, sizeof(url),
-             "http://%s/api/services/script/audio_voice_volume", cfg.host);
-    char body[96];
-    snprintf(body, sizeof(body),
-             "{\"action\":\"%s\",\"unit\":\"clicks\",\"amount\":%ld}",
-             steps > 0 ? "increase" : "decrease", (long)magnitude);
-
-    char *resp = NULL;
-    size_t resp_len = 0;
-    int ret = platform_http_post_auth(url, cfg.token, body, &resp, &resp_len);
-    platform_http_free(resp);
-    if (ret != 0) {
-        LOGW("HA volume adjust: audio_voice_volume call failed");
-        return false;
-    }
+    os_mutex_lock(&s_lock);
+    s_pending_ticks += ticks;
+    s_last_tick_ms = platform_millis();
+    os_mutex_unlock(&s_lock);
     return true;
 }
 

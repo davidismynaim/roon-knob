@@ -24,12 +24,19 @@ void ha_volume_client_init(void);
 // whether HA is currently reachable).
 bool ha_volume_client_is_active(void);
 
-// Adjusts Nexus volume by `steps` 0.5 dB clicks (positive = up, negative =
-// down) by calling the nexus_volume_up/down HA scripts once per step,
-// updating the cached display value optimistically first. Matches
-// controller_command_t.volume_steps. Returns false if not configured or if
-// any of the HA calls failed.
-bool ha_volume_client_adjust(int32_t steps);
+// Called once per rotation dispatch with the true accumulated encoder
+// tick count (positive = up, negative = down) - matches
+// controller_command_t.volume_steps, which common/controller_input.c's
+// resolve_volume_ticks now passes through uncapped rather than bucketing.
+// Updates the cached display value optimistically and immediately, but
+// only accumulates the actual Home Assistant write; a separate internal
+// task debounces and flushes accumulated bursts as one call to
+// script.audio_voice_volume, so a fast continuous spin doesn't fire one
+// HA/IR round trip per dispatch. Returns false only if not configured or
+// the tick count was zero - a true send failure inside the debounce
+// window isn't reported back to the caller (nothing consumes this return
+// value beyond ignoring it today; see controller_action_router.h).
+bool ha_volume_client_adjust(int32_t ticks);
 
 // Fills the last-known HA volume state on the 0-255 position scale
 // (volume_min=0, volume_max=255, volume_step=1). Returns the cached value

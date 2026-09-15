@@ -99,25 +99,20 @@ static bool resolve_volume_ticks(int32_t ticks,
         return false;
     }
 
-    int64_t magnitude = ticks;
-    if (magnitude < 0) {
-        magnitude = -magnitude;
-    }
-
-    int32_t steps;
-    if (magnitude >= 3) {
-        steps = 5;
-    } else if (magnitude == 2) {
-        steps = 3;
-    } else {
-        steps = 1;
-    }
-    if (ticks < 0) {
-        steps = -steps;
-    }
-
+    /* Pass the true accumulated tick count straight through as the step
+     * count, uncapped. This used to bucket magnitude into a capped
+     * {1,3,5} regardless of how fast/far the knob actually turned - that
+     * capping only ever made sense for a per-step HTTP-call rate limit,
+     * which no longer applies now that the only live caller
+     * (idf_app/Dial, CONTROLLER_INPUT_TRANSFORM_ROTATION_ACCELERATED) is
+     * the HA-direct volume path: one call carries any magnitude safely,
+     * batches its own IR send, and debounces/accumulates bursts itself
+     * (see common/ha_volume_client.c). Dropped rather than kept behind a
+     * flag because this transform has no other live caller (Frame/RLCD
+     * bind no control to it) - see
+     * docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md. */
     *out_action = controller_action_command(
-        controller_command_adjust_volume(steps));
+        controller_command_adjust_volume(ticks));
     return true;
 }
 
