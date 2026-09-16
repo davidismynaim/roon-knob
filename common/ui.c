@@ -1335,11 +1335,18 @@ static void update_battery_display(void) {
         }
     }
 
-    // Red at 10% or less (owner direction), neutral grey otherwise -
-    // flashing below takes over from here at 5% or less.
-    bool critical = percent <= 10 && !charging;
-    lv_obj_set_style_text_color(s_battery_icon,
-                                critical ? lv_color_hex(0xff0000) : lv_color_hex(0x888888), 0);
+    // 4-stage color progression, matching the level thresholds above:
+    // grey (fine) -> amber at 25% or less (Low) -> red at 10% or less
+    // (Critical) -> flashing red at 5% or less (below, unchanged).
+    lv_color_t battery_color;
+    if (percent <= 10 && !charging) {
+        battery_color = lv_color_hex(0xff0000);  // Red
+    } else if (percent <= 25 && !charging) {
+        battery_color = lv_color_hex(0xffaa00);  // Amber
+    } else {
+        battery_color = lv_color_hex(0x888888);  // Grey
+    }
+    lv_obj_set_style_text_color(s_battery_icon, battery_color, 0);
 
     // Flash (blink) at 5% or less, not charging - a timer only exists
     // while this condition holds, started/stopped here rather than left
