@@ -66,6 +66,11 @@ static lv_obj_t *s_volume_canvas;      // Outer volume ring - 256 dots, one per 
 static void *s_volume_canvas_buf;      // PSRAM pixel buffer backing s_volume_canvas
 static int s_volume_canvas_lit_ticks = -1;  // Last-drawn lit-tick count; -1 forces the first draw
 static lv_obj_t *s_progress_arc;       // Inner arc for track progress
+static lv_timer_t *s_progress_interp_timer;  // Advances the arc between polls - see progress_interp_timer_cb
+static int s_progress_base_ms = -1;    // Last known real seek position (-1 = no data yet)
+static int s_progress_length_ms;       // Track length at the time s_progress_base_ms was recorded
+static uint64_t s_progress_base_uptime_ms;  // platform_millis() at the moment s_progress_base_ms arrived
+static bool s_progress_is_playing;     // Whether to keep advancing the local estimate
 static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - primary display
 static lv_obj_t *s_volume_label_halo[8]; // 8-directional legibility halo behind s_volume_label_large
 static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old position
@@ -413,6 +418,34 @@ static void redraw_volume_ring(float volume, float volume_min, float volume_max)
     lv_canvas_finish_layer(s_volume_canvas, &layer);
 }
 
+// Advances the progress arc's visual position between polls, decoupling
+// smoothness from the bridge's battery-conscious poll interval (2-60s
+// depending on charging/sleep state - see bridge_client.c's
+// wait_for_poll_interval()). Purely a local estimate: last known position
+// plus elapsed device time since it arrived, re-synced to the authoritative
+// value on every real poll in apply_state() above, so any drift from a
+// seek/skip/pause that happened between ticks self-corrects within one poll
+// cycle rather than compounding. Cheap even at this cadence -
+// lv_arc_set_value() already no-ops when the computed percentage hasn't
+// actually moved (checked against LVGL's own source, see apply_state()'s
+// comment on the same thing).
+static void progress_interp_timer_cb(lv_timer_t *timer) {
+    (void)timer;
+    if (!s_progress_arc || !s_progress_is_playing || s_progress_base_ms < 0 ||
+        s_progress_length_ms <= 0) {
+        return;
+    }
+    uint64_t elapsed_ms = platform_millis() - s_progress_base_uptime_ms;
+    int estimated_ms = s_progress_base_ms + (int)elapsed_ms;
+    if (estimated_ms > s_progress_length_ms) {
+        estimated_ms = s_progress_length_ms;
+    }
+    int progress_pct = (estimated_ms * 100) / s_progress_length_ms;
+    if (progress_pct > 100) progress_pct = 100;
+    if (progress_pct < 0) progress_pct = 0;
+    lv_arc_set_value(s_progress_arc, progress_pct);
+}
+
 // ============================================================================
 // UI Initialization
 // ============================================================================
@@ -439,6 +472,17 @@ void ui_init(void) {
         lv_timer_set_repeat_count(battery_timer, -1);
     } else {
         ESP_LOGE(UI_TAG, "FAILED to create battery poll timer!");
+    }
+
+    // Smooths the progress arc between the much slower bridge polls (see
+    // progress_interp_timer_cb's own comment). 500ms is frequent enough to
+    // look continuous at typical track lengths without being wasteful -
+    // lv_arc_set_value() no-ops on repeat calls with an unchanged value.
+    s_progress_interp_timer = lv_timer_create(progress_interp_timer_cb, 500, NULL);
+    if (s_progress_interp_timer) {
+        lv_timer_set_repeat_count(s_progress_interp_timer, -1);
+    } else {
+        ESP_LOGE(UI_TAG, "FAILED to create progress interpolation timer!");
     }
 }
 
@@ -938,16 +982,25 @@ static void apply_state(const struct ui_state *state) {
              derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max));
     lv_label_set_text(s_volume_db_label, db_text);
 
-    // Update progress arc based on seek position and track length
+    // Update progress arc based on seek position and track length. Also
+    // record this as the new interpolation baseline - progress_interp_timer_cb
+    // advances a local estimate between polls (see its own comment for why),
+    // so every fresh poll needs to reset that baseline or it'd keep
+    // extrapolating from stale data.
     if (s_progress_arc && state->length > 0) {
         int progress_pct = (state->seek_position * 100) / state->length;
         if (progress_pct > 100) progress_pct = 100;
         if (progress_pct < 0) progress_pct = 0;
         lv_arc_set_value(s_progress_arc, progress_pct);
         lv_obj_invalidate(s_progress_arc);
+        s_progress_base_ms = state->seek_position;
+        s_progress_length_ms = state->length;
+        s_progress_base_uptime_ms = platform_millis();
+        s_progress_is_playing = state->playing;
     } else if (s_progress_arc) {
         lv_arc_set_value(s_progress_arc, 0);
         lv_obj_invalidate(s_progress_arc);
+        s_progress_base_ms = -1;  // No track/length - nothing to interpolate
     }
 
     // Update play/pause icon
