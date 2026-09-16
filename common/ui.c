@@ -219,6 +219,7 @@ static void show_status_message(const char *message);
 static void clear_status_message_timer_cb(lv_timer_t *timer);
 static void update_battery_display(void);
 static void battery_poll_timer_cb(lv_timer_t *timer);
+static void battery_flash_timer_cb(lv_timer_t *timer);
 static void reset_volume_emphasis_timer_cb(lv_timer_t *timer);
 static void emphasize_volume_label(void);
 
@@ -566,35 +567,6 @@ static void build_layout(void) {
     lv_obj_add_flag(s_tv_vinyl_bg, LV_OBJ_FLAG_HIDDEN);
 #endif
 
-    // Outer volume ring - 256 dots around the display edge (one per HA
-    // volume click, i.e. every 0.5dB on the direct-to-HA Nexus path),
-    // hand-drawn once per volume change into a canvas rather than redrawn
-    // live every LVGL refresh - see redraw_volume_ring() above for why.
-    // A sibling of s_ui_container/s_tv_vinyl_container (not a child of
-    // either) so it stays visible and on top of whichever background is
-    // active across all three screens (ADR: "outer volume ring retained,
-    // same behavior as Music" on TV/Vinyl too) without needing two copies.
-    {
-        uint32_t stride = lv_draw_buf_width_to_stride(VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
-        size_t buf_size = (size_t)stride * VOLUME_RING_SIZE;
-#ifdef ESP_PLATFORM
-        s_volume_canvas_buf = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-#else
-        s_volume_canvas_buf = malloc(buf_size);
-#endif
-        if (!s_volume_canvas_buf) {
-            ESP_LOGE(UI_TAG, "Failed to allocate %u-byte volume ring canvas buffer",
-                     (unsigned)buf_size);
-        } else {
-            s_volume_canvas = lv_canvas_create(s_artwork_container);
-            lv_canvas_set_buffer(s_volume_canvas, s_volume_canvas_buf, VOLUME_RING_SIZE,
-                                 VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
-            lv_obj_center(s_volume_canvas);
-            lv_obj_remove_flag(s_volume_canvas, LV_OBJ_FLAG_CLICKABLE);
-            redraw_volume_ring(0.0f, 0.0f, 0.0f);  // Forces the canvas's first real draw (transparent/empty until real data arrives)
-        }
-    }
-
     // Create UI container directly (no intermediate overlay layer)
     s_ui_container = lv_obj_create(s_artwork_container);
     lv_obj_set_size(s_ui_container, SCREEN_SIZE, SCREEN_SIZE);
@@ -894,6 +866,43 @@ static void build_layout(void) {
     lv_obj_align(s_status_bar, LV_ALIGN_BOTTOM_MID, 0, -25);  // Higher up from edge
 
     build_tv_vinyl_layout();
+
+    // Outer volume ring - 256 dots around the display edge (one per HA
+    // volume click, i.e. every 0.5dB on the direct-to-HA Nexus path),
+    // hand-drawn once per volume change into a canvas rather than redrawn
+    // live every LVGL refresh - see redraw_volume_ring() above for why.
+    // A sibling of s_ui_container/s_tv_vinyl_container (not a child of
+    // either) so it stays visible across all three screens without
+    // needing two copies (ADR: "outer volume ring retained, same
+    // behavior as Music" on TV/Vinyl too) - created after both of them,
+    // not before: Music's lower-third tint is a child of s_ui_container,
+    // and s_ui_container draws as one block relative to this sibling, so
+    // the ring has to come after that whole block to render above the
+    // tint rather than getting hidden behind it (regression fixed here -
+    // it briefly sat before s_ui_container, which put it under the tint).
+    // Doesn't visually conflict with s_progress_arc (a different radius,
+    // inside s_ui_container, unaffected either way).
+    {
+        uint32_t stride = lv_draw_buf_width_to_stride(VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
+        size_t buf_size = (size_t)stride * VOLUME_RING_SIZE;
+#ifdef ESP_PLATFORM
+        s_volume_canvas_buf = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+        s_volume_canvas_buf = malloc(buf_size);
+#endif
+        if (!s_volume_canvas_buf) {
+            ESP_LOGE(UI_TAG, "Failed to allocate %u-byte volume ring canvas buffer",
+                     (unsigned)buf_size);
+        } else {
+            s_volume_canvas = lv_canvas_create(s_artwork_container);
+            lv_canvas_set_buffer(s_volume_canvas, s_volume_canvas_buf, VOLUME_RING_SIZE,
+                                 VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
+            lv_obj_center(s_volume_canvas);
+            lv_obj_remove_flag(s_volume_canvas, LV_OBJ_FLAG_CLICKABLE);
+            redraw_volume_ring(0.0f, 0.0f, 0.0f);  // Forces the canvas's first real draw (transparent/empty until real data arrives)
+        }
+    }
+
     build_mute_overlay();
 }
 
@@ -1284,6 +1293,8 @@ static void poll_pending(lv_timer_t *timer) {
 
 static int s_last_battery_level = -1;  // 0-3 levels for hysteresis
 static bool s_last_battery_charging = false;  // Track charging state changes
+static lv_timer_t *s_battery_flash_timer = NULL;  // Only exists while flashing (<=5%, not charging)
+static bool s_battery_flash_on = true;  // Current phase of the flash
 
 static void update_battery_display(void) {
 #ifdef ESP_PLATFORM
@@ -1300,34 +1311,59 @@ static void update_battery_display(void) {
     else if (percent <= 60) level = 2;  // Medium
     else level = 3;                     // High
 
-    // Only update display if level or charging state changed (prevents flicker)
-    if (level == s_last_battery_level && charging == s_last_battery_charging) {
-        return;
-    }
+    // Only update the icon glyph if level or charging state changed
+    // (prevents flicker from redundant lv_label_set_text calls) - but
+    // color/flashing below still need the exact percent, not just this
+    // coarse level, since both thresholds (<=10%, <=5%) fall inside the
+    // same "Critical" bucket and would otherwise never be re-evaluated
+    // while percent drifts from 10% down to 5% without level changing.
+    if (level != s_last_battery_level || charging != s_last_battery_charging) {
+        s_last_battery_level = level;
+        s_last_battery_charging = charging;
 
-    s_last_battery_level = level;
-    s_last_battery_charging = charging;
-
-    // Update battery icon based on state (Lucide horizontal icons)
-    lv_obj_clear_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
-    if (charging) {
-        lv_label_set_text(s_battery_icon, ICON_BATTERY_CHARGING);
-    } else {
-        switch (level) {
-            case 0:  lv_label_set_text(s_battery_icon, ICON_BATTERY_WARNING); break;  // Critical
-            case 1:  lv_label_set_text(s_battery_icon, ICON_BATTERY_LOW); break;      // Low
-            case 2:  lv_label_set_text(s_battery_icon, ICON_BATTERY_MEDIUM); break;   // Medium
-            default: lv_label_set_text(s_battery_icon, ICON_BATTERY_FULL); break;     // High
+        // Update battery icon based on state (Lucide horizontal icons)
+        lv_obj_clear_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
+        if (charging) {
+            lv_label_set_text(s_battery_icon, ICON_BATTERY_CHARGING);
+        } else {
+            switch (level) {
+                case 0:  lv_label_set_text(s_battery_icon, ICON_BATTERY_WARNING); break;  // Critical
+                case 1:  lv_label_set_text(s_battery_icon, ICON_BATTERY_LOW); break;      // Low
+                case 2:  lv_label_set_text(s_battery_icon, ICON_BATTERY_MEDIUM); break;   // Medium
+                default: lv_label_set_text(s_battery_icon, ICON_BATTERY_FULL); break;     // High
+            }
         }
     }
 
-    // Warning color for critical/low battery, neutral grey otherwise
-    if (level <= 1 && !charging) {
-        lv_obj_set_style_text_color(s_battery_icon, lv_color_hex(0xff0000), 0);
-    } else {
-        lv_obj_set_style_text_color(s_battery_icon, lv_color_hex(0x888888), 0);
+    // Red at 10% or less (owner direction), neutral grey otherwise -
+    // flashing below takes over from here at 5% or less.
+    bool critical = percent <= 10 && !charging;
+    lv_obj_set_style_text_color(s_battery_icon,
+                                critical ? lv_color_hex(0xff0000) : lv_color_hex(0x888888), 0);
+
+    // Flash (blink) at 5% or less, not charging - a timer only exists
+    // while this condition holds, started/stopped here rather than left
+    // running (and just skipped) the rest of the time so it isn't
+    // silently ticking for the ~99% of battery life it never applies to.
+    bool should_flash = percent <= 5 && !charging;
+    if (should_flash && !s_battery_flash_timer) {
+        s_battery_flash_on = true;
+        lv_obj_set_style_text_opa(s_battery_icon, LV_OPA_COVER, 0);
+        s_battery_flash_timer = lv_timer_create(battery_flash_timer_cb, 500, NULL);
+    } else if (!should_flash && s_battery_flash_timer) {
+        lv_timer_del(s_battery_flash_timer);
+        s_battery_flash_timer = NULL;
+        s_battery_flash_on = true;
+        lv_obj_set_style_text_opa(s_battery_icon, LV_OPA_COVER, 0);  // Leave it visible, not mid-blink-off
     }
 #endif
+}
+
+static void battery_flash_timer_cb(lv_timer_t *timer) {
+    (void)timer;
+    if (!s_battery_icon) return;
+    s_battery_flash_on = !s_battery_flash_on;
+    lv_obj_set_style_text_opa(s_battery_icon, s_battery_flash_on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
 }
 
 static void battery_poll_timer_cb(lv_timer_t *timer) {
