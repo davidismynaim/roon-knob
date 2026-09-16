@@ -61,8 +61,10 @@ bool source_picker_select(void) {
     /* Music/TV/Vinyl. common/ui.c's apply_current_screen() switches to the
      * matching screen based on ha_volume_client_get_current_source() - set
      * it optimistically here so picking from this dial's own picker feels
-     * instant instead of waiting up to one poll interval (2s) for
-     * confirmation; the next poll reconciles it either way. */
+     * instant instead of waiting up to one poll interval (2-30s,
+     * depending on charging/sleep state - see ha_volume_client.c's
+     * poll_interval_ms()) for confirmation; the next poll reconciles it
+     * either way. */
     bool ok = ha_source_client_select(selected_id);
     if (ok) {
         ha_volume_client_set_current_source_optimistic(selected_id);

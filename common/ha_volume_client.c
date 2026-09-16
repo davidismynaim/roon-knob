@@ -3,6 +3,7 @@
 #include "controller_presentation.h"
 #include "ha_mute_client.h"
 #include "os_mutex.h"
+#include "platform/platform_display.h"
 #include "platform/platform_http.h"
 #include "platform/platform_log.h"
 #include "platform/platform_storage.h"
@@ -15,11 +16,31 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Poll cadence for number.hifi_volume. Independent of the UHC/Roon poll
-// loop in bridge_client.c on purpose - this must keep working even when
-// Roon/UHC is unreachable.
-#define HA_VOLUME_POLL_INTERVAL_MS 2000
+// Poll cadence for number.hifi_volume/input_select.audio_input/
+// input_boolean.audio_mute. Independent of the UHC/Roon poll loop in
+// bridge_client.c on purpose - this must keep working even when Roon/UHC
+// is unreachable - but mirrors that same loop's adaptive-interval pattern
+// (see its wait_for_poll_interval()): fast while awake and charging, since
+// nothing else is limiting battery life then; slower on battery, since
+// there's no local reason to check three HA entities 30x/minute if nobody's
+// looking at the screen; slower still once the display is asleep, when the
+// only thing polling still buys is a mute/source/volume change from
+// somewhere else (Harmony, the HA dashboard) showing up promptly on next
+// wake rather than instantly.
+#define HA_VOLUME_POLL_INTERVAL_AWAKE_CHARGING_MS 2000
+#define HA_VOLUME_POLL_INTERVAL_AWAKE_BATTERY_MS 5000
+#define HA_VOLUME_POLL_INTERVAL_SLEEPING_MS 30000
 #define HA_VOLUME_POLL_TASK_STACK 4096
+
+static uint32_t poll_interval_ms(void) {
+    if (platform_display_is_sleeping()) {
+        return HA_VOLUME_POLL_INTERVAL_SLEEPING_MS;
+    }
+    if (platform_battery_is_charging()) {
+        return HA_VOLUME_POLL_INTERVAL_AWAKE_CHARGING_MS;
+    }
+    return HA_VOLUME_POLL_INTERVAL_AWAKE_BATTERY_MS;
+}
 
 // Rotation writes are accumulated and flushed as one HA call per burst
 // rather than one call per encoder dispatch, matching the owner's wiki
@@ -277,7 +298,7 @@ static void poll_task(void *arg) {
                 LOGW("HA mute poll failed (host='%s')", cfg.host);
             }
         }
-        platform_sleep_ms(HA_VOLUME_POLL_INTERVAL_MS);
+        platform_sleep_ms(poll_interval_ms());
     }
 }
 
