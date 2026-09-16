@@ -3,7 +3,6 @@
 #include "i2c_bsp.h"
 #include "platform/platform_storage.h"
 
-#include <driver/gpio.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -27,15 +26,8 @@ static const char *TAG = "haptic";
 
 #define DRV2605_DEFAULT_EFFECT_ID 0x01  // Strong Click - 100%
 
-// See haptic_driver.h's diagnostic-section comment.
-#define DRV2605_REG_FEEDBACK 0x1A
-#define DRV2605_FEEDBACK_LRA_BIT 0x80  // bit7: 1 = LRA, 0 = ERM
-#define DRV2605_MODE_DIAGNOSTICS 0x06
-#define DRV2605_LIBRARY_LRA 0x06
-#define HAPTIC_EN_GPIO GPIO_NUM_38  // confirmed NOT a real enable pin on this
-                                    // board - see haptic_driver.h
-
 // Auto-calibration (see haptic_driver.h and haptic_driver_run_calibration()).
+#define DRV2605_REG_FEEDBACK 0x1A
 #define DRV2605_REG_CAL_COMP 0x18
 #define DRV2605_REG_CAL_BEMF 0x19
 #define DRV2605_REG_CONTROL4 0x1E
@@ -50,23 +42,6 @@ static const char *TAG = "haptic";
                                          // factor/loop gain for an unknown
                                          // actuator, ORed onto the existing
                                          // actuator-type bit (bit7)
-
-#define HAPTIC_DIAG_EN_LOW  200
-#define HAPTIC_DIAG_EN_HIGH 201
-#define HAPTIC_DIAG_LRA     202
-
-static const haptic_diagnostic_option_t s_diagnostic_options[] = {
-    {HAPTIC_DIAG_EN_LOW,  "DIAGNOSTIC: GPIO38 LOW + Strong Click (baseline)"},
-    {HAPTIC_DIAG_EN_HIGH, "DIAGNOSTIC: GPIO38 HIGH + Strong Click"},
-    {HAPTIC_DIAG_LRA,     "DIAGNOSTIC: GPIO38 HIGH + LRA mode + Strong Click"},
-};
-
-const haptic_diagnostic_option_t *haptic_driver_get_diagnostic_options(size_t *count) {
-    if (count) {
-        *count = sizeof(s_diagnostic_options) / sizeof(s_diagnostic_options[0]);
-    }
-    return s_diagnostic_options;
-}
 
 // See haptic_driver.h's comment on why the list stops at 14.
 static const haptic_effect_option_t s_effect_options[] = {
@@ -228,81 +203,6 @@ void haptic_driver_pulse(void) {
         !write_reg(DRV2605_REG_GO, 0x01)) {
         ESP_LOGW(TAG, "Haptic pulse trigger failed");
     }
-}
-
-static bool s_en_gpio_configured = false;
-
-static void ensure_en_gpio_configured(void) {
-    if (s_en_gpio_configured) {
-        return;
-    }
-    gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << HAPTIC_EN_GPIO,
-        .mode = GPIO_MODE_OUTPUT,
-    };
-    gpio_config(&cfg);
-    s_en_gpio_configured = true;
-}
-
-// Runs the DRV2605's own built-in actuator diagnostic and logs the result -
-// bit3 of STATUS set means the chip's diagnostic saw an open or shorted
-// actuator (i.e. nothing usable connected, from its point of view).
-static void log_actuator_diagnostic(const char *label) {
-    write_reg(DRV2605_REG_MODE, DRV2605_MODE_DIAGNOSTICS);
-    write_reg(DRV2605_REG_GO, 0x01);
-    uint8_t go = 1;
-    for (int i = 0; i < 50 && go != 0; i++) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-        if (!read_reg(DRV2605_REG_GO, &go)) {
-            break;
-        }
-    }
-    uint8_t status = 0;
-    read_reg(DRV2605_REG_STATUS, &status);
-    ESP_LOGI(TAG, "%s: actuator diagnostic status=0x%02x (%s)", label, status,
-             (status & 0x08) ? "OPEN/SHORTED - chip sees nothing usable connected"
-                              : "connected");
-    write_reg(DRV2605_REG_MODE, DRV2605_MODE_INTERNAL_TRIGGER);
-}
-
-void haptic_driver_run_diagnostic(uint8_t test_id) {
-    if (!s_chip_ready) {
-        ESP_LOGW(TAG, "Haptic diagnostic requested but DRV2605 never initialized");
-        return;
-    }
-    ensure_en_gpio_configured();
-
-    switch (test_id) {
-    case HAPTIC_DIAG_EN_LOW:
-        gpio_set_level(HAPTIC_EN_GPIO, 0);
-        vTaskDelay(pdMS_TO_TICKS(2));
-        log_actuator_diagnostic("Diagnostic (GPIO38 LOW, ERM as configured)");
-        break;
-    case HAPTIC_DIAG_EN_HIGH:
-        gpio_set_level(HAPTIC_EN_GPIO, 1);
-        vTaskDelay(pdMS_TO_TICKS(2));
-        log_actuator_diagnostic("Diagnostic (GPIO38 HIGH, ERM as configured)");
-        break;
-    case HAPTIC_DIAG_LRA: {
-        gpio_set_level(HAPTIC_EN_GPIO, 1);
-        vTaskDelay(pdMS_TO_TICKS(2));
-        uint8_t feedback = 0;
-        read_reg(DRV2605_REG_FEEDBACK, &feedback);
-        write_reg(DRV2605_REG_FEEDBACK, feedback | DRV2605_FEEDBACK_LRA_BIT);
-        write_reg(DRV2605_REG_LIBRARY, DRV2605_LIBRARY_LRA);
-        log_actuator_diagnostic("Diagnostic (GPIO38 HIGH, LRA mode)");
-        break;
-    }
-    default:
-        ESP_LOGW(TAG, "Unknown haptic diagnostic test id %d", test_id);
-        return;
-    }
-
-    // Effect id 1 is "Strong Click" in every DRV2605 library, ERM or LRA -
-    // felt confirmation to go with the logged diagnostic above.
-    write_reg(DRV2605_REG_WAVESEQ1, 1);
-    write_reg(DRV2605_REG_WAVESEQ2, 0);
-    write_reg(DRV2605_REG_GO, 0x01);
 }
 
 bool haptic_driver_is_calibrated(void) {

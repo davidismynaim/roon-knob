@@ -16,13 +16,14 @@
 // hardware testing confirmed effects were felt but subtle.
 //
 // Actuator type (ERM vs LRA) and an undocumented enable-pin theory (GPIO38)
-// were both open questions when calibration was being considered - resolved
-// via the temporary diagnostic further down before writing this: on this
-// specific board, GPIO38 makes no measurable difference to the DRV2605's own
-// actuator diagnostic (0xe0 "connected" either way), and the vendor's own
-// demo (docs/esp/hw-reference/drv2605.md) treats it as ERM with no enable
-// pin - both now corroborated by direct hardware measurement, not just the
-// vendor's word. Calibration below assumes ERM and does not touch GPIO38.
+// were both open questions when calibration was being considered, resolved
+// via a temporary on-device diagnostic (since removed) before writing this:
+// on this specific board, GPIO38 makes no measurable difference to the
+// DRV2605's own actuator diagnostic (0xe0 "connected" either way), and the
+// vendor's own demo (docs/esp/hw-reference/drv2605.md) treats it as ERM with
+// no enable pin - both now corroborated by direct hardware measurement, not
+// just the vendor's word. Calibration below assumes ERM and does not touch
+// GPIO38.
 //
 // Calibration deliberately does NOT raise RATED_VOLTAGE/OVERDRIVE_CLAMP_
 // VOLTAGE - it only tunes closed-loop compensation/back-EMF gain for
@@ -95,36 +96,6 @@ bool haptic_driver_set_effect(uint8_t effect_id);
 // enough, and triggers infrequent enough (touch/long-press, not volume
 // clicks), that this is expected to be rare in practice.
 void haptic_driver_pulse(void);
-
-// TEMPORARY hardware diagnostic - not a real feature, easy to remove once
-// this board's actuator question is settled. See docs/esp/hw-reference/
-// drv2605.md and the PR/issue that added this: two external sources
-// disagree about this exact board (Waveshare ESP32-S3-Knob-Touch-LCD-1.8) -
-// the vendor's own demo drives it as ERM with no enable pin at all, while an
-// independent reverse-engineering project measured it as an LRA behind an
-// undocumented enable pin on GPIO38. Owner's own hardware already contradicts
-// the second source (effects ARE felt, subtly, without ever touching
-// GPIO38), so rather than guess, these let the owner check on the actual
-// device: each drives GPIO38 as instructed, optionally reconfigures the
-// actuator-type register, reads back the DRV2605's own built-in actuator
-// diagnostic (logged, not returned - check the serial monitor), and fires a
-// felt "Strong Click" pulse (effect id 1, which is Strong Click in every
-// library per the datasheet's effect table) so the difference can be felt
-// as well as read. Deliberately NOT part of haptic_driver_get_effect_options()
-// and NOT persisted - a one-shot action, not a setting.
-typedef struct {
-    uint8_t test_id;
-    const char *name;
-} haptic_diagnostic_option_t;
-
-const haptic_diagnostic_option_t *haptic_driver_get_diagnostic_options(size_t *count);
-
-// Runs one of haptic_driver_get_diagnostic_options()'s test_id values. No-op
-// (with a warning logged) if the chip never initialized or test_id is
-// unrecognized. The device reboots after every config-page save regardless
-// (existing pattern), which restores normal ERM configuration from NVS
-// afterward - no cleanup needed here.
-void haptic_driver_run_diagnostic(uint8_t test_id);
 
 // Runs the DRV2605's own auto-calibration against the actuator as currently
 // configured (ERM, unchanged drive-voltage ceiling - see the header comment
