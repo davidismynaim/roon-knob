@@ -74,6 +74,7 @@ static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old
 static lv_timer_t *s_volume_emphasis_timer;  // Timer to reset volume emphasis after adjustment
 static lv_obj_t *s_status_dot;         // Online/offline indicator
 static lv_obj_t *s_battery_icon;       // Battery icon (Material Symbols)
+static lv_obj_t *s_battery_badge;      // Small dark tint behind the battery icon for legibility
 static lv_obj_t *s_lower_tint;         // Lower-third darkening tint for text legibility
 static lv_obj_t *s_btn_prev;           // Previous track button
 static lv_obj_t *s_btn_play;           // Play/pause button (center, large)
@@ -665,15 +666,34 @@ static void build_layout(void) {
     // ADR only discussed it in the context of the Music screen's now-
     // removed zone header).
 #if !TARGET_PC
-    s_battery_icon = lv_label_create(s_artwork_container);
+    // Small dark badge sitting behind the icon (owner feedback: near-white/
+    // amber/red icon color could get lost against light or busy artwork
+    // directly behind it - same legibility problem s_lower_tint already
+    // solves for track/artist text, just sized tight to this one icon
+    // instead of a full-width bar). The icon is a CHILD of this badge
+    // (not a sibling positioned on top) specifically so z-order is
+    // guaranteed by parent/child nesting rather than sibling creation
+    // order - the latter is what caused the volume-ring z-order
+    // regression earlier, and is easy to break again in a future edit.
+    s_battery_badge = lv_obj_create(s_artwork_container);
+    lv_obj_set_size(s_battery_badge, 40, 32);
+    lv_obj_align(s_battery_badge, LV_ALIGN_TOP_MID, 0, 25);
+    lv_obj_set_style_bg_color(s_battery_badge, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_battery_badge, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_battery_badge, 0, 0);
+    lv_obj_set_style_radius(s_battery_badge, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(s_battery_badge, 0, 0);
+    lv_obj_remove_flag(s_battery_badge, LV_OBJ_FLAG_CLICKABLE);  // Let long-press reach source_region beneath it
+
+    s_battery_icon = lv_label_create(s_battery_badge);
     lv_label_set_text(s_battery_icon, ICON_BATTERY_FULL);
     lv_obj_set_style_text_font(s_battery_icon, font_manager_get_lucide_battery(), 0);
-    lv_obj_set_style_text_color(s_battery_icon, lv_color_hex(0x888888), 0);
-    // Top-center, not top-left: on a round display, a corner-offset
-    // position like the old (35,35) falls in the square canvas's clipped
-    // corner - outside the visible circle - which is why the icon read as
-    // "missing" on hardware rather than just misplaced.
-    lv_obj_align(s_battery_icon, LV_ALIGN_TOP_MID, 0, 25);
+    // Near-white (matches the track title, common/ui.c's s_track_label) -
+    // the old grey read fine against dark artwork but got lost against
+    // light artwork; near-white plus the dark badge behind it now holds up
+    // against any artwork color, same as amber/red/flashing-red below.
+    lv_obj_set_style_text_color(s_battery_icon, lv_color_hex(0xfafafa), 0);
+    lv_obj_center(s_battery_icon);
 #endif
 
     // ========================================================================
@@ -1394,15 +1414,17 @@ static void update_battery_display(void) {
     }
 
     // 4-stage color progression, matching the level thresholds above:
-    // grey (fine) -> amber at 25% or less (Low) -> red at 10% or less
-    // (Critical) -> flashing red at 5% or less (below, unchanged).
+    // near-white (fine) -> amber at 25% or less (Low) -> red at 10% or less
+    // (Critical) -> flashing red at 5% or less (below, unchanged). Near-white
+    // instead of grey (owner feedback) so the "fine" state reads clearly
+    // against the dark badge behind it, same as the amber/red states do.
     lv_color_t battery_color;
     if (percent <= 10 && !charging) {
         battery_color = lv_color_hex(0xff0000);  // Red
     } else if (percent <= 25 && !charging) {
         battery_color = lv_color_hex(0xffaa00);  // Amber
     } else {
-        battery_color = lv_color_hex(0x888888);  // Grey
+        battery_color = lv_color_hex(0xfafafa);  // Near-white
     }
     lv_obj_set_style_text_color(s_battery_icon, battery_color, 0);
 
@@ -2146,7 +2168,11 @@ void ui_set_controls_visible(bool visible) {
             if (s_volume_label_halo[i]) lv_obj_clear_flag(s_volume_label_halo[i], LV_OBJ_FLAG_HIDDEN);
         }
         if (s_volume_db_label) lv_obj_clear_flag(s_volume_db_label, LV_OBJ_FLAG_HIDDEN);
-        if (s_battery_icon) lv_obj_clear_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
+        // Badge, not the icon directly - hiding/showing the parent already
+        // covers the icon (its child), and the badge is what needs to
+        // disappear too rather than leaving an empty dark tint floating
+        // on screen in art mode.
+        if (s_battery_badge) lv_obj_clear_flag(s_battery_badge, LV_OBJ_FLAG_HIDDEN);
         if (s_status_dot) lv_obj_clear_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
         if (s_status_bar) lv_obj_clear_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
         // Artwork stays full brightness (ADR: no full-screen darkening mask) -
@@ -2170,7 +2196,7 @@ void ui_set_controls_visible(bool visible) {
             if (s_volume_label_halo[i]) lv_obj_add_flag(s_volume_label_halo[i], LV_OBJ_FLAG_HIDDEN);
         }
         if (s_volume_db_label) lv_obj_add_flag(s_volume_db_label, LV_OBJ_FLAG_HIDDEN);
-        if (s_battery_icon) lv_obj_add_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
+        if (s_battery_badge) lv_obj_add_flag(s_battery_badge, LV_OBJ_FLAG_HIDDEN);
         if (s_status_dot) lv_obj_add_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
         if (s_status_bar) lv_obj_add_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
         // Make artwork fully visible in art mode
