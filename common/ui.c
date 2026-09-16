@@ -22,6 +22,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"  // PSRAM allocation for the volume ring's canvas buffer
 #include "battery.h"
+#include "haptic_driver.h"
 #include "ui_jpeg.h"  // JPEG decoder helper
 #define UI_TAG "ui"
 #else
@@ -1034,6 +1035,9 @@ static void build_mute_overlay(void) {
 // the only long-press handlers left covering the top/bottom thirds.
 static void mute_region_long_press_cb(lv_event_t *e) {
     (void)e;
+#if !TARGET_PC
+    haptic_driver_pulse();
+#endif
     controller_action_t action =
         controller_action_simple(CONTROLLER_ACTION_TOGGLE_MUTE);
     (void)controller_input_dispatch_action(&action);
@@ -1041,6 +1045,9 @@ static void mute_region_long_press_cb(lv_event_t *e) {
 
 static void source_region_long_press_cb(lv_event_t *e) {
     (void)e;
+#if !TARGET_PC
+    haptic_driver_pulse();
+#endif
     controller_action_t action =
         controller_action_simple(CONTROLLER_ACTION_OPEN_ZONE_PICKER);
     (void)controller_input_dispatch_action(&action);
@@ -1049,6 +1056,9 @@ static void source_region_long_press_cb(lv_event_t *e) {
 static void btn_prev_event_cb(lv_event_t *e) {
     (void)e;
     ESP_LOGI(UI_TAG, "btn_prev_event_cb triggered");
+#if !TARGET_PC
+    haptic_driver_pulse();
+#endif
     controller_action_t action = controller_action_command(
         controller_command_make(CONTROLLER_COMMAND_PREVIOUS_TRACK));
     (void)controller_input_dispatch_action(&action);
@@ -1057,6 +1067,9 @@ static void btn_prev_event_cb(lv_event_t *e) {
 static void btn_play_event_cb(lv_event_t *e) {
     (void)e;
     ESP_LOGI(UI_TAG, "btn_play_event_cb triggered");
+#if !TARGET_PC
+    haptic_driver_pulse();
+#endif
     controller_action_t action = controller_action_command(
         controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
     (void)controller_input_dispatch_action(&action);
@@ -1065,6 +1078,9 @@ static void btn_play_event_cb(lv_event_t *e) {
 static void btn_next_event_cb(lv_event_t *e) {
     (void)e;
     ESP_LOGI(UI_TAG, "btn_next_event_cb triggered");
+#if !TARGET_PC
+    haptic_driver_pulse();
+#endif
     controller_action_t action = controller_action_command(
         controller_command_make(CONTROLLER_COMMAND_NEXT_TRACK));
     (void)controller_input_dispatch_action(&action);

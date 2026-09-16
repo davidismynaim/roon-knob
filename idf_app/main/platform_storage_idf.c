@@ -327,3 +327,70 @@ bool platform_storage_write_title_filters(const rk_title_filter_cfg_t *in) {
              (int)strnlen(in->patterns, sizeof(in->patterns)));
     return true;
 }
+
+static const char *HAPTIC_NAMESPACE = "rk_haptic";
+static const char *HAPTIC_KEY = "cfg";
+
+bool platform_storage_read_haptic(rk_haptic_cfg_t *out) {
+    if (!out) {
+        return false;
+    }
+    rk_haptic_cfg_set_defaults(out);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(HAPTIC_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "haptic nvs open failed: %s", esp_err_to_name(err));
+        }
+        return true;
+    }
+
+    rk_haptic_cfg_t stored = {0};
+    size_t len = sizeof(stored);
+    err = nvs_get_blob(handle, HAPTIC_KEY, &stored, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "haptic nvs read failed: %s", esp_err_to_name(err));
+        }
+        return true;
+    }
+    if (len != sizeof(stored) || stored.cfg_ver != RK_HAPTIC_CFG_CURRENT_VER) {
+        ESP_LOGW(TAG, "haptic config size/version mismatch, using defaults");
+        return true;
+    }
+
+    *out = stored;
+    return true;
+}
+
+bool platform_storage_write_haptic(const rk_haptic_cfg_t *in) {
+    if (!in) {
+        return false;
+    }
+    rk_haptic_cfg_t copy = *in;
+    copy.cfg_ver = RK_HAPTIC_CFG_CURRENT_VER;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(HAPTIC_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "haptic nvs open rw failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    err = nvs_set_blob(handle, HAPTIC_KEY, &copy, sizeof(copy));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "haptic nvs_set_blob failed: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return false;
+    }
+    err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "haptic nvs_commit failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "Saved haptic config: enabled=%d", copy.enabled);
+    return true;
+}
