@@ -51,7 +51,7 @@ static esp_err_t send_conflict(httpd_req_t *req, const char *message) {
 // HTML page for config
 // Format args: current_bridge, status_class, status_text, wifi_html,
 // bridge_value, ha_host, ha_token_placeholder, zone_options,
-// escaped_title_patterns, haptic_checked
+// escaped_title_patterns, haptic_checked, haptic_effect_options
 static const char *HTML_CONFIG =
     "<!DOCTYPE html>"
     "<html><head>"
@@ -137,7 +137,9 @@ static const char *HTML_CONFIG =
     "<form method='POST' action='/haptic-config'>"
     "<h2>Haptic Feedback</h2>"
     "<label><input type='checkbox' name='enabled' value='1' style='width:auto;display:inline;margin-right:8px;'%s>Enable haptic feedback</label>"
-    "<p class='hint'>Vibrates briefly on play/pause/skip taps and on the mute/source-picker long-press gestures. Not applied to volume changes &mdash; the encoder's own mechanical detents already give a good feel there. First hardware-driven use of this dial's haptic motor, off by default until confirmed working.</p>"
+    "<label>Effect</label>"
+    "<select name='effect_id'>%s</select>"
+    "<p class='hint'>Vibrates briefly on play/pause/skip taps, the mute/source-picker long-press gestures, and picking an input from the source list. Not applied to volume changes &mdash; the encoder's own mechanical detents already give a good feel there. Effect names are the DRV2605 chip's own built-in library names, not ours &mdash; try a few and keep whichever feels best.</p>"
     "<input type='submit' value='Save'>"
     "</form></body></html>";
 
@@ -485,11 +487,31 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         }
     }
 
-    // rk_haptic_cfg_t is 2 bytes - unlike title_cfg above, genuinely safe
+    // rk_haptic_cfg_t is 3 bytes - unlike title_cfg above, genuinely safe
     // as a plain stack local (see rk_haptic_cfg.h).
     rk_haptic_cfg_t haptic_cfg = {0};
     platform_storage_read_haptic(&haptic_cfg);
     const char *haptic_checked = haptic_cfg.enabled ? " checked" : "";
+
+    // Small, fixed-size list (6 short entries) - a stack buffer is fine
+    // here, unlike the zone/pattern lists above which can be arbitrarily
+    // large.
+    char haptic_effect_options[512] = "";
+    size_t haptic_opt_pos = 0;
+    size_t effect_count = 0;
+    const haptic_effect_option_t *effects = haptic_driver_get_effect_options(&effect_count);
+    for (size_t i = 0; i < effect_count; i++) {
+        int written = snprintf(haptic_effect_options + haptic_opt_pos,
+                               sizeof(haptic_effect_options) - haptic_opt_pos,
+                               "<option value='%d'%s>%s</option>",
+                               effects[i].effect_id,
+                               effects[i].effect_id == haptic_cfg.effect_id ? " selected" : "",
+                               effects[i].name);
+        if (written < 0 || (size_t)written >= sizeof(haptic_effect_options) - haptic_opt_pos) {
+            break;
+        }
+        haptic_opt_pos += (size_t)written;
+    }
 
     // Build HTML with current values, saved networks, and bridge status.
     char *html = heap_caps_malloc(16384,
@@ -505,7 +527,7 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
 
     snprintf(html, 16384, HTML_CONFIG, current, status_class, status_text,
              wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
-             zone_options, escaped_patterns, haptic_checked);
+             zone_options, escaped_patterns, haptic_checked, haptic_effect_options);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
@@ -775,9 +797,9 @@ static esp_err_t title_filter_config_post_handler(httpd_req_t *req) {
 }
 
 // Handler for POST /haptic-config - save the haptic feedback on/off
-// preference (see idf_app/main/haptic_driver.c). rk_haptic_cfg_t is 2
-// bytes, so unlike the title-filter handler above, a plain stack local
-// is completely safe here - no heap allocation needed.
+// preference and selected effect (see idf_app/main/haptic_driver.c).
+// rk_haptic_cfg_t is 3 bytes, so unlike the title-filter handler above, a
+// plain stack local is completely safe here - no heap allocation needed.
 static esp_err_t haptic_config_post_handler(httpd_req_t *req) {
     char buf[128] = {0};
     int received = httpd_req_recv(req, buf, sizeof(buf) - 1);
@@ -796,6 +818,14 @@ static esp_err_t haptic_config_post_handler(httpd_req_t *req) {
         ESP_LOGE(TAG, "Failed to save haptic config");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
         return ESP_FAIL;
+    }
+
+    char effect_id_text[8] = {0};
+    if (get_form_field(buf, "effect_id", effect_id_text, sizeof(effect_id_text))) {
+        int effect_id = atoi(effect_id_text);
+        if (effect_id > 0 && effect_id <= 255) {
+            haptic_driver_set_effect((uint8_t)effect_id);
+        }
     }
 
     char *html = heap_caps_malloc(1024,

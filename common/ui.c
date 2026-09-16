@@ -904,6 +904,9 @@ static void zone_list_item_event_cb(lv_event_t *e) {
     lv_obj_t *btn = lv_event_get_target(e);
     int index = (int)(intptr_t)lv_obj_get_user_data(btn);
     s_zone_picker_selected = index;
+#if !TARGET_PC
+    haptic_driver_pulse();
+#endif
     controller_action_t action = controller_action_simple(
         CONTROLLER_ACTION_SELECT_ZONE_PICKER);
     (void)controller_input_dispatch_action(&action);
