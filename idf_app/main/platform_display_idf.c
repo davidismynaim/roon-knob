@@ -3,6 +3,7 @@
 #include "display_sleep.h"
 #include "bridge_client.h"
 #include "battery.h"
+#include "haptic_driver.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"
 
@@ -562,6 +563,9 @@ bool platform_display_init(void) {
     lcd_touch_init();
     ESP_LOGI(TAG, "Touch controller initialized successfully");
 
+    // Shares this same I2C bus with the touch controller above.
+    haptic_driver_init();
+
     s_hardware_ready = true;
     ESP_LOGI(TAG, "Display hardware initialized successfully");
     return true;
@@ -618,6 +622,16 @@ bool platform_display_register_lvgl_driver(void) {
     }
     lv_indev_set_type(s_touch_indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(s_touch_indev, lvgl_touch_read_cb);
+    // LVGL's default is 10px: any more finger movement between press and
+    // release than that and LVGL reclassifies the whole touch as a
+    // scroll/drag, silently dropping the click - no error, no event, the
+    // tap just does nothing. Raised to 20px (owner feedback: prev/play/
+    // next "not the most responsive") to tolerate more real-world finger
+    // jitter/touch-coordinate noise before giving up on a tap. Global to
+    // this indev, so it also loosens the source/zone picker list's own
+    // scroll-vs-tap threshold and the swipe-up-for-art-mode gesture -
+    // watch those too after flashing, not just the transport buttons.
+    lv_indev_set_scroll_limit(s_touch_indev, 20);
 
     // Create LVGL tick timer - CRITICAL for LVGL to know time is passing
     ESP_LOGI(TAG, "Creating LVGL tick timer (%dms period)", LVGL_TICK_PERIOD_MS);

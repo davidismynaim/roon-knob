@@ -2,6 +2,7 @@
 
 #include "rk_cfg.h"
 #include "rk_ha_cfg.h"
+#include "rk_haptic_cfg.h"
 #include "rk_title_filter_cfg.h"
 
 #include <stdbool.h>
@@ -58,3 +59,12 @@ bool platform_storage_write_ha(const rk_ha_cfg_t *in);
  */
 bool platform_storage_read_title_filters(rk_title_filter_cfg_t *out);
 bool platform_storage_write_title_filters(const rk_title_filter_cfg_t *in);
+
+/*
+ * Haptic feedback on/off preference (Dial-only). Independent blob, same
+ * no-migration contract as the configs above - and, unlike
+ * rk_title_filter_cfg_t, genuinely tiny (2 bytes), safe as a plain stack
+ * local anywhere.
+ */
+bool platform_storage_read_haptic(rk_haptic_cfg_t *out);
+bool platform_storage_write_haptic(const rk_haptic_cfg_t *in);
