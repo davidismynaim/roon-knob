@@ -17,11 +17,14 @@ const lv_font_t *font_manager_get_small(void);   // 22px for metadata, hints
 const lv_font_t *font_manager_get_normal(void);  // 28px for artist, zone names
 const lv_font_t *font_manager_get_large(void);   // 40px for track title
 const lv_font_t *font_manager_get_xlarge(void);  // 56px, digits/./- and "dB" only - Dial volume readout
+const lv_font_t *font_manager_get_xxlarge(void); // 112px (2x xlarge), digits/./- and "dB" only - TV/Vinyl hero volume readout
+const lv_font_t *font_manager_get_db_large(void); // 44px (2x small), digits/./- and "dB" only - TV/Vinyl dB-equivalent label
 
 // Icon fonts (Material Symbols) - for UI controls
 const lv_font_t *font_manager_get_icon_small(void);   // 22px for status icons
 const lv_font_t *font_manager_get_icon_normal(void);  // 28px for secondary buttons
 const lv_font_t *font_manager_get_icon_large(void);   // 48px for primary buttons
+const lv_font_t *font_manager_get_mute_icon(void);    // 140px, volume_off glyph only - mute screen
 
 // Check font availability
 bool font_manager_has_unicode(void);  // Text fonts loaded?

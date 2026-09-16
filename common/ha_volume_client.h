@@ -67,6 +67,26 @@ void ha_volume_client_get_display(float *volume, float *volume_min,
 // is left untouched in that case.
 bool ha_volume_client_get_current_source(char *out, size_t len);
 
+// Optimistic local override for the source ha_volume_client_get_current_source()
+// returns, so picking Music/TV/Vinyl from this dial's own source picker
+// switches screens immediately rather than waiting up to one poll
+// interval - the next actual poll then confirms it. Not for use outside
+// source_picker_client.c.
+void ha_volume_client_set_current_source_optimistic(const char *source);
+
+// True if input_boolean.audio_mute was "on" as of the last successful
+// poll - piggybacking on the same cycle/gate as volume and source above,
+// for the same reason (one more tiny GET, not a second task+stack).
+// Returns false (not muted) until the first successful poll.
+bool ha_volume_client_get_muted(void);
+
+// Optimistic local override for the mute flag ha_volume_client_get_muted()
+// returns, so a mute/unmute toggled from this dial reflects on screen
+// immediately rather than waiting up to one poll interval - the next
+// actual poll then confirms (or, if the HA call silently failed,
+// corrects) it. Not for use outside ha_mute_client.c.
+void ha_volume_client_set_muted_optimistic(bool muted);
+
 #ifdef __cplusplus
 }
 #endif

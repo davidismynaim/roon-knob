@@ -1,5 +1,6 @@
 #include "ha_mute_client.h"
 
+#include "ha_volume_client.h"
 #include "platform/platform_http.h"
 #include "platform/platform_log.h"
 #include "platform/platform_storage.h"
@@ -13,6 +14,12 @@ bool ha_mute_client_toggle(void) {
              "device's config page)");
         return false;
     }
+
+    // Read before posting so the optimistic update below flips the
+    // *correct* direction (ha_volume_client's poll cache, not a second
+    // round trip) - the mute screen then appears/disappears immediately
+    // instead of lagging behind by up to one poll interval.
+    bool was_muted = ha_volume_client_get_muted();
 
     char url[128];
     snprintf(url, sizeof(url),
@@ -28,5 +35,6 @@ bool ha_mute_client_toggle(void) {
         LOGW("Mute toggle: HA call failed");
         return false;
     }
+    ha_volume_client_set_muted_optimistic(!was_muted);
     return true;
 }
