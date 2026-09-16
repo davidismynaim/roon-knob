@@ -140,6 +140,7 @@ static const char *HTML_CONFIG =
     "<label>Effect</label>"
     "<select name='effect_id'>%s</select>"
     "<p class='hint'>Vibrates briefly on play/pause/skip taps, the mute/source-picker long-press gestures, and picking an input from the source list. Not applied to volume changes &mdash; the encoder's own mechanical detents already give a good feel there. Effect names are the DRV2605 chip's own built-in library names, not ours &mdash; try a few and keep whichever feels best.</p>"
+    "<p class='hint'>%s</p>"
     "<input type='submit' value='Save'>"
     "</form></body></html>";
 
@@ -526,6 +527,21 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         }
         haptic_opt_pos += (size_t)written;
     }
+    // Calibration trigger (sentinel 210, see haptic_config_post_handler) -
+    // also never pre-selected, a one-shot action like the diagnostics above.
+    snprintf(haptic_effect_options + haptic_opt_pos,
+             sizeof(haptic_effect_options) - haptic_opt_pos,
+             "<option value='210'>RUN AUTO-CALIBRATION (felt, ~1s)</option>");
+
+    char haptic_cal_status[160];
+    if (haptic_cfg.calibrated) {
+        snprintf(haptic_cal_status, sizeof(haptic_cal_status),
+                 "Calibrated: yes (feedback=0x%02x compensation=0x%02x back_emf=0x%02x) &mdash; running closed-loop.",
+                 haptic_cfg.cal_feedback, haptic_cfg.cal_compensation, haptic_cfg.cal_back_emf);
+    } else {
+        snprintf(haptic_cal_status, sizeof(haptic_cal_status),
+                 "Calibrated: no &mdash; running open-loop. Pick \"RUN AUTO-CALIBRATION\" above and Save to calibrate (felt, ~1s, check serial log for the result).");
+    }
 
     // Build HTML with current values, saved networks, and bridge status.
     char *html = heap_caps_malloc(16384,
@@ -541,7 +557,8 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
 
     snprintf(html, 16384, HTML_CONFIG, current, status_class, status_text,
              wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
-             zone_options, escaped_patterns, haptic_checked, haptic_effect_options);
+             zone_options, escaped_patterns, haptic_checked, haptic_effect_options,
+             haptic_cal_status);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
@@ -837,7 +854,12 @@ static esp_err_t haptic_config_post_handler(httpd_req_t *req) {
     char effect_id_text[8] = {0};
     if (get_form_field(buf, "effect_id", effect_id_text, sizeof(effect_id_text))) {
         int effect_id = atoi(effect_id_text);
-        if (effect_id >= 200 && effect_id <= 255) {
+        if (effect_id == 210) {
+            // Calibration sentinel (see config_get_handler's dropdown and
+            // haptic_driver_run_calibration()) - a one-shot action, not a
+            // setting to persist as-is (a pass persists its own result).
+            haptic_driver_run_calibration();
+        } else if (effect_id >= 200 && effect_id <= 255) {
             // Diagnostic sentinel (see haptic_driver.h) - a one-shot test
             // action, not a setting to persist. Check the serial monitor for
             // its logged result.
