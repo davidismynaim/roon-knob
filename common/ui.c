@@ -675,7 +675,10 @@ static void build_layout(void) {
     // order - the latter is what caused the volume-ring z-order
     // regression earlier, and is easy to break again in a future edit.
     s_battery_badge = lv_obj_create(s_artwork_container);
-    lv_obj_set_size(s_battery_badge, 40, 32);
+    // Sized tight to the icon glyph itself (owner feedback after seeing the
+    // first pass on hardware: height -50%, width -30% from the original
+    // 40x32 guess) rather than the generous padding a first pass assumed.
+    lv_obj_set_size(s_battery_badge, 28, 16);
     lv_obj_align(s_battery_badge, LV_ALIGN_TOP_MID, 0, 25);
     lv_obj_set_style_bg_color(s_battery_badge, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(s_battery_badge, LV_OPA_60, 0);
