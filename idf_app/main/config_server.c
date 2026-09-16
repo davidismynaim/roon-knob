@@ -493,10 +493,9 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     platform_storage_read_haptic(&haptic_cfg);
     const char *haptic_checked = haptic_cfg.enabled ? " checked" : "";
 
-    // Small, fixed-size list (6 short entries) - a stack buffer is fine
-    // here, unlike the zone/pattern lists above which can be arbitrarily
-    // large.
-    char haptic_effect_options[512] = "";
+    // Small, fixed-size list - a stack buffer is fine here, unlike the
+    // zone/pattern lists above which can be arbitrarily large.
+    char haptic_effect_options[1024] = "";
     size_t haptic_opt_pos = 0;
     size_t effect_count = 0;
     const haptic_effect_option_t *effects = haptic_driver_get_effect_options(&effect_count);
@@ -507,6 +506,21 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
                                effects[i].effect_id,
                                effects[i].effect_id == haptic_cfg.effect_id ? " selected" : "",
                                effects[i].name);
+        if (written < 0 || (size_t)written >= sizeof(haptic_effect_options) - haptic_opt_pos) {
+            break;
+        }
+        haptic_opt_pos += (size_t)written;
+    }
+    // Diagnostic entries (see haptic_driver.h) - never pre-selected, since
+    // they're one-shot actions rather than a persisted setting.
+    size_t diag_count = 0;
+    const haptic_diagnostic_option_t *diagnostics =
+        haptic_driver_get_diagnostic_options(&diag_count);
+    for (size_t i = 0; i < diag_count; i++) {
+        int written = snprintf(haptic_effect_options + haptic_opt_pos,
+                               sizeof(haptic_effect_options) - haptic_opt_pos,
+                               "<option value='%d'>%s</option>",
+                               diagnostics[i].test_id, diagnostics[i].name);
         if (written < 0 || (size_t)written >= sizeof(haptic_effect_options) - haptic_opt_pos) {
             break;
         }
@@ -823,7 +837,12 @@ static esp_err_t haptic_config_post_handler(httpd_req_t *req) {
     char effect_id_text[8] = {0};
     if (get_form_field(buf, "effect_id", effect_id_text, sizeof(effect_id_text))) {
         int effect_id = atoi(effect_id_text);
-        if (effect_id > 0 && effect_id <= 255) {
+        if (effect_id >= 200 && effect_id <= 255) {
+            // Diagnostic sentinel (see haptic_driver.h) - a one-shot test
+            // action, not a setting to persist. Check the serial monitor for
+            // its logged result.
+            haptic_driver_run_diagnostic((uint8_t)effect_id);
+        } else if (effect_id > 0 && effect_id < 200) {
             haptic_driver_set_effect((uint8_t)effect_id);
         }
     }

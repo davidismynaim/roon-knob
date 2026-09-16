@@ -80,6 +80,36 @@ bool haptic_driver_set_effect(uint8_t effect_id);
 // clicks), that this is expected to be rare in practice.
 void haptic_driver_pulse(void);
 
+// TEMPORARY hardware diagnostic - not a real feature, easy to remove once
+// this board's actuator question is settled. See docs/esp/hw-reference/
+// drv2605.md and the PR/issue that added this: two external sources
+// disagree about this exact board (Waveshare ESP32-S3-Knob-Touch-LCD-1.8) -
+// the vendor's own demo drives it as ERM with no enable pin at all, while an
+// independent reverse-engineering project measured it as an LRA behind an
+// undocumented enable pin on GPIO38. Owner's own hardware already contradicts
+// the second source (effects ARE felt, subtly, without ever touching
+// GPIO38), so rather than guess, these let the owner check on the actual
+// device: each drives GPIO38 as instructed, optionally reconfigures the
+// actuator-type register, reads back the DRV2605's own built-in actuator
+// diagnostic (logged, not returned - check the serial monitor), and fires a
+// felt "Strong Click" pulse (effect id 1, which is Strong Click in every
+// library per the datasheet's effect table) so the difference can be felt
+// as well as read. Deliberately NOT part of haptic_driver_get_effect_options()
+// and NOT persisted - a one-shot action, not a setting.
+typedef struct {
+    uint8_t test_id;
+    const char *name;
+} haptic_diagnostic_option_t;
+
+const haptic_diagnostic_option_t *haptic_driver_get_diagnostic_options(size_t *count);
+
+// Runs one of haptic_driver_get_diagnostic_options()'s test_id values. No-op
+// (with a warning logged) if the chip never initialized or test_id is
+// unrecognized. The device reboots after every config-page save regardless
+// (existing pattern), which restores normal ERM configuration from NVS
+// afterward - no cleanup needed here.
+void haptic_driver_run_diagnostic(uint8_t test_id);
+
 #ifdef __cplusplus
 }
 #endif
