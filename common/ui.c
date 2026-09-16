@@ -1100,13 +1100,34 @@ static void zone_list_item_event_cb(lv_event_t *e) {
 // ============================================================================
 
 static void apply_state(const struct ui_state *state) {
-    // Update track/artist labels
+    // Update track/artist labels - but only if the text actually changed.
+    // apply_state() runs on every dirty flush (as often as every 2s during
+    // a poll, for volume/progress/playing changes that have nothing to do
+    // with the track), while the track/artist themselves only change once
+    // every few minutes. lv_label_set_text() doesn't check for this itself
+    // (checked LVGL's own source: it unconditionally frees the label's
+    // internal buffer, reallocates, copies the new text in, and
+    // re-measures pixel width character-by-character to reconfigure the
+    // scroll animation) - so without this guard, both labels were doing
+    // that full round trip on every single poll regardless of whether
+    // anything in them changed. (LVGL's circular-scroll code does already
+    // preserve the animation's act_time across a same-text set_text call,
+    // so this was wasted CPU/heap churn, not a visible scroll glitch.)
+    static char s_last_line1[128] = "";
+    static char s_last_line2[128] = "";
     if (s_track_label && s_artist_label) {
-        lv_label_set_text(s_track_label, state->line1);
-        lv_obj_invalidate(s_track_label);
-
-        lv_label_set_text(s_artist_label, state->line2);
-        lv_obj_invalidate(s_artist_label);
+        if (strcmp(state->line1, s_last_line1) != 0) {
+            lv_label_set_text(s_track_label, state->line1);
+            lv_obj_invalidate(s_track_label);
+            strncpy(s_last_line1, state->line1, sizeof(s_last_line1) - 1);
+            s_last_line1[sizeof(s_last_line1) - 1] = '\0';
+        }
+        if (strcmp(state->line2, s_last_line2) != 0) {
+            lv_label_set_text(s_artist_label, state->line2);
+            lv_obj_invalidate(s_artist_label);
+            strncpy(s_last_line2, state->line2, sizeof(s_last_line2) - 1);
+            s_last_line2[sizeof(s_last_line2) - 1] = '\0';
+        }
     } else {
         ESP_LOGE(UI_TAG, "Label pointers are NULL! track=%p artist=%p", s_track_label, s_artist_label);
     }
@@ -1129,33 +1150,52 @@ static void apply_state(const struct ui_state *state) {
 
     redraw_volume_ring(state->volume, state->volume_min, state->volume_max);
 
-    // Display volume (format matches zone's step precision)
+    // Display volume (format matches zone's step precision). set_haloed_label_text
+    // touches 9 labels (the number plus its 8-directional halo) - guarded
+    // the same way as track/artist above, since volume is unchanged on
+    // most polls (only progress/playing changed) but this ran every time
+    // regardless.
+    static char s_last_vol_text[16] = "";
     char vol_text[16];
     // Note: volume_min is atomic float read; no lock needed (self-corrects on next poll if stale)
     format_volume_text(vol_text, sizeof(vol_text), state->volume, state->volume_min, state->volume_step);
-    set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
-    if (s_tv_vinyl_volume_label) lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
+    if (strcmp(vol_text, s_last_vol_text) != 0) {
+        set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
+        if (s_tv_vinyl_volume_label) lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
+        strncpy(s_last_vol_text, vol_text, sizeof(s_last_vol_text) - 1);
+        s_last_vol_text[sizeof(s_last_vol_text) - 1] = '\0';
+    }
 
+    static char s_last_db_text[16] = "";
     char db_text[16];
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max));
-    lv_label_set_text(s_volume_db_label, db_text);
-    if (s_tv_vinyl_db_label) lv_label_set_text(s_tv_vinyl_db_label, db_text);
+    if (strcmp(db_text, s_last_db_text) != 0) {
+        lv_label_set_text(s_volume_db_label, db_text);
+        if (s_tv_vinyl_db_label) lv_label_set_text(s_tv_vinyl_db_label, db_text);
+        strncpy(s_last_db_text, db_text, sizeof(s_last_db_text) - 1);
+        s_last_db_text[sizeof(s_last_db_text) - 1] = '\0';
+    }
 
-    // Update progress arc based on seek position and track length
+    // Update progress arc based on seek position and track length.
+    // lv_arc_set_value() already no-ops (checked LVGL's own source: it
+    // returns immediately if the value is unchanged, before touching
+    // anything else) - the lv_obj_invalidate() calls that used to follow
+    // it unconditionally were forcing a redraw LVGL had already decided
+    // was unnecessary, every single poll.
     if (s_progress_arc && state->length > 0) {
         int progress_pct = (state->seek_position * 100) / state->length;
         if (progress_pct > 100) progress_pct = 100;
         if (progress_pct < 0) progress_pct = 0;
         lv_arc_set_value(s_progress_arc, progress_pct);
-        lv_obj_invalidate(s_progress_arc);
     } else if (s_progress_arc) {
         lv_arc_set_value(s_progress_arc, 0);
-        lv_obj_invalidate(s_progress_arc);
     }
 
-    // Update play/pause icon
-    if (s_play_icon) {
+    // Update play/pause icon - only on an actual state change.
+    static int s_last_playing = -1;  // -1 = never applied
+    if (s_play_icon && (int)state->playing != s_last_playing) {
+        s_last_playing = state->playing ? 1 : 0;
 #if !TARGET_PC
         lv_label_set_text(s_play_icon, state->playing ? ICON_PAUSE : ICON_PLAY);
 #else
