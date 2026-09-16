@@ -33,7 +33,6 @@ set(SRC_FILES
     "fonts/material_icons_60.c"
     "fonts/lucide_battery_22.c"
     "fonts/material_icons_140.c"
-    "fonts/notosans_bold_64_muted.c"
     # TV/Vinyl background photos, converted to embedded RGB565 by
     # scripts/convert_tv_vinyl_images.py (run it to regenerate from a
     # replacement photo)

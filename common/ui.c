@@ -184,7 +184,6 @@ static inline const lv_font_t *font_icon_small(void) { return font_manager_get_i
 static inline const lv_font_t *font_icon_normal(void) { return font_manager_get_icon_normal(); }
 static inline const lv_font_t *font_icon_large(void) { return font_manager_get_icon_large(); }
 static inline const lv_font_t *font_mute_icon(void) { return font_manager_get_mute_icon(); }
-static inline const lv_font_t *font_mute_text(void) { return font_manager_get_mute_text(); }
 // Icon aliases (Material Symbols on ESP32)
 #define UI_ICON_DOWNLOAD  ICON_DOWNLOAD
 #else
@@ -199,7 +198,6 @@ static inline const lv_font_t *font_icon_small(void) { return &lv_font_montserra
 static inline const lv_font_t *font_icon_normal(void) { return &lv_font_montserrat_28; }
 static inline const lv_font_t *font_icon_large(void) { return &lv_font_montserrat_48; }
 static inline const lv_font_t *font_mute_icon(void) { return &lv_font_montserrat_48; }  // PC sim has no 140px asset
-static inline const lv_font_t *font_mute_text(void) { return &lv_font_montserrat_48; }  // PC sim has no 64px asset
 // Icon aliases (LVGL symbols on PC)
 #define UI_ICON_DOWNLOAD  LV_SYMBOL_DOWNLOAD
 #endif
@@ -1018,14 +1016,8 @@ static void build_mute_overlay(void) {
     lv_label_set_text(icon, ICON_VOLUME_OFF);
     lv_obj_set_style_text_font(icon, font_mute_icon(), 0);
     lv_obj_set_style_text_color(icon, lv_color_hex(0xff3333), 0);
-    lv_obj_align(icon, LV_ALIGN_CENTER, 0, -40);
+    lv_obj_center(icon);  // True center - owner feedback: was offset high, and "MUTED" text (removed) isn't needed
 #endif
-
-    lv_obj_t *label = lv_label_create(s_mute_overlay);
-    lv_label_set_text(label, "MUTED");
-    lv_obj_set_style_text_font(label, font_mute_text(), 0);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xff3333), 0);
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 80);
 }
 
 // ============================================================================

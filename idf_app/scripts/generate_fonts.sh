@@ -145,11 +145,10 @@ for size in 22 28 44 60; do
         -o "$OUTPUT_DIR/material_icons_${size}.c"
 done
 
-# Generate the mute screen's icon (140px) and "MUTED" text (64px), each
-# restricted to just the glyphs they need (single icon codepoint; M/U/T/E/D
-# only) rather than the full ICON_RANGES/TEXT_RANGES sets, since neither is
+# Generate the mute screen's icon (140px), restricted to just the single
+# codepoint it needs rather than the full ICON_RANGES set, since it's not
 # used anywhere else (docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md
-# mute redesign: black background, red icon+text, both large).
+# mute redesign: black background, large centered red icon, no text).
 echo "Converting mute screen icon (140px)..."
 echo "  - material_icons_140.c"
 lv_font_conv \
@@ -161,18 +160,6 @@ lv_font_conv \
     --no-compress \
     --no-prefilter \
     -o "$OUTPUT_DIR/material_icons_140.c"
-
-echo "Converting mute screen text (MUTED, 64px)..."
-echo "  - notosans_bold_64_muted.c"
-lv_font_conv \
-    --bpp 4 \
-    --size 64 \
-    --font "$SPIFFS_DIR/NotoSans-Bold.ttf" \
-    --range 0x44,0x45,0x4D,0x54,0x55 \
-    --format lvgl \
-    --no-compress \
-    --no-prefilter \
-    -o "$OUTPUT_DIR/notosans_bold_64_muted.c"
 
 # Generate Lucide battery icons at 22px (horizontal battery indicator)
 echo "Converting Lucide battery icons..."
