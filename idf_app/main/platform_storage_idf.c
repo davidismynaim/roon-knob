@@ -1,6 +1,7 @@
 #include "platform/platform_storage.h"
 
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <nvs_flash.h>
 #include <nvs.h>
@@ -276,6 +277,10 @@ bool platform_storage_read_title_filters(rk_title_filter_cfg_t *out) {
         return true;
     }
 
+    // Buffer capacity is the full struct size, but the actual stored blob
+    // may be much shorter - see platform_storage_write_title_filters for
+    // why. nvs_get_blob() only requires the buffer be >= the stored size,
+    // and reports the real size back through len.
     size_t len = sizeof(*out);
     err = nvs_get_blob(handle, TITLE_FILTER_KEY, out, &len);
     nvs_close(handle);
@@ -287,12 +292,26 @@ bool platform_storage_read_title_filters(rk_title_filter_cfg_t *out) {
         rk_title_filter_cfg_set_defaults(out);  // out may be partially written
         return true;
     }
-    if (len != sizeof(*out) || out->cfg_ver != RK_TITLE_FILTER_CFG_CURRENT_VER) {
-        ESP_LOGW(TAG, "title filter config size/version mismatch, using defaults");
+    // cfg_ver is always the blob's trailing byte, whether it's an old
+    // fixed-4097-byte blob (from before this fix) or a new variable-length
+    // one - both lay patterns out first with cfg_ver immediately after, so
+    // this stays compatible with blobs already on a device's flash.
+    if (len < 1 || len > sizeof(out->patterns) + 1) {
+        ESP_LOGW(TAG, "title filter config size mismatch (%d bytes), using defaults",
+                 (int)len);
         rk_title_filter_cfg_set_defaults(out);
         return true;
     }
-
+    uint8_t stored_ver = ((uint8_t *)out)[len - 1];
+    if (stored_ver != RK_TITLE_FILTER_CFG_CURRENT_VER) {
+        ESP_LOGW(TAG, "title filter config version mismatch, using defaults");
+        rk_title_filter_cfg_set_defaults(out);
+        return true;
+    }
+    out->cfg_ver = stored_ver;
+    if (len - 1 < sizeof(out->patterns)) {
+        out->patterns[len - 1] = '\0';
+    }
     out->patterns[sizeof(out->patterns) - 1] = '\0';
     return true;
 }
@@ -302,16 +321,32 @@ bool platform_storage_write_title_filters(const rk_title_filter_cfg_t *in) {
         return false;
     }
 
+    // Only the patterns actually in use get written to NVS, not the full
+    // 4KB+ fixed buffer - the nvs partition is only 16KB total
+    // (idf_app/partitions.csv), and always paying for the worst case on
+    // every save (even an empty list) was eating enough space to make
+    // OTHER config saves (haptic, HA) start failing too. cfg_ver stays the
+    // blob's trailing byte either way, so platform_storage_read_title_filters
+    // reads old full-size blobs and these new short ones the same way.
+    size_t patterns_len = strnlen(in->patterns, sizeof(in->patterns) - 1) + 1;
+    size_t blob_len = patterns_len + 1;
+    uint8_t *tmp = heap_caps_malloc(blob_len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!tmp) {
+        ESP_LOGE(TAG, "title filter save: out of memory");
+        return false;
+    }
+    memcpy(tmp, in->patterns, patterns_len);
+    tmp[patterns_len] = in->cfg_ver;
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(TITLE_FILTER_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "title filter nvs open rw failed: %s", esp_err_to_name(err));
+        free(tmp);
         return false;
     }
-    // Written as-is (no defensive cfg_ver/null-terminator copy, to avoid
-    // another 4KB+ stack local) - both current callers already zero-init
-    // the struct and set cfg_ver before writing.
-    err = nvs_set_blob(handle, TITLE_FILTER_KEY, in, sizeof(*in));
+    err = nvs_set_blob(handle, TITLE_FILTER_KEY, tmp, blob_len);
+    free(tmp);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "title filter nvs_set_blob failed: %s", esp_err_to_name(err));
         nvs_close(handle);
@@ -324,6 +359,6 @@ bool platform_storage_write_title_filters(const rk_title_filter_cfg_t *in) {
         return false;
     }
     ESP_LOGI(TAG, "Saved title filter config (%d bytes of patterns)",
-             (int)strnlen(in->patterns, sizeof(in->patterns)));
+             (int)(patterns_len - 1));
     return true;
 }
