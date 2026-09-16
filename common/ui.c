@@ -183,6 +183,8 @@ static inline const lv_font_t *font_db_large(void) { return font_manager_get_db_
 static inline const lv_font_t *font_icon_small(void) { return font_manager_get_icon_small(); }
 static inline const lv_font_t *font_icon_normal(void) { return font_manager_get_icon_normal(); }
 static inline const lv_font_t *font_icon_large(void) { return font_manager_get_icon_large(); }
+static inline const lv_font_t *font_mute_icon(void) { return font_manager_get_mute_icon(); }
+static inline const lv_font_t *font_mute_text(void) { return font_manager_get_mute_text(); }
 // Icon aliases (Material Symbols on ESP32)
 #define UI_ICON_DOWNLOAD  ICON_DOWNLOAD
 #else
@@ -196,6 +198,8 @@ static inline const lv_font_t *font_db_large(void) { return &lv_font_montserrat_
 static inline const lv_font_t *font_icon_small(void) { return &lv_font_montserrat_20; }
 static inline const lv_font_t *font_icon_normal(void) { return &lv_font_montserrat_28; }
 static inline const lv_font_t *font_icon_large(void) { return &lv_font_montserrat_48; }
+static inline const lv_font_t *font_mute_icon(void) { return &lv_font_montserrat_48; }  // PC sim has no 140px asset
+static inline const lv_font_t *font_mute_text(void) { return &lv_font_montserrat_48; }  // PC sim has no 64px asset
 // Icon aliases (LVGL symbols on PC)
 #define UI_ICON_DOWNLOAD  LV_SYMBOL_DOWNLOAD
 #endif
@@ -979,16 +983,19 @@ static void build_tv_vinyl_layout(void) {
 
 // Full-screen mute state (owner direction: same slice as TV/Vinyl, shown
 // regardless of which screen is active underneath - mute is a single
-// global HA state, not per-input). Simple by design (owner's own framing):
-// solid red background, unmissable regardless of what's behind it, plus
-// an icon and label so it reads as "muted" and not just "something's
-// wrong". Topmost object in s_artwork_container, so it covers whichever
-// of Music/TV/Vinyl is currently showing without needing to know which.
+// global HA state, not per-input). Black background rather than a solid
+// color fill - this panel is AMOLED (docs/esp/DISPLAY.md), where a
+// large bright/saturated fill costs real, measurable extra current over
+// a mostly-black one with the same information conveyed by a smaller lit
+// area (the icon/text alone); unmissable comes from the icon+text being
+// large and red against black, not from lighting every pixel on screen.
+// Topmost object in s_artwork_container, so it covers whichever of
+// Music/TV/Vinyl is currently showing without needing to know which.
 static void build_mute_overlay(void) {
     s_mute_overlay = lv_obj_create(s_artwork_container);
     lv_obj_set_size(s_mute_overlay, SCREEN_SIZE, SCREEN_SIZE);
     lv_obj_center(s_mute_overlay);
-    lv_obj_set_style_bg_color(s_mute_overlay, lv_color_hex(0xb71c1c), 0);
+    lv_obj_set_style_bg_color(s_mute_overlay, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(s_mute_overlay, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_mute_overlay, 0, 0);
     lv_obj_set_style_radius(s_mute_overlay, 0, 0);
@@ -1009,16 +1016,16 @@ static void build_mute_overlay(void) {
 #if !TARGET_PC
     lv_obj_t *icon = lv_label_create(s_mute_overlay);
     lv_label_set_text(icon, ICON_VOLUME_OFF);
-    lv_obj_set_style_text_font(icon, font_icon_large(), 0);
-    lv_obj_set_style_text_color(icon, lv_color_hex(0xfafafa), 0);
-    lv_obj_align(icon, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_set_style_text_font(icon, font_mute_icon(), 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xff3333), 0);
+    lv_obj_align(icon, LV_ALIGN_CENTER, 0, -40);
 #endif
 
     lv_obj_t *label = lv_label_create(s_mute_overlay);
     lv_label_set_text(label, "MUTED");
-    lv_obj_set_style_text_font(label, font_normal(), 0);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xfafafa), 0);
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_set_style_text_font(label, font_mute_text(), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xff3333), 0);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 80);
 }
 
 // ============================================================================

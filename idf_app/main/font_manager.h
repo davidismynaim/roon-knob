@@ -24,6 +24,8 @@ const lv_font_t *font_manager_get_db_large(void); // 44px (2x small), digits/./-
 const lv_font_t *font_manager_get_icon_small(void);   // 22px for status icons
 const lv_font_t *font_manager_get_icon_normal(void);  // 28px for secondary buttons
 const lv_font_t *font_manager_get_icon_large(void);   // 48px for primary buttons
+const lv_font_t *font_manager_get_mute_icon(void);    // 140px, volume_off glyph only - mute screen
+const lv_font_t *font_manager_get_mute_text(void);    // 64px Bold, M/U/T/E/D only - mute screen "MUTED"
 
 // Check font availability
 bool font_manager_has_unicode(void);  // Text fonts loaded?

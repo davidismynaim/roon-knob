@@ -27,6 +27,8 @@ extern const lv_font_t material_icons_28;
 extern const lv_font_t material_icons_44;
 extern const lv_font_t material_icons_60;
 extern const lv_font_t lucide_battery_22;
+extern const lv_font_t material_icons_140;   // volume_off glyph only - mute screen
+extern const lv_font_t notosans_bold_64_muted;  // M/U/T/E/D only - mute screen "MUTED"
 
 static bool s_initialized = false;
 
@@ -80,6 +82,14 @@ const lv_font_t *font_manager_get_icon_normal(void) {
 
 const lv_font_t *font_manager_get_icon_large(void) {
     return &material_icons_60;  // Increased from 48px to match 80px play button
+}
+
+const lv_font_t *font_manager_get_mute_icon(void) {
+    return &material_icons_140;
+}
+
+const lv_font_t *font_manager_get_mute_text(void) {
+    return &notosans_bold_64_muted;
 }
 
 // Lucide battery font getter (horizontal battery icons)
