@@ -23,13 +23,21 @@ set(SRC_FILES
     # Generated bitmap fonts (run scripts/generate_fonts.sh to regenerate)
     # Typography: Lato for metadata, Noto Sans for content (matches Roon's design)
     "fonts/lato_22.c"
+    "fonts/lato_44.c"
     "fonts/notosans_28.c"
     "fonts/notosans_bold_56.c"
+    "fonts/notosans_bold_112.c"
     "fonts/material_icons_22.c"
     "fonts/material_icons_28.c"
     "fonts/material_icons_44.c"
     "fonts/material_icons_60.c"
     "fonts/lucide_battery_22.c"
+    "fonts/material_icons_140.c"
+    # TV/Vinyl background photos, converted to embedded RGB565 by
+    # scripts/convert_tv_vinyl_images.py (run it to regenerate from a
+    # replacement photo)
+    "images/tv_background.c"
+    "images/vinyl_background.c"
     "../../common/app_main.c"
     "../../common/bridge_command_plan.c"
     "../../common/bridge_client.c"
