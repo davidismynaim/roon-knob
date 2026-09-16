@@ -1,7 +1,7 @@
 #pragma once
 
 // Haptic feedback preferences (idf_app/main/haptic_driver.c, Dial-only).
-// Deliberately tiny (3 bytes) and deliberately its own independent NVS
+// Deliberately tiny (7 bytes) and deliberately its own independent NVS
 // blob, same reasoning as rk_ha_cfg.h - but worth calling out explicitly
 // here: this is exactly the kind of small, fixed-size struct that's safe
 // to keep as a plain stack local everywhere. Contrast with
@@ -12,12 +12,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define RK_HAPTIC_CFG_CURRENT_VER 2  // v1 had no effect_id field
+#define RK_HAPTIC_CFG_CURRENT_VER 3  // v2 had no calibration fields
 
 typedef struct {
     uint8_t enabled;
     uint8_t effect_id;  // DRV2605 library effect ID - see haptic_driver.h
     uint8_t cfg_ver;
+    // Set once haptic_driver_run_calibration() passes - see haptic_driver.h.
+    // These three are exactly what a passed calibration leaves in the
+    // DRV2605's own FEEDBACK/CAL_COMP/CAL_BEMF registers; written back
+    // verbatim on every boot instead of re-running calibration (which is
+    // felt - a boot should stay quiet).
+    uint8_t calibrated;
+    uint8_t cal_feedback;
+    uint8_t cal_compensation;
+    uint8_t cal_back_emf;
 } rk_haptic_cfg_t;
 
 static inline bool rk_haptic_cfg_is_valid(const rk_haptic_cfg_t *cfg) {
@@ -39,4 +48,5 @@ static inline void rk_haptic_cfg_set_defaults(rk_haptic_cfg_t *cfg) {
     // until proven stable in real-world use").
     cfg->enabled = 0;
     cfg->effect_id = 1;  // "Strong Click - 100%" - see haptic_driver.h
+    cfg->calibrated = 0;
 }
