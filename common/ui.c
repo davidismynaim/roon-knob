@@ -811,7 +811,7 @@ static void build_layout(void) {
     lv_obj_set_width(s_artist_label, SCREEN_SIZE - 100);
     lv_obj_set_style_text_font(s_artist_label, font_small(), 0);
     lv_obj_set_style_text_align(s_artist_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_artist_label, lv_color_hex(0xaaaaaa), 0);
+    lv_obj_set_style_text_color(s_artist_label, lv_color_hex(0xc0c0c0), 0);
     lv_label_set_long_mode(s_artist_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_anim_time(s_artist_label, 25000, LV_PART_MAIN);
     lv_label_set_text(s_artist_label, s_pending.line2);
