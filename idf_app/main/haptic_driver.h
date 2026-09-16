@@ -9,13 +9,29 @@
 // so this only fires on the transport buttons (play/pause/prev/next) and
 // the long-press gestures (mute, source picker).
 //
-// No auto-calibration in this first pass (owner direction) - runs the
-// DRV2605 open-loop with the chip's own power-on-reset default drive
-// levels rather than measuring the actual motor and tuning to it. Safer
-// (can't overdrive an unknown actuator with an unverified calibration)
-// and simpler, at the cost of a less precisely-tuned feel; revisit with
-// real auto-calibration only if that turns out to matter once felt on
-// hardware.
+// No auto-calibration in the first pass (owner direction) - ran the DRV2605
+// open-loop with the chip's own power-on-reset default drive levels rather
+// than measuring the actual motor and tuning to it. haptic_driver_run_
+// calibration() below adds that as an explicit, one-shot, opt-in action once
+// hardware testing confirmed effects were felt but subtle.
+//
+// Actuator type (ERM vs LRA) and an undocumented enable-pin theory (GPIO38)
+// were both open questions when calibration was being considered - resolved
+// via the temporary diagnostic further down before writing this: on this
+// specific board, GPIO38 makes no measurable difference to the DRV2605's own
+// actuator diagnostic (0xe0 "connected" either way), and the vendor's own
+// demo (docs/esp/hw-reference/drv2605.md) treats it as ERM with no enable
+// pin - both now corroborated by direct hardware measurement, not just the
+// vendor's word. Calibration below assumes ERM and does not touch GPIO38.
+//
+// Calibration deliberately does NOT raise RATED_VOLTAGE/OVERDRIVE_CLAMP_
+// VOLTAGE - it only tunes closed-loop compensation/back-EMF gain for
+// whatever drive ceiling is already configured (the chip's own power-on
+// default, since those registers are still never written). That means this
+// is expected to improve consistency/crispness (closed-loop actively
+// compensates for friction/binding instead of just driving blind), not
+// necessarily raw perceived strength - raising the actual voltage ceiling is
+// a separate, distinct decision, not bundled into this.
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -109,6 +125,24 @@ const haptic_diagnostic_option_t *haptic_driver_get_diagnostic_options(size_t *c
 // (existing pattern), which restores normal ERM configuration from NVS
 // afterward - no cleanup needed here.
 void haptic_driver_run_diagnostic(uint8_t test_id);
+
+// Runs the DRV2605's own auto-calibration against the actuator as currently
+// configured (ERM, unchanged drive-voltage ceiling - see the header comment
+// above). This IS felt: calibration is the one thing that moves the motor
+// while it runs (a few hundred ms up to ~1.2s). Logs the pass/fail result
+// and the compensation/back-EMF/feedback values either way.
+//
+// On a pass, persists those three values and switches immediately from
+// open-loop to closed-loop ERM drive - no reboot needed to take effect. On a
+// failure (the chip's own diagnostic bit, not a guess), logs a warning and
+// leaves the existing open-loop configuration completely untouched; nothing
+// is persisted, so a failed run can't leave a device worse off than before.
+// No-op if the chip never initialized.
+void haptic_driver_run_calibration(void);
+
+// True once a calibration has been run, passed, and its result loaded
+// (either just now, or from NVS at boot).
+bool haptic_driver_is_calibrated(void);
 
 #ifdef __cplusplus
 }
