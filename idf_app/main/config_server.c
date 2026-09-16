@@ -512,21 +512,6 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         }
         haptic_opt_pos += (size_t)written;
     }
-    // Diagnostic entries (see haptic_driver.h) - never pre-selected, since
-    // they're one-shot actions rather than a persisted setting.
-    size_t diag_count = 0;
-    const haptic_diagnostic_option_t *diagnostics =
-        haptic_driver_get_diagnostic_options(&diag_count);
-    for (size_t i = 0; i < diag_count; i++) {
-        int written = snprintf(haptic_effect_options + haptic_opt_pos,
-                               sizeof(haptic_effect_options) - haptic_opt_pos,
-                               "<option value='%d'>%s</option>",
-                               diagnostics[i].test_id, diagnostics[i].name);
-        if (written < 0 || (size_t)written >= sizeof(haptic_effect_options) - haptic_opt_pos) {
-            break;
-        }
-        haptic_opt_pos += (size_t)written;
-    }
     // Calibration trigger (sentinel 210, see haptic_config_post_handler) -
     // also never pre-selected, a one-shot action like the diagnostics above.
     snprintf(haptic_effect_options + haptic_opt_pos,
@@ -859,11 +844,6 @@ static esp_err_t haptic_config_post_handler(httpd_req_t *req) {
             // haptic_driver_run_calibration()) - a one-shot action, not a
             // setting to persist as-is (a pass persists its own result).
             haptic_driver_run_calibration();
-        } else if (effect_id >= 200 && effect_id <= 255) {
-            // Diagnostic sentinel (see haptic_driver.h) - a one-shot test
-            // action, not a setting to persist. Check the serial monitor for
-            // its logged result.
-            haptic_driver_run_diagnostic((uint8_t)effect_id);
         } else if (effect_id > 0 && effect_id < 200) {
             haptic_driver_set_effect((uint8_t)effect_id);
         }
