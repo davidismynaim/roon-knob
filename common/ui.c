@@ -66,6 +66,13 @@ static lv_obj_t *s_volume_canvas;      // Outer volume ring - 256 dots, one per 
 static void *s_volume_canvas_buf;      // PSRAM pixel buffer backing s_volume_canvas
 static int s_volume_canvas_lit_ticks = -1;  // Last-drawn lit-tick count; -1 forces the first draw
 static lv_obj_t *s_progress_arc;       // Inner arc for track progress
+// 1000 rather than a plain 0-100 percent range - at 0-100, a single arc
+// step is (track_length / 100), which for a typical 3-5 minute track is
+// 2-3 real seconds regardless of how often the interpolation timer below
+// ticks. That's what "still steps every few seconds" turned out to be:
+// not a timing problem, a resolution one. 1000 steps make each step a
+// fraction of a second on any normal track length.
+#define PROGRESS_ARC_MAX 1000
 static lv_timer_t *s_progress_interp_timer;  // Advances the arc between polls - see progress_interp_timer_cb
 static int s_progress_base_ms = -1;    // Last known real seek position (-1 = no data yet)
 static int s_progress_length_ms;       // Track length at the time s_progress_base_ms was recorded
@@ -440,10 +447,10 @@ static void progress_interp_timer_cb(lv_timer_t *timer) {
     if (estimated_ms > s_progress_length_ms) {
         estimated_ms = s_progress_length_ms;
     }
-    int progress_pct = (estimated_ms * 100) / s_progress_length_ms;
-    if (progress_pct > 100) progress_pct = 100;
-    if (progress_pct < 0) progress_pct = 0;
-    lv_arc_set_value(s_progress_arc, progress_pct);
+    int progress_scaled = (estimated_ms * PROGRESS_ARC_MAX) / s_progress_length_ms;
+    if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
+    if (progress_scaled < 0) progress_scaled = 0;
+    lv_arc_set_value(s_progress_arc, progress_scaled);
 }
 
 // ============================================================================
@@ -475,10 +482,11 @@ void ui_init(void) {
     }
 
     // Smooths the progress arc between the much slower bridge polls (see
-    // progress_interp_timer_cb's own comment). 500ms is frequent enough to
-    // look continuous at typical track lengths without being wasteful -
+    // progress_interp_timer_cb's own comment). 250ms, paired with the
+    // 1000-step arc range above, keeps steps small and frequent enough to
+    // read as continuous motion rather than being wasteful -
     // lv_arc_set_value() no-ops on repeat calls with an unchanged value.
-    s_progress_interp_timer = lv_timer_create(progress_interp_timer_cb, 500, NULL);
+    s_progress_interp_timer = lv_timer_create(progress_interp_timer_cb, 250, NULL);
     if (s_progress_interp_timer) {
         lv_timer_set_repeat_count(s_progress_interp_timer, -1);
     } else {
@@ -640,7 +648,7 @@ static void build_layout(void) {
     s_progress_arc = lv_arc_create(s_ui_container);
     lv_obj_set_size(s_progress_arc, SCREEN_SIZE - 30, SCREEN_SIZE - 30);
     lv_obj_center(s_progress_arc);
-    lv_arc_set_range(s_progress_arc, 0, 100);
+    lv_arc_set_range(s_progress_arc, 0, PROGRESS_ARC_MAX);
     lv_arc_set_value(s_progress_arc, 0);
     lv_arc_set_bg_angles(s_progress_arc, 0, 359);  // Nearly full circle
     lv_arc_set_rotation(s_progress_arc, 270);  // Start at top (12 o'clock)
@@ -1000,18 +1008,41 @@ static void apply_state(const struct ui_state *state) {
     // actual per-tick progress in seconds), holding there until the next
     // poll corrected it and the cycle repeated.
     if (s_progress_arc && state->length > 0) {
-        int progress_pct = (state->seek_position * 100) / state->length;
-        if (progress_pct > 100) progress_pct = 100;
-        if (progress_pct < 0) progress_pct = 0;
-        lv_arc_set_value(s_progress_arc, progress_pct);
-        lv_obj_invalidate(s_progress_arc);
-        s_progress_base_ms = state->seek_position * 1000;
+        int reported_ms = state->seek_position * 1000;
+        uint64_t now = platform_millis();
+
+        // Roon reports seek_position as a whole integer second, which
+        // lags slightly behind wherever local interpolation has already
+        // smoothly advanced to - accepting every poll's value literally
+        // means every single poll visibly rewinds the arc by up to
+        // ~1 second before continuing forward again ("flickers or
+        // judders" on hardware). Estimate where we already believe
+        // playback is right now, and if this poll's report is behind
+        // that by only a small amount, treat it as truncation noise and
+        // keep coasting from the existing baseline instead of snapping
+        // backward. A real seek/skip/track-change produces a much bigger
+        // gap and still snaps immediately.
+        int estimated_now_ms = reported_ms;
+        if (s_progress_base_ms >= 0 && s_progress_length_ms > 0) {
+            estimated_now_ms = s_progress_base_ms + (int)(now - s_progress_base_uptime_ms);
+        }
+        bool small_backward_correction =
+            s_progress_is_playing && state->playing &&
+            reported_ms < estimated_now_ms &&
+            (estimated_now_ms - reported_ms) <= 2000;
+
+        if (!small_backward_correction) {
+            int progress_scaled = (reported_ms * PROGRESS_ARC_MAX) / (state->length * 1000);
+            if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
+            if (progress_scaled < 0) progress_scaled = 0;
+            lv_arc_set_value(s_progress_arc, progress_scaled);
+            s_progress_base_ms = reported_ms;
+            s_progress_base_uptime_ms = now;
+        }
         s_progress_length_ms = state->length * 1000;
-        s_progress_base_uptime_ms = platform_millis();
         s_progress_is_playing = state->playing;
     } else if (s_progress_arc) {
         lv_arc_set_value(s_progress_arc, 0);
-        lv_obj_invalidate(s_progress_arc);
         s_progress_base_ms = -1;  // No track/length - nothing to interpolate
     }
 
