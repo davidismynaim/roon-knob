@@ -55,6 +55,14 @@ static volatile bool s_pending_next_track = false;
 static bool s_detail_mode_active = false;
 static volatile bool s_pending_detail_mode = false;
 static volatile bool s_pending_exit_detail_mode = false;
+// Pause/play via swipe while the detail screen is up - see the swipe-down/
+// up branching below for why these are separate from the plain
+// previous/next-track toggle above (they're conditional on current
+// playback state, decided at swipe time via ui_is_playing() - a plain
+// data read, safe to call straight from this touch callback unlike the
+// LVGL widget changes these flags defer).
+static volatile bool s_pending_detail_pause = false;
+static volatile bool s_pending_detail_play = false;
 static uint16_t s_current_rotation = 0;  // Track rotation for swipe direction transform
 
 // Double-tap detection for art mode toggle
@@ -459,13 +467,19 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                     dx = -dx;
                 }
 
-                // Check for swipe up (negative Y direction) - exit detail
-                // mode if that's what's showing, otherwise enter art mode
-                // as before. These two are mutually exclusive states, so
-                // checking detail mode first and returning is enough -
-                // never falls through to also touch art mode.
+                // Check for swipe up (negative Y direction). On the detail
+                // screen this means one of two things depending on
+                // playback state: if paused (most likely via the swipe-
+                // down-pause just below), resume playback and stay on the
+                // screen - swipe up "undoes" a swipe-down either way,
+                // whether that means resuming playback or leaving the
+                // screen. If already playing, exit detail mode as before.
+                // Off the detail screen, unchanged: enter art mode.
                 if (dy < -SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
-                    if (s_detail_mode_active) {
+                    if (s_detail_mode_active && !ui_is_playing()) {
+                        ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing play", s_current_rotation);
+                        s_pending_detail_play = true;
+                    } else if (s_detail_mode_active) {
                         ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing exit detail mode", s_current_rotation);
                         s_pending_exit_detail_mode = true;
                     }
@@ -477,16 +491,25 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                         ESP_LOGI(TAG, "Swipe up ignored - not ready for art mode (no zones)");
                     }
                 }
-                // Check for swipe down (positive Y direction) - exit art
-                // mode if that's active (unchanged), otherwise enter detail
-                // mode (new) - previously a swipe down while already in
-                // normal mode was simply a no-op, so this repurposes
-                // otherwise-dead gesture space rather than adding a new one.
+                // Check for swipe down (positive Y direction). Three
+                // meanings depending on state: exit art mode if that's
+                // active (unchanged); pause playback if the detail screen
+                // is already up and currently playing (new - a no-op if
+                // already paused, nothing more for a second swipe-down to
+                // do); otherwise enter detail mode (new) - previously a
+                // swipe down in plain normal mode was simply a no-op, so
+                // this repurposes otherwise-dead gesture space rather than
+                // adding a new one.
                 else if (dy > SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
                     if (display_get_state() == DISPLAY_STATE_ART_MODE) {
                         ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing exit art mode", s_current_rotation);
                         s_pending_exit_art_mode = true;  // Defer to avoid LVGL threading issues
-                    } else if (!s_detail_mode_active) {
+                    } else if (s_detail_mode_active) {
+                        if (ui_is_playing()) {
+                            ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing pause", s_current_rotation);
+                            s_pending_detail_pause = true;
+                        }
+                    } else {
                         ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing detail mode", s_current_rotation);
                         s_pending_detail_mode = true;
                     }
@@ -761,6 +784,25 @@ void platform_display_process_pending(void) {
         s_pending_exit_detail_mode = false;
         s_detail_mode_active = false;
         ui_set_detail_mode(false);
+    }
+    // Process deferred pause/play from a detail-screen swipe. Both use the
+    // same toggle command the transport button uses - by the time this
+    // runs, ui_is_playing() may have already changed (a poll landed in
+    // between), but that's the same race the button's own toggle already
+    // has, not something new here.
+    if (s_pending_detail_pause) {
+        s_pending_detail_pause = false;
+        ui_show_playback_feedback(false);
+        controller_action_t action = controller_action_command(
+            controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
+        (void)controller_input_dispatch_action(&action);
+    }
+    if (s_pending_detail_play) {
+        s_pending_detail_play = false;
+        ui_show_playback_feedback(true);
+        controller_action_t action = controller_action_command(
+            controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
+        (void)controller_input_dispatch_action(&action);
     }
     // Process deferred timer-triggered state changes
     display_process_pending();

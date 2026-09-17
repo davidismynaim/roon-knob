@@ -145,17 +145,19 @@ for size in 22 28 44 60; do
         -o "$OUTPUT_DIR/material_icons_${size}.c"
 done
 
-# Generate the mute screen's icon (140px), restricted to just the single
-# codepoint it needs rather than the full ICON_RANGES set, since it's not
-# used anywhere else (docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md
-# mute redesign: black background, large centered red icon, no text).
-echo "Converting mute screen icon (140px)..."
+# Generate the large full-screen icon font (140px), restricted to just the
+# three codepoints these overlays need rather than the full ICON_RANGES set:
+# volume_off (mute screen - docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md
+# mute redesign: black background, large centered red icon, no text), and
+# pause/play (transient playback-confirmation overlay, common/ui.c's
+# ui_show_playback_feedback).
+echo "Converting large icon font (140px)..."
 echo "  - material_icons_140.c"
 lv_font_conv \
     --bpp 4 \
     --size 140 \
     --font "$SPIFFS_DIR/MaterialIcons-Regular.ttf" \
-    --range 0xE04F \
+    --range 0xE034,0xE037,0xE04F \
     --format lvgl \
     --no-compress \
     --no-prefilter \
