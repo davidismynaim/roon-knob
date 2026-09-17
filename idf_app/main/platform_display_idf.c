@@ -3,6 +3,7 @@
 #include "display_sleep.h"
 #include "bridge_client.h"
 #include "battery.h"
+#include "controller_input.h"
 #include "haptic_driver.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"
@@ -40,6 +41,12 @@ static bool s_touch_tracking = false;
 static bool s_suppress_until_release = false;
 static volatile bool s_pending_art_mode = false;   // Deferred art mode activation
 static volatile bool s_pending_exit_art_mode = false;  // Deferred art mode exit
+// Deferred previous/next track dispatch (horizontal swipe) - same
+// defer-to-main-loop pattern as the vertical gestures above, and
+// deliberately gated on nothing but the swipe itself: unlike art mode,
+// these should fire whether controls are currently shown or hidden.
+static volatile bool s_pending_previous_track = false;
+static volatile bool s_pending_next_track = false;
 static uint16_t s_current_rotation = 0;  // Track rotation for swipe direction transform
 
 // Double-tap detection for art mode toggle
@@ -459,6 +466,19 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                     ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing exit art mode", s_current_rotation);
                     s_pending_exit_art_mode = true;  // Defer to avoid LVGL threading issues
                 }
+                // Check for swipe left (negative X direction) - previous
+                // track. Not gated on display/art-mode state at all - unlike
+                // the vertical swipes above, this should work identically
+                // whether controls are showing or hidden.
+                else if (dx < -SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
+                    ESP_LOGI(TAG, "Swipe left detected (rotation=%d) - queueing previous track", s_current_rotation);
+                    s_pending_previous_track = true;
+                }
+                // Check for swipe right (positive X direction) - next track
+                else if (dx > SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
+                    ESP_LOGI(TAG, "Swipe right detected (rotation=%d) - queueing next track", s_current_rotation);
+                    s_pending_next_track = true;
+                }
                 // Check for double-tap to enter art mode (#66)
                 // Only if this wasn't a swipe (small movement) and not already in art mode
                 // (any single tap exits art mode, so double-tap is only for entering)
@@ -688,6 +708,26 @@ void platform_display_process_pending(void) {
         if (display_get_state() == DISPLAY_STATE_ART_MODE) {
             display_wake();  // Returns to normal state with controls visible
         }
+    }
+    // Process deferred previous/next track swipes - same dispatch the
+    // transport buttons themselves use (common/ui.c's btn_prev/next_event_cb),
+    // so behavior (including the lack of any is_previous/next_allowed gating
+    // - neither button checks it either) stays identical between the two
+    // input methods. Not adding a haptic_driver_pulse() here to match the
+    // buttons' feel - that driver doesn't exist on this branch yet (still
+    // in the separate, unmerged haptic feature) - worth a one-line follow-up
+    // once it lands.
+    if (s_pending_previous_track) {
+        s_pending_previous_track = false;
+        controller_action_t action = controller_action_command(
+            controller_command_make(CONTROLLER_COMMAND_PREVIOUS_TRACK));
+        (void)controller_input_dispatch_action(&action);
+    }
+    if (s_pending_next_track) {
+        s_pending_next_track = false;
+        controller_action_t action = controller_action_command(
+            controller_command_make(CONTROLLER_COMMAND_NEXT_TRACK));
+        (void)controller_input_dispatch_action(&action);
     }
     // Process deferred timer-triggered state changes
     display_process_pending();
