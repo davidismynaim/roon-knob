@@ -1262,11 +1262,12 @@ bool bridge_client_execute_command(const controller_command_t *command) {
         [BRIDGE_COMMAND_FEEDBACK_NEXT_FAILED] = "Next track failed",
         [BRIDGE_COMMAND_FEEDBACK_PREVIOUS_FAILED] = "Previous track failed",
         [BRIDGE_COMMAND_FEEDBACK_VOLUME_FAILED] = "Volume change failed",
+        [BRIDGE_COMMAND_FEEDBACK_SEEK_FAILED] = "Seek failed",
     };
 
     if (!plan.accepted) {
         if (plan.rejection_feedback > BRIDGE_COMMAND_FEEDBACK_NONE &&
-            plan.rejection_feedback <= BRIDGE_COMMAND_FEEDBACK_VOLUME_FAILED) {
+            plan.rejection_feedback <= BRIDGE_COMMAND_FEEDBACK_SEEK_FAILED) {
             post_ui_message(feedback_text[plan.rejection_feedback]);
         }
         return false;
@@ -1282,7 +1283,7 @@ bool bridge_client_execute_command(const controller_command_t *command) {
     bool sent = send_control_json(plan.json);
     if (!sent &&
         plan.failure_feedback > BRIDGE_COMMAND_FEEDBACK_NONE &&
-        plan.failure_feedback <= BRIDGE_COMMAND_FEEDBACK_VOLUME_FAILED) {
+        plan.failure_feedback <= BRIDGE_COMMAND_FEEDBACK_SEEK_FAILED) {
         post_ui_message(feedback_text[plan.failure_feedback]);
     }
     return sent;

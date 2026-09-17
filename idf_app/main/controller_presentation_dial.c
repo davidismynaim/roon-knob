@@ -105,3 +105,7 @@ void controller_presentation_zone_picker_get_selected_id(char *out, size_t len) 
 void controller_presentation_show_settings(void) {
     ui_show_settings();
 }
+
+void controller_presentation_seek_adjust(int32_t ticks) {
+    ui_seek_adjust(ticks);
+}

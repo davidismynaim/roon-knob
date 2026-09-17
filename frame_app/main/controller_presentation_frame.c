@@ -91,3 +91,9 @@ void controller_presentation_zone_picker_get_selected_id(char *out, size_t len) 
 void controller_presentation_show_settings(void) {
     eink_ui_show_settings();
 }
+
+void controller_presentation_seek_adjust(int32_t ticks) {
+    // No detail screen / seek-jog on this target - nothing binds
+    // CONTROLLER_INTERACTION_CONTEXT_SEEK here, so this should never fire.
+    (void)ticks;
+}

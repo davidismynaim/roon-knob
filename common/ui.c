@@ -84,6 +84,27 @@ static uint64_t s_progress_base_uptime_ms;  // platform_millis() at the moment s
 static bool s_progress_is_playing;     // Whether to keep advancing the local estimate
 static char s_progress_last_line1[128] = "";  // Track identity, to tell a real track change
                                                // apart from ordinary same-track poll noise
+
+// Detail screen's seek-jog (ui_seek_adjust): the encoder owns this arc
+// instead of volume there, so it grows to where the volume ring used to be
+// (SCREEN_SIZE-30 -> SCREEN_SIZE-10, still leaving a gap to the true edge)
+// and thickens 3x (4px -> 12px) while turning amber; both revert once the
+// seek commits. PROGRESS_ARC_COLOR_NORMAL matches the indicator color set
+// at creation time below.
+#define PROGRESS_ARC_SIZE_NORMAL (SCREEN_SIZE - 30)
+#define PROGRESS_ARC_SIZE_SEEK (SCREEN_SIZE - 10)
+#define PROGRESS_ARC_WIDTH_NORMAL 4
+#define PROGRESS_ARC_WIDTH_SEEK 12
+#define PROGRESS_ARC_COLOR_NORMAL 0x7bb9e8
+#define PROGRESS_ARC_COLOR_SEEK 0xffc107
+// Idle time after the last encoder tick before a seek preview commits to a
+// single CONTROLLER_COMMAND_SEEK_TO_SECONDS call - keeps a fast spin of the
+// knob from firing a network seek per detent.
+#define SEEK_COMMIT_DEBOUNCE_MS 300
+static bool s_seek_active = false;       // Previewing a seek - polls/interpolation are frozen meanwhile
+static int s_seek_preview_seconds = 0;   // Position the preview is currently showing
+static int s_seek_step_seconds = 1;      // Seconds per raw encoder tick, sized to the current track's length
+static lv_timer_t *s_seek_commit_timer;  // One-shot SEEK_COMMIT_DEBOUNCE_MS after the last tick - see ui_seek_adjust
 static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - primary display
 static lv_obj_t *s_volume_label_halo[8]; // 8-directional legibility halo behind s_volume_label_large
 static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old position
@@ -270,6 +291,8 @@ static void battery_flash_timer_cb(lv_timer_t *timer);
 static void reset_volume_emphasis_timer_cb(lv_timer_t *timer);
 static void build_playback_icon_overlay(void);
 static void playback_icon_timer_cb(lv_timer_t *timer);
+static void seek_commit_timer_cb(lv_timer_t *timer);
+static void seek_commit(void);
 static void emphasize_volume_label(void);
 
 // ============================================================================
@@ -529,6 +552,9 @@ static void redraw_volume_ring(float volume, float volume_min, float volume_max)
 // comment on the same thing).
 static void progress_interp_timer_cb(lv_timer_t *timer) {
     (void)timer;
+    if (s_seek_active) {
+        return;  // ui_seek_adjust owns the arc/label while a seek is previewing
+    }
     if (!s_progress_arc || !s_progress_is_playing || s_progress_base_ms < 0 ||
         s_progress_length_ms <= 0) {
         return;
@@ -555,6 +581,102 @@ static void progress_interp_timer_cb(lv_timer_t *timer) {
         snprintf(combined, sizeof(combined), "%s / %s", elapsed_text, total_text);
         lv_label_set_text(s_detail_progress_label, combined);
     }
+}
+
+// Detail screen's seek-jog - see ui.h for the overall contract. First tick
+// of a gesture seeds the preview from wherever the (possibly still-
+// interpolating) progress arc currently sits and sizes the per-tick step
+// to the track's own length; every tick after that just moves the preview
+// and (re)arms the commit debounce.
+void ui_seek_adjust(int32_t ticks) {
+    if (ticks == 0 || !s_progress_arc) {
+        return;
+    }
+    if (!s_seek_active) {
+        if (s_progress_length_ms <= 0 || s_progress_base_ms < 0) {
+            return;  // No known track/duration yet - nothing to seek within
+        }
+        int start_ms = s_progress_base_ms;
+        if (s_progress_is_playing) {
+            start_ms += (int)(platform_millis() - s_progress_base_uptime_ms);
+        }
+        if (start_ms > s_progress_length_ms) start_ms = s_progress_length_ms;
+        if (start_ms < 0) start_ms = 0;
+        s_seek_preview_seconds = start_ms / 1000;
+
+        // One tick's worth of seconds, scaled to the track's own length so
+        // a full encoder rotation (~20-30 detents) can span a meaningful
+        // chunk of any track: 1s/tick floor for short tracks, 30s/tick
+        // ceiling so a single detent never jumps further than that on a
+        // long podcast/audiobook.
+        int length_seconds = s_progress_length_ms / 1000;
+        s_seek_step_seconds = length_seconds / 60;
+        if (s_seek_step_seconds < 1) s_seek_step_seconds = 1;
+        if (s_seek_step_seconds > 30) s_seek_step_seconds = 30;
+
+        s_seek_active = true;
+        lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(PROGRESS_ARC_COLOR_SEEK), LV_PART_INDICATOR);
+    }
+
+    int length_seconds = s_progress_length_ms / 1000;
+    s_seek_preview_seconds += (int)ticks * s_seek_step_seconds;
+    if (s_seek_preview_seconds < 0) s_seek_preview_seconds = 0;
+    if (s_seek_preview_seconds > length_seconds) s_seek_preview_seconds = length_seconds;
+
+    int progress_scaled = (int)(((int64_t)s_seek_preview_seconds * 1000 * PROGRESS_ARC_MAX) /
+                                 s_progress_length_ms);
+    if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
+    if (progress_scaled < 0) progress_scaled = 0;
+    lv_arc_set_value(s_progress_arc, progress_scaled);
+
+    if (s_detail_progress_label) {
+        char elapsed_text[16];
+        char total_text[16];
+        format_mmss(elapsed_text, sizeof(elapsed_text), s_seek_preview_seconds * 1000);
+        format_mmss(total_text, sizeof(total_text), s_progress_length_ms);
+        char combined[40];
+        snprintf(combined, sizeof(combined), "%s / %s", elapsed_text, total_text);
+        lv_label_set_text(s_detail_progress_label, combined);
+    }
+
+    if (s_seek_commit_timer) {
+        lv_timer_reset(s_seek_commit_timer);
+    } else {
+        s_seek_commit_timer = lv_timer_create(seek_commit_timer_cb, SEEK_COMMIT_DEBOUNCE_MS, NULL);
+        if (s_seek_commit_timer) {
+            lv_timer_set_repeat_count(s_seek_commit_timer, 1);
+        }
+    }
+}
+
+static void seek_commit_timer_cb(lv_timer_t *timer) {
+    (void)timer;
+    s_seek_commit_timer = NULL;  // One-shot - LVGL already freed it
+    seek_commit();
+}
+
+// Fires the actual network seek and ends the preview - called either by
+// the debounce timer above (rotation went idle) or directly by
+// ui_set_detail_mode() if the screen is exited mid-scrub, so an in-flight
+// jog is committed rather than silently dropped.
+static void seek_commit(void) {
+    if (!s_seek_active) {
+        return;
+    }
+    s_seek_active = false;
+    if (s_progress_arc) {
+        lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(PROGRESS_ARC_COLOR_NORMAL), LV_PART_INDICATOR);
+    }
+    controller_action_t action = controller_action_command(
+        controller_command_seek_to(s_seek_preview_seconds));
+    (void)controller_input_dispatch_action(&action);
+    // Optimistic re-sync, matching the play/pause toggle's pattern
+    // elsewhere in this file: the next poll still reports the pre-seek
+    // position for one cycle, and apply_state()'s "same track, still
+    // playing" forward-only clamp would otherwise hold the arc at the OLD
+    // position until a later poll catches up.
+    s_progress_base_ms = s_seek_preview_seconds * 1000;
+    s_progress_base_uptime_ms = platform_millis();
 }
 
 // ============================================================================
@@ -1018,15 +1140,15 @@ static void build_layout(void) {
     }
 
     s_progress_arc = lv_arc_create(s_artwork_container);
-    lv_obj_set_size(s_progress_arc, SCREEN_SIZE - 30, SCREEN_SIZE - 30);
+    lv_obj_set_size(s_progress_arc, PROGRESS_ARC_SIZE_NORMAL, PROGRESS_ARC_SIZE_NORMAL);
     lv_obj_center(s_progress_arc);
     lv_arc_set_range(s_progress_arc, 0, PROGRESS_ARC_MAX);
     lv_arc_set_value(s_progress_arc, 0);
     lv_arc_set_bg_angles(s_progress_arc, 0, 359);  // Nearly full circle
     lv_arc_set_rotation(s_progress_arc, 270);  // Start at top (12 o'clock)
     lv_arc_set_mode(s_progress_arc, LV_ARC_MODE_NORMAL);
-    lv_obj_set_style_arc_width(s_progress_arc, 4, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_progress_arc, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(s_progress_arc, PROGRESS_ARC_WIDTH_NORMAL, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_progress_arc, PROGRESS_ARC_WIDTH_NORMAL, LV_PART_INDICATOR);
     lv_obj_remove_flag(s_progress_arc, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_set_style_pad_all(s_progress_arc, 0, LV_PART_KNOB);
@@ -1034,9 +1156,10 @@ static void build_layout(void) {
     // Progress arc colors - unplayed track isn't drawn at all (owner
     // feedback: the dark tint there, tried in an earlier pass, was "just
     // distracting and adds no value") - only the played/blue indicator
-    // shows.
+    // shows. Turns amber instead while the detail screen's seek-jog is
+    // previewing - see ui_seek_adjust/seek_commit.
     lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(0x7bb9e8), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(PROGRESS_ARC_COLOR_NORMAL), LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_COVER, LV_PART_INDICATOR);
 
     build_mute_overlay();
@@ -1409,7 +1532,14 @@ static void apply_state(const struct ui_state *state) {
     // fraction of a second of every poll (real elapsed ms is ~1000x the
     // actual per-tick progress in seconds), holding there until the next
     // poll corrected it and the cycle repeated.
-    if (s_progress_arc && state->length > 0) {
+    //
+    // Skipped entirely while a seek preview is active: a poll landing
+    // mid-scrub still reports the pre-seek position (the bridge doesn't
+    // know about the pending seek yet), and applying it here would fight
+    // the preview the user is actively watching. ui_seek_adjust re-syncs
+    // s_progress_base_ms itself once the seek commits, so the next poll
+    // after that lands on solid ground again.
+    if (s_progress_arc && state->length > 0 && !s_seek_active) {
         int reported_ms = state->seek_position * 1000;
         uint64_t now = platform_millis();
 
@@ -1454,7 +1584,7 @@ static void apply_state(const struct ui_state *state) {
             snprintf(combined, sizeof(combined), "%s / %s", elapsed_text, total_text);
             lv_label_set_text(s_detail_progress_label, combined);
         }
-    } else if (s_progress_arc) {
+    } else if (s_progress_arc && !s_seek_active) {
         lv_arc_set_value(s_progress_arc, 0);
         s_progress_base_ms = -1;  // No track/length - nothing to interpolate
         s_progress_last_line1[0] = '\0';  // Force "different track" on whatever plays next
@@ -2568,8 +2698,21 @@ void ui_set_detail_mode(bool active) {
         // leave them promoted after exiting detail mode too: this is their
         // already-correct resting z-order (on top of s_ui_container), not
         // something special to detail mode.
-        if (s_volume_canvas) lv_obj_move_foreground(s_volume_canvas);
         if (s_progress_arc) lv_obj_move_foreground(s_progress_arc);
+        // The encoder now jogs seek position instead of volume on this
+        // screen (see ui_seek_adjust/CONTROLLER_INTERACTION_CONTEXT_SEEK) -
+        // the volume ring has no role here, so hide it and let the
+        // progress arc grow into the space it leaves behind: 3x thicker
+        // and out closer to the true screen edge (still short of it) now
+        // that it's the only ring on this screen.
+        if (s_volume_canvas) lv_obj_add_flag(s_volume_canvas, LV_OBJ_FLAG_HIDDEN);
+        if (s_progress_arc) {
+            lv_obj_set_size(s_progress_arc, PROGRESS_ARC_SIZE_SEEK, PROGRESS_ARC_SIZE_SEEK);
+            lv_obj_center(s_progress_arc);
+            lv_obj_set_style_arc_width(s_progress_arc, PROGRESS_ARC_WIDTH_SEEK, LV_PART_MAIN);
+            lv_obj_set_style_arc_width(s_progress_arc, PROGRESS_ARC_WIDTH_SEEK, LV_PART_INDICATOR);
+        }
+        (void)controller_input_set_context(CONTROLLER_INTERACTION_CONTEXT_SEEK);
         // Paint current values immediately rather than waiting for the next
         // poll or interpolation tick - title/artist/album already get
         // updated unconditionally in apply_state(), but the progress label
@@ -2587,6 +2730,24 @@ void ui_set_detail_mode(bool active) {
         ESP_LOGI(UI_TAG, "Detail info screen shown");
     } else {
         lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_HIDDEN);
+        // Commit rather than drop an in-flight scrub - the user still
+        // meant that seek even though they then swiped away before the
+        // debounce fired.
+        if (s_seek_active) {
+            if (s_seek_commit_timer) {
+                lv_timer_del(s_seek_commit_timer);
+                s_seek_commit_timer = NULL;
+            }
+            seek_commit();
+        }
+        if (s_volume_canvas) lv_obj_remove_flag(s_volume_canvas, LV_OBJ_FLAG_HIDDEN);
+        if (s_progress_arc) {
+            lv_obj_set_size(s_progress_arc, PROGRESS_ARC_SIZE_NORMAL, PROGRESS_ARC_SIZE_NORMAL);
+            lv_obj_center(s_progress_arc);
+            lv_obj_set_style_arc_width(s_progress_arc, PROGRESS_ARC_WIDTH_NORMAL, LV_PART_MAIN);
+            lv_obj_set_style_arc_width(s_progress_arc, PROGRESS_ARC_WIDTH_NORMAL, LV_PART_INDICATOR);
+        }
+        (void)controller_input_set_context(CONTROLLER_INTERACTION_CONTEXT_MEDIA);
         ESP_LOGI(UI_TAG, "Detail info screen hidden");
     }
 }
