@@ -73,8 +73,8 @@ static void test_profile(void) {
     const controller_input_binding_t *bindings =
         controller_input_profile_bindings(&binding_count);
     assert(bindings);
-    assert(binding_count == 3);
-    bool contexts[3] = {false, false, false};
+    assert(binding_count == 4);
+    bool contexts[4] = {false, false, false, false};
     for (size_t i = 0; i < binding_count; ++i) {
         assert(bindings[i].source_id ==
                CONTROLLER_INPUT_SOURCE_DIAL_BUILTIN);
@@ -88,7 +88,7 @@ static void test_profile(void) {
         assert(bindings[i].context >=
                CONTROLLER_INTERACTION_CONTEXT_MEDIA);
         assert(bindings[i].context <=
-               CONTROLLER_INTERACTION_CONTEXT_SETTINGS_RECOVERY);
+               CONTROLLER_INTERACTION_CONTEXT_SEEK);
         contexts[bindings[i].context] = true;
         if (bindings[i].context ==
             CONTROLLER_INTERACTION_CONTEXT_ZONE_PICKER) {
@@ -96,6 +96,12 @@ static void test_profile(void) {
                    CONTROLLER_INPUT_TRANSFORM_ROTATION_DIRECTION);
             assert(bindings[i].action.kind ==
                    CONTROLLER_ACTION_SCROLL_ZONE_PICKER);
+        } else if (bindings[i].context ==
+                   CONTROLLER_INTERACTION_CONTEXT_SEEK) {
+            assert(bindings[i].transform ==
+                   CONTROLLER_INPUT_TRANSFORM_ROTATION_ACCELERATED);
+            assert(bindings[i].action.kind ==
+                   CONTROLLER_ACTION_ADJUST_SEEK);
         } else {
             assert(bindings[i].transform ==
                    CONTROLLER_INPUT_TRANSFORM_ROTATION_ACCELERATED);
@@ -109,6 +115,7 @@ static void test_profile(void) {
     assert(contexts[CONTROLLER_INTERACTION_CONTEXT_ZONE_PICKER]);
     assert(contexts[
         CONTROLLER_INTERACTION_CONTEXT_SETTINGS_RECOVERY]);
+    assert(contexts[CONTROLLER_INTERACTION_CONTEXT_SEEK]);
     assert_no_duplicate_bindings(bindings, binding_count);
     assert_bindings_have_descriptors(
         descriptors, descriptor_count, bindings, binding_count);

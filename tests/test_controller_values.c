@@ -123,7 +123,7 @@ static void test_owned_bounded_values(void) {
 
     assert(sizeof(controller_media_view_t) <= 576);
     assert(sizeof(controller_connectivity_view_t) <= 192);
-    assert(sizeof(controller_command_t) <= 8);
+    assert(sizeof(controller_command_t) <= 12);
 }
 
 static controller_media_view_t media_with_artwork(
@@ -225,17 +225,26 @@ static void test_command_values(void) {
         controller_command_make(CONTROLLER_COMMAND_PREVIOUS_TRACK);
     controller_command_t volume =
         controller_command_adjust_volume(INT32_MIN);
+    controller_command_t seek = controller_command_seek_to(245);
 
     assert(empty.kind == CONTROLLER_COMMAND_NONE);
     assert(empty.volume_steps == 0);
+    assert(empty.seek_seconds == 0);
     assert(toggle.kind == CONTROLLER_COMMAND_TOGGLE_PLAYBACK);
     assert(toggle.volume_steps == 0);
+    assert(toggle.seek_seconds == 0);
     assert(next.kind == CONTROLLER_COMMAND_NEXT_TRACK);
     assert(next.volume_steps == 0);
+    assert(next.seek_seconds == 0);
     assert(previous.kind == CONTROLLER_COMMAND_PREVIOUS_TRACK);
     assert(previous.volume_steps == 0);
+    assert(previous.seek_seconds == 0);
     assert(volume.kind == CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS);
     assert(volume.volume_steps == INT32_MIN);
+    assert(volume.seek_seconds == 0);
+    assert(seek.kind == CONTROLLER_COMMAND_SEEK_TO_SECONDS);
+    assert(seek.volume_steps == 0);
+    assert(seek.seek_seconds == 245);
 }
 
 int main(void) {

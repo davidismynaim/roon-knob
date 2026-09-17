@@ -62,6 +62,15 @@ void ui_show_playback_feedback(bool now_playing);
 // a transport button or a swipe gesture (main, art mode, or detail screen).
 void ui_show_track_feedback(bool next);
 
+// Detail screen's seek-jog: called with the raw accelerated encoder tick
+// delta while CONTROLLER_INTERACTION_CONTEXT_SEEK is active (see
+// controller_presentation_seek_adjust). Updates a local preview only (arc
+// turns amber, numeric label shows the pending position) - the actual
+// CONTROLLER_COMMAND_SEEK_TO_SECONDS network call fires once rotation has
+// been idle for a short debounce. See common/ui.c for the full state
+// machine.
+void ui_seek_adjust(int32_t ticks);
+
 // Network status banner (persistent, doesn't auto-clear)
 void ui_set_network_status(const char *status);  // Show persistent network status (NULL to clear)
 
