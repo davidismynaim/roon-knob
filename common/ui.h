@@ -62,6 +62,14 @@ void ui_show_playback_feedback(bool now_playing);
 // a transport button or a swipe gesture (main, art mode, or detail screen).
 void ui_show_track_feedback(bool next);
 
+// True only on the plain Music/Now-Playing screen, false on the TV/Vinyl
+// hero-volume screens (see common/ui.c's apply_current_screen). Swipe
+// gestures (art mode, detail screen, next/previous track) are Music-only -
+// TV/Vinyl have no track/timeline concept for them to act on, and art
+// mode's only visible effect there would be hiding the battery/status
+// indicators for no reason. See platform_display_idf.c's swipe handling.
+bool ui_is_music_screen(void);
+
 // Detail screen's seek-jog: called with the raw accelerated encoder tick
 // delta while CONTROLLER_INTERACTION_CONTEXT_SEEK is active (see
 // controller_presentation_seek_adjust). Updates a local preview only (arc

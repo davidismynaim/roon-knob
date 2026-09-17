@@ -498,7 +498,13 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                      (int)(data->point.y - s_touch_start_y),
                      s_touch_start_x, s_touch_start_y, data->point.x, data->point.y);
 
-            if (elapsed < SWIPE_MAX_TIME_MS) {
+            // Swipe gestures (art mode, detail screen, next/previous track,
+            // double-tap-to-art-mode) are Music-only - owner feedback that
+            // none of them should carry over to the TV/Vinyl hero-volume
+            // screens, including art mode itself: its only visible effect
+            // there would be hiding the battery/status indicators, with no
+            // track/timeline concept for the rest of it to act on anyway.
+            if (elapsed < SWIPE_MAX_TIME_MS && ui_is_music_screen()) {
                 int16_t dx = data->point.x - s_touch_start_x;
                 int16_t dy = data->point.y - s_touch_start_y;
 

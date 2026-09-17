@@ -1329,8 +1329,14 @@ static void build_playback_icon_overlay(void) {
     s_playback_icon_overlay = lv_label_create(s_artwork_container);
     lv_obj_set_style_text_font(s_playback_icon_overlay, font_large_icon(), 0);
     lv_obj_set_style_text_color(s_playback_icon_overlay, lv_color_hex(0xffffff), 0);
-    lv_obj_set_style_text_opa(s_playback_icon_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_text_opa(s_playback_icon_overlay, LV_OPA_50, 0);
     lv_obj_set_style_bg_opa(s_playback_icon_overlay, LV_OPA_TRANSP, 0);
+    // 2x via transform scale rather than a new 280px font asset - this is
+    // an already-large, simple glyph (not fine text), so the softness from
+    // upscaling an already-rasterized bitmap font is a good trade against
+    // meaningfully increasing flash usage for a bigger font asset.
+    lv_obj_set_style_transform_scale_x(s_playback_icon_overlay, 512, 0);
+    lv_obj_set_style_transform_scale_y(s_playback_icon_overlay, 512, 0);
     lv_obj_center(s_playback_icon_overlay);
     lv_obj_remove_flag(s_playback_icon_overlay, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_playback_icon_overlay, LV_OBJ_FLAG_HIDDEN);
@@ -1796,6 +1802,25 @@ static void apply_current_screen(void) {
 #endif
         }
     }
+    // The progress arc moved out of s_ui_container (see its own creation
+    // comment) so it - like the volume ring - can stay visible across
+    // detail/mute overlays regardless of which underlying screen is
+    // active. That also meant apply_current_screen()'s hide/show of
+    // s_ui_container stopped affecting it, so it needs its own explicit
+    // toggle here: unlike the volume ring, TV/Vinyl have no track/timeline
+    // concept for it to represent - owner feedback that it had reappeared
+    // there.
+    if (s_progress_arc) {
+        if (music) {
+            lv_obj_remove_flag(s_progress_arc, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_progress_arc, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+bool ui_is_music_screen(void) {
+    return s_current_screen == DIAL_SCREEN_MUSIC;
 }
 
 // Shows/hides the full-screen mute state based on the polled
