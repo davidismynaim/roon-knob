@@ -147,6 +147,11 @@ buttons use, and are deliberately not gated on display state at all - unlike
 the vertical swipes, they work identically whether controls are showing or
 hidden (art mode).
 
+Both the transport buttons and the swipe path show the same large
+semi-transparent skip-next/skip-previous icon overlay (3s, auto-hides) as
+visual confirmation, matching the existing pause/play confirmation on the
+detail screen - see common/ui.c's `ui_show_track_feedback()`.
+
 Art mode hides the control UI and shows fullscreen album artwork.
 
 Swipe up/down is a three-state cycle, not two independent toggles:
