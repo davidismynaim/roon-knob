@@ -97,6 +97,35 @@ Treat the absence of `UI loop task started on core 1` as a boot failure. It is
 not a condition that Wi-Fi provisioning, browser erase, or BLE pairing can
 repair.
 
+#### Potential failure mode: LVGL transform/layer rendering vs. Wi-Fi/BLE heap
+
+Not yet confirmed as a repeat offender - recorded here as a known hazard to
+watch for, not a fixed bug. A 2x `lv_obj_set_style_transform_scale_x/y` on a
+single label (common/ui.c's playback-confirmation icon overlay) crashed
+Wi-Fi and corrupted the display on hardware; reverted rather than chased
+further at the time (no heap trace was captured from the actual crash to
+confirm the mechanism directly). The likely cause: LVGL 9 composites any
+transformed widget (`transform_scale`/`transform_rotation`/`transform_skew`
+away from identity), any container with whole-widget `opa` under 255 that
+also has children, or a widget combining `clip_corner` with children, by
+rendering it into an intermediate layer buffer sized to the *transformed*
+bounding box first - a real, if transient, allocation, not just a style
+flag. That layer buffer competes for the same DMA-capable/internal heap
+region this file already documents as tight once Wi-Fi and an active BLE
+controller are running (see the 36-row-to-24-row draw buffer story above).
+
+As of this writing, none of these three triggers (`transform_*`,
+whole-widget `opa` + children, `clip_corner` + children) are used anywhere
+else in this codebase - checked directly, not assumed - so this isn't
+believed to be live elsewhere today. If a similar crash/corruption pattern
+turns up again, that would be the signal to stop treating this as one-off
+and instead add real protection: an explicit heap-caps check
+(`heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)`) before any
+new transform/shadow/clip-corner/parent-opacity effect ships, or capturing
+the boot-telemetry-style heap snapshot (already used elsewhere in this file)
+around the moment such an effect first renders, to confirm the mechanism
+with real numbers instead of inference.
+
 #### Adaptive UI payloads
 
 Downloaded screen descriptions, parsed component models, inactive-screen
