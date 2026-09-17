@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +41,12 @@ bool controller_presentation_zone_picker_is_current_selection(void);
 void controller_presentation_zone_picker_get_selected_id(char *out, size_t len);
 
 void controller_presentation_show_settings(void);
+
+/* Dial-only: encoder rotation while the detail screen owns the dial for
+ * seek-jog instead of volume (CONTROLLER_INTERACTION_CONTEXT_SEEK). ticks is
+ * the raw accumulated encoder delta, magnitude preserved - see
+ * common/ui.c's ui_seek_adjust(). A no-op on targets with no detail screen. */
+void controller_presentation_seek_adjust(int32_t ticks);
 
 #ifdef __cplusplus
 }

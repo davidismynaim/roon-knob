@@ -20,6 +20,7 @@ typedef enum {
     TRACE_NETWORK_STATUS,
     TRACE_ZONE_NAME,
     TRACE_MESSAGE,
+    TRACE_SEEK_ADJUST,
 } trace_event_t;
 
 typedef struct {
@@ -31,6 +32,8 @@ static trace_event_t s_trace[TEST_CAPACITY];
 static int s_trace_count;
 static int s_scroll_values[TEST_CAPACITY];
 static int s_scroll_count;
+static int s_seek_ticks_values[TEST_CAPACITY];
+static int s_seek_ticks_count;
 static queued_task_t s_tasks[TEST_CAPACITY];
 static int s_task_count;
 
@@ -100,6 +103,7 @@ static void reset_state(void) {
     memset(s_picker_ids, 0, sizeof(s_picker_ids));
     s_trace_count = 0;
     s_scroll_count = 0;
+    s_seek_ticks_count = 0;
     s_picker_current = false;
     s_picker_selected_id[0] = '\0';
     s_last_zone_name[0] = '\0';
@@ -157,6 +161,12 @@ void controller_presentation_zone_picker_scroll(int delta) {
     trace(TRACE_SCROLL);
     assert(s_scroll_count < TEST_CAPACITY);
     s_scroll_values[s_scroll_count++] = delta;
+}
+
+void controller_presentation_seek_adjust(int32_t ticks) {
+    trace(TRACE_SEEK_ADJUST);
+    assert(s_seek_ticks_count < TEST_CAPACITY);
+    s_seek_ticks_values[s_seek_ticks_count++] = ticks;
 }
 
 void controller_presentation_zone_picker_get_selected_id(char *out,
@@ -442,6 +452,35 @@ static void test_system_actions_require_locked_physical_resolution(void) {
     assert(!controller_action_router_handle(&restart));
 }
 
+static void test_seek_adjust_context_gating(void) {
+    reset_state();
+
+    // Wrong context (default is MEDIA) - rejected, no call through.
+    controller_action_t seek = controller_action_adjust_seek(3);
+    assert(!controller_action_router_handle(&seek));
+    assert(s_seek_ticks_count == 0);
+
+    // Right context, zero ticks - still rejected (action_is_valid would
+    // already reject this before dispatch, but the router's own gate
+    // checks it too).
+    assert(controller_input_set_context(CONTROLLER_INTERACTION_CONTEXT_SEEK));
+    controller_action_t zero = controller_action_adjust_seek(0);
+    assert(!controller_action_router_handle(&zero));
+    assert(s_seek_ticks_count == 0);
+
+    // Right context, nonzero ticks - forwarded with the raw tick value,
+    // magnitude and sign both preserved.
+    controller_action_t forward = controller_action_adjust_seek(5);
+    assert(controller_action_router_handle(&forward));
+    assert(s_seek_ticks_count == 1);
+    assert(s_seek_ticks_values[0] == 5);
+
+    controller_action_t backward = controller_action_adjust_seek(-2);
+    assert(controller_action_router_handle(&backward));
+    assert(s_seek_ticks_count == 2);
+    assert(s_seek_ticks_values[1] == -2);
+}
+
 int main(void) {
     test_command_and_fail_closed_dispatch();
     test_picker_scroll_close_and_settings_context();
@@ -449,6 +488,7 @@ int main(void) {
     test_picker_selection_results();
     test_menu_zone_list();
     test_system_actions_require_locked_physical_resolution();
+    test_seek_adjust_context_gating();
     puts("controller action router contracts passed");
     return 0;
 }
