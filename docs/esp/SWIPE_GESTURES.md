@@ -137,8 +137,8 @@ Why defer? The touch callback runs from LVGL's internal context. Calling display
 |---------|--------|-----------|
 | Swipe Up | Enter art mode | dy < -60px, time < 500ms |
 | Swipe Down | Exit art mode | dy > +60px, time < 500ms |
-| Swipe Left | Previous track | dx < -60px, time < 500ms |
-| Swipe Right | Next track | dx > +60px, time < 500ms |
+| Swipe Left | Next track | dx < -60px, time < 500ms |
+| Swipe Right | Previous track | dx > +60px, time < 500ms |
 | Double-tap | Enter art mode | 2 taps within 400ms, < 40px apart |
 | Any tap | Exit art mode | (when in art mode) |
 
