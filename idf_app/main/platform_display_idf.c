@@ -491,18 +491,22 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                         s_pending_detail_mode = true;
                     }
                 }
-                // Check for swipe left (negative X direction) - previous
-                // track. Not gated on display/art-mode state at all - unlike
-                // the vertical swipes above, this should work identically
-                // whether controls are showing or hidden.
+                // Check for swipe left (negative X direction, i.e. right-
+                // to-left) - next track, matching a physical "flick to the
+                // next page/track" gesture (owner feedback: originally
+                // wired the other way round). Not gated on display/art-mode
+                // state at all - unlike the vertical swipes above, this
+                // should work identically whether controls are showing or
+                // hidden.
                 else if (dx < -SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
-                    ESP_LOGI(TAG, "Swipe left detected (rotation=%d) - queueing previous track", s_current_rotation);
-                    s_pending_previous_track = true;
-                }
-                // Check for swipe right (positive X direction) - next track
-                else if (dx > SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
-                    ESP_LOGI(TAG, "Swipe right detected (rotation=%d) - queueing next track", s_current_rotation);
+                    ESP_LOGI(TAG, "Swipe left detected (rotation=%d) - queueing next track", s_current_rotation);
                     s_pending_next_track = true;
+                }
+                // Check for swipe right (positive X direction, i.e. left-
+                // to-right) - previous track.
+                else if (dx > SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
+                    ESP_LOGI(TAG, "Swipe right detected (rotation=%d) - queueing previous track", s_current_rotation);
+                    s_pending_previous_track = true;
                 }
                 // Check for double-tap to enter art mode (#66)
                 // Only if this wasn't a swipe (small movement) and not already in art mode
