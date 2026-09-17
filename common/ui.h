@@ -57,6 +57,11 @@ bool ui_is_playing(void);
 // ui_show_playback_feedback for exactly what it shows.
 void ui_show_playback_feedback(bool now_playing);
 
+// Same large semi-transparent icon overlay, showing skip-next/skip-previous
+// instead - shown whenever a next/previous track action fires, from either
+// a transport button or a swipe gesture (main, art mode, or detail screen).
+void ui_show_track_feedback(bool next);
+
 // Network status banner (persistent, doesn't auto-clear)
 void ui_set_network_status(const char *status);  // Show persistent network status (NULL to clear)
 

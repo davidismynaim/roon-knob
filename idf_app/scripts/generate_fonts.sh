@@ -146,18 +146,18 @@ for size in 22 28 44 60; do
 done
 
 # Generate the large full-screen icon font (140px), restricted to just the
-# three codepoints these overlays need rather than the full ICON_RANGES set:
+# five codepoints these overlays need rather than the full ICON_RANGES set:
 # volume_off (mute screen - docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md
 # mute redesign: black background, large centered red icon, no text), and
-# pause/play (transient playback-confirmation overlay, common/ui.c's
-# ui_show_playback_feedback).
+# pause/play/skip_next/skip_previous (transient confirmation overlay,
+# common/ui.c's ui_show_playback_feedback/ui_show_track_feedback).
 echo "Converting large icon font (140px)..."
 echo "  - material_icons_140.c"
 lv_font_conv \
     --bpp 4 \
     --size 140 \
     --font "$SPIFFS_DIR/MaterialIcons-Regular.ttf" \
-    --range 0xE034,0xE037,0xE04F \
+    --range 0xE034,0xE037,0xE044,0xE045,0xE04F \
     --format lvgl \
     --no-compress \
     --no-prefilter \

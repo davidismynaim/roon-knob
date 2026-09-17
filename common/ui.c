@@ -1291,6 +1291,7 @@ static void source_region_long_press_cb(lv_event_t *e) {
 static void btn_prev_event_cb(lv_event_t *e) {
     (void)e;
     ESP_LOGI(UI_TAG, "btn_prev_event_cb triggered");
+    ui_show_track_feedback(false);
     controller_action_t action = controller_action_command(
         controller_command_make(CONTROLLER_COMMAND_PREVIOUS_TRACK));
     (void)controller_input_dispatch_action(&action);
@@ -1313,6 +1314,7 @@ static void btn_play_event_cb(lv_event_t *e) {
 static void btn_next_event_cb(lv_event_t *e) {
     (void)e;
     ESP_LOGI(UI_TAG, "btn_next_event_cb triggered");
+    ui_show_track_feedback(true);
     controller_action_t action = controller_action_command(
         controller_command_make(CONTROLLER_COMMAND_NEXT_TRACK));
     (void)controller_input_dispatch_action(&action);
@@ -1777,23 +1779,16 @@ static void playback_icon_timer_cb(lv_timer_t *timer) {
     s_playback_icon_timer = NULL;  // One-shot - LVGL already freed it
 }
 
-// Shown briefly as visual confirmation whenever playback is toggled -
-// from the main screen's transport button, or a swipe gesture on the
-// detail screen. now_playing is what the action is COMMANDING playback
-// to become (shown immediately/optimistically), not necessarily the
-// latest polled state.
-void ui_show_playback_feedback(bool now_playing) {
+// Shared by ui_show_playback_feedback/ui_show_track_feedback below - shows
+// icon_text on the overlay, brings it to the front (creation order alone
+// isn't enough since this needs to show above either the main screen or
+// the detail overlay, whichever is currently up), and (re)arms the 3s
+// auto-hide timer.
+static void show_icon_feedback(const char *icon_text) {
     if (!s_playback_icon_overlay) {
         return;
     }
-#if !TARGET_PC
-    lv_label_set_text(s_playback_icon_overlay, now_playing ? ICON_PLAY : ICON_PAUSE);
-#else
-    lv_label_set_text(s_playback_icon_overlay, now_playing ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
-#endif
-    // Foreground move rather than relying on creation order - this needs
-    // to show above either the main screen or the detail overlay,
-    // whichever is currently up.
+    lv_label_set_text(s_playback_icon_overlay, icon_text);
     lv_obj_move_foreground(s_playback_icon_overlay);
     lv_obj_remove_flag(s_playback_icon_overlay, LV_OBJ_FLAG_HIDDEN);
     if (s_playback_icon_timer) {
@@ -1804,6 +1799,30 @@ void ui_show_playback_feedback(bool now_playing) {
             lv_timer_set_repeat_count(s_playback_icon_timer, 1);
         }
     }
+}
+
+// Shown briefly as visual confirmation whenever playback is toggled -
+// from the main screen's transport button, or a swipe gesture on the
+// detail screen. now_playing is what the action is COMMANDING playback
+// to become (shown immediately/optimistically), not necessarily the
+// latest polled state.
+void ui_show_playback_feedback(bool now_playing) {
+#if !TARGET_PC
+    show_icon_feedback(now_playing ? ICON_PLAY : ICON_PAUSE);
+#else
+    show_icon_feedback(now_playing ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
+#endif
+}
+
+// Same overlay, skip-next/skip-previous glyph instead - shown whenever a
+// next/previous track action fires (transport buttons or a swipe, on any
+// screen that supports the gesture).
+void ui_show_track_feedback(bool next) {
+#if !TARGET_PC
+    show_icon_feedback(next ? ICON_SKIP_NEXT : ICON_SKIP_PREV);
+#else
+    show_icon_feedback(next ? LV_SYMBOL_NEXT : LV_SYMBOL_PREV);
+#endif
 }
 
 // ============================================================================
