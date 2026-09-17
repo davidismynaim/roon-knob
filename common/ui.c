@@ -78,6 +78,8 @@ static int s_progress_base_ms = -1;    // Last known real seek position (-1 = no
 static int s_progress_length_ms;       // Track length at the time s_progress_base_ms was recorded
 static uint64_t s_progress_base_uptime_ms;  // platform_millis() at the moment s_progress_base_ms arrived
 static bool s_progress_is_playing;     // Whether to keep advancing the local estimate
+static char s_progress_last_line1[128] = "";  // Track identity, to tell a real track change
+                                               // apart from ordinary same-track poll noise
 static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - primary display
 static lv_obj_t *s_volume_label_halo[8]; // 8-directional legibility halo behind s_volume_label_large
 static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old position
@@ -1011,39 +1013,42 @@ static void apply_state(const struct ui_state *state) {
         int reported_ms = state->seek_position * 1000;
         uint64_t now = platform_millis();
 
-        // Roon reports seek_position as a whole integer second, which
-        // lags slightly behind wherever local interpolation has already
-        // smoothly advanced to - accepting every poll's value literally
-        // means every single poll visibly rewinds the arc by up to
-        // ~1 second before continuing forward again ("flickers or
-        // judders" on hardware). Estimate where we already believe
-        // playback is right now, and if this poll's report is behind
-        // that by only a small amount, treat it as truncation noise and
-        // keep coasting from the existing baseline instead of snapping
-        // backward. A real seek/skip/track-change produces a much bigger
-        // gap and still snaps immediately.
-        int estimated_now_ms = reported_ms;
-        if (s_progress_base_ms >= 0 && s_progress_length_ms > 0) {
-            estimated_now_ms = s_progress_base_ms + (int)(now - s_progress_base_uptime_ms);
-        }
-        bool small_backward_correction =
-            s_progress_is_playing && state->playing &&
-            reported_ms < estimated_now_ms &&
-            (estimated_now_ms - reported_ms) <= 2000;
+        // A first attempt rejected small (<=2s) backward corrections,
+        // guessing that Roon's own integer-second truncation plus request
+        // latency wouldn't exceed that. Wrong in practice - on hardware
+        // the arc still snapped backward at every single poll, meaning
+        // the real lag isn't reliably "small". Rather than chase a bigger
+        // magic number, don't compare a gap size at all: while the same
+        // track keeps playing, the displayed position can only move
+        // forward, full stop. Take whichever of "what this poll reports"
+        // and "where local interpolation already estimates we are" is
+        // further along - a real seek/skip is caught separately (below,
+        // via the track-identity/pause checks) and still takes effect
+        // immediately.
+        bool same_track = strcmp(state->line1, s_progress_last_line1) == 0;
+        strncpy(s_progress_last_line1, state->line1, sizeof(s_progress_last_line1) - 1);
+        s_progress_last_line1[sizeof(s_progress_last_line1) - 1] = '\0';
 
-        if (!small_backward_correction) {
-            int progress_scaled = (reported_ms * PROGRESS_ARC_MAX) / (state->length * 1000);
-            if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
-            if (progress_scaled < 0) progress_scaled = 0;
-            lv_arc_set_value(s_progress_arc, progress_scaled);
-            s_progress_base_ms = reported_ms;
-            s_progress_base_uptime_ms = now;
+        int effective_ms = reported_ms;
+        if (same_track && s_progress_is_playing && state->playing && s_progress_base_ms >= 0) {
+            int estimated_now_ms = s_progress_base_ms + (int)(now - s_progress_base_uptime_ms);
+            if (estimated_now_ms > effective_ms) {
+                effective_ms = estimated_now_ms;
+            }
         }
+
+        int progress_scaled = (effective_ms * PROGRESS_ARC_MAX) / (state->length * 1000);
+        if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
+        if (progress_scaled < 0) progress_scaled = 0;
+        lv_arc_set_value(s_progress_arc, progress_scaled);
+        s_progress_base_ms = effective_ms;
+        s_progress_base_uptime_ms = now;
         s_progress_length_ms = state->length * 1000;
         s_progress_is_playing = state->playing;
     } else if (s_progress_arc) {
         lv_arc_set_value(s_progress_arc, 0);
         s_progress_base_ms = -1;  // No track/length - nothing to interpolate
+        s_progress_last_line1[0] = '\0';  // Force "different track" on whatever plays next
     }
 
     // Update play/pause icon
