@@ -987,14 +987,26 @@ static void apply_state(const struct ui_state *state) {
     // advances a local estimate between polls (see its own comment for why),
     // so every fresh poll needs to reset that baseline or it'd keep
     // extrapolating from stale data.
+    //
+    // state->seek_position/state->length are whole SECONDS, not
+    // milliseconds - confirmed against the bridge's own source
+    // (unified-hifi-control passes Roon's seek_position/duration through
+    // unconverted; a 645-second test fixture there is a ~10:45 track, not
+    // 645ms). The "_ms" naming on ui_set_progress()'s parameters is a
+    // misleading holdover. Converted to milliseconds here, once, so the
+    // interpolation timer below can add real elapsed device time to it
+    // directly - getting this wrong made the arc peg at 100% within a
+    // fraction of a second of every poll (real elapsed ms is ~1000x the
+    // actual per-tick progress in seconds), holding there until the next
+    // poll corrected it and the cycle repeated.
     if (s_progress_arc && state->length > 0) {
         int progress_pct = (state->seek_position * 100) / state->length;
         if (progress_pct > 100) progress_pct = 100;
         if (progress_pct < 0) progress_pct = 0;
         lv_arc_set_value(s_progress_arc, progress_pct);
         lv_obj_invalidate(s_progress_arc);
-        s_progress_base_ms = state->seek_position;
-        s_progress_length_ms = state->length;
+        s_progress_base_ms = state->seek_position * 1000;
+        s_progress_length_ms = state->length * 1000;
         s_progress_base_uptime_ms = platform_millis();
         s_progress_is_playing = state->playing;
     } else if (s_progress_arc) {
