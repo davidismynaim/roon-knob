@@ -7,6 +7,7 @@
 #include "haptic_driver.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"
+#include "ui.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -47,6 +48,14 @@ static volatile bool s_pending_exit_art_mode = false;  // Deferred art mode exit
 // these should fire whether controls are currently shown or hidden.
 static volatile bool s_pending_previous_track = false;
 static volatile bool s_pending_next_track = false;
+// Detail info screen (common/ui.c's build_detail_overlay) - a third
+// content state, distinct from ART_MODE's power/backlight handling since
+// this stays fully awake. Tracked locally (not in display_sleep.c's
+// display_state_t) purely so this file's own swipe branching below knows
+// which of "enter detail" / "exit detail" a given up/down swipe means.
+static bool s_detail_mode_active = false;
+static volatile bool s_pending_detail_mode = false;
+static volatile bool s_pending_exit_detail_mode = false;
 static uint16_t s_current_rotation = 0;  // Track rotation for swipe direction transform
 
 // Double-tap detection for art mode toggle
@@ -451,20 +460,37 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                     dx = -dx;
                 }
 
-                // Check for swipe up (negative Y direction) - enter art mode
+                // Check for swipe up (negative Y direction) - exit detail
+                // mode if that's what's showing, otherwise enter art mode
+                // as before. These two are mutually exclusive states, so
+                // checking detail mode first and returning is enough -
+                // never falls through to also touch art mode.
                 if (dy < -SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
+                    if (s_detail_mode_active) {
+                        ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing exit detail mode", s_current_rotation);
+                        s_pending_exit_detail_mode = true;
+                    }
                     // Only allow art mode when WiFi is configured and bridge is responding with zones
-                    if (bridge_client_is_ready_for_art_mode()) {
+                    else if (bridge_client_is_ready_for_art_mode()) {
                         ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing art mode", s_current_rotation);
                         s_pending_art_mode = true;  // Defer to avoid LVGL threading issues
                     } else {
                         ESP_LOGI(TAG, "Swipe up ignored - not ready for art mode (no zones)");
                     }
                 }
-                // Check for swipe down (positive Y direction) - exit art mode
+                // Check for swipe down (positive Y direction) - exit art
+                // mode if that's active (unchanged), otherwise enter detail
+                // mode (new) - previously a swipe down while already in
+                // normal mode was simply a no-op, so this repurposes
+                // otherwise-dead gesture space rather than adding a new one.
                 else if (dy > SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
-                    ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing exit art mode", s_current_rotation);
-                    s_pending_exit_art_mode = true;  // Defer to avoid LVGL threading issues
+                    if (display_get_state() == DISPLAY_STATE_ART_MODE) {
+                        ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing exit art mode", s_current_rotation);
+                        s_pending_exit_art_mode = true;  // Defer to avoid LVGL threading issues
+                    } else if (!s_detail_mode_active) {
+                        ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing detail mode", s_current_rotation);
+                        s_pending_detail_mode = true;
+                    }
                 }
                 // Check for swipe left (negative X direction) - previous
                 // track. Not gated on display/art-mode state at all - unlike
@@ -481,8 +507,11 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                 }
                 // Check for double-tap to enter art mode (#66)
                 // Only if this wasn't a swipe (small movement) and not already in art mode
-                // (any single tap exits art mode, so double-tap is only for entering)
-                else if (display_get_state() != DISPLAY_STATE_ART_MODE &&
+                // (any single tap exits art mode, so double-tap is only for entering).
+                // Also excluded while the detail screen is up - a tap there
+                // should do nothing (only swipe up exits it), not double as
+                // an art-mode shortcut.
+                else if (display_get_state() != DISPLAY_STATE_ART_MODE && !s_detail_mode_active &&
                          abs(dx) < DOUBLE_TAP_MAX_DISTANCE && abs(dy) < DOUBLE_TAP_MAX_DISTANCE) {
                     int64_t tap_interval = now_ms - s_last_tap_time;
                     int16_t tap_dx = abs(data->point.x - s_last_tap_x);
@@ -728,6 +757,20 @@ void platform_display_process_pending(void) {
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_NEXT_TRACK));
         (void)controller_input_dispatch_action(&action);
+    }
+    // Process deferred detail-info-screen swipes. Calls ui_set_detail_mode()
+    // directly rather than routing through display_sleep.c the way art mode
+    // does - this isn't a power/backlight state, display_sleep.c has no
+    // reason to know about it.
+    if (s_pending_detail_mode) {
+        s_pending_detail_mode = false;
+        s_detail_mode_active = true;
+        ui_set_detail_mode(true);
+    }
+    if (s_pending_exit_detail_mode) {
+        s_pending_exit_detail_mode = false;
+        s_detail_mode_active = false;
+        ui_set_detail_mode(false);
     }
     // Process deferred timer-triggered state changes
     display_process_pending();

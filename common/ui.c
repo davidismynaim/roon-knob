@@ -46,6 +46,9 @@
 struct ui_state {
     char line1[128];
     char line2[128];
+    char line3[128];  // Album - previously received (bridge_client.c) and
+                       // discarded (controller_presentation_dial.c); now
+                       // shown on the detail info screen (build_detail_overlay).
     char zone_name[64];
     bool playing;
     float volume;
@@ -117,6 +120,22 @@ static dial_screen_t s_current_screen = DIAL_SCREEN_MUSIC;
 static lv_obj_t *s_mute_overlay;
 static bool s_mute_overlay_visible = false;  // Avoid redundant show/hide calls every poll cycle
 
+// Detail info screen (build_detail_overlay) - a third content state, entered
+// by a second swipe-down while controls are already showing, exited by
+// swiping up. Full-screen child of s_artwork_container (same parent mute
+// overlay uses elsewhere) so it sits above whichever of Music/TV/Vinyl is
+// underneath regardless of which is active - moved to the foreground
+// explicitly on show rather than relying on creation order, since sibling
+// creation order is exactly what caused the volume-ring z-order regression
+// earlier this project.
+static lv_obj_t *s_detail_overlay;
+static lv_obj_t *s_detail_thumbnail;   // Small square album art (shares s_artwork_img's pixel data)
+static lv_obj_t *s_detail_title_label;
+static lv_obj_t *s_detail_artist_label;
+static lv_obj_t *s_detail_album_label;
+static lv_obj_t *s_detail_progress_label;  // "2:12 / 4:15" - shares the progress interpolation timer
+static bool s_detail_mode_visible = false;
+
 // Reusable styles - smart-knob inspired
 static lv_style_t style_button_primary;    // Center play/pause button
 static lv_style_t style_button_secondary;  // Prev/next buttons
@@ -147,6 +166,7 @@ static os_mutex_t s_state_lock = OS_MUTEX_INITIALIZER;
 static struct ui_state s_pending = {
     .line1 = "Starting...",
     .line2 = "",
+    .line3 = "",
     .zone_name = "",
     .playing = false,
     .volume = 0.0f,
@@ -212,6 +232,7 @@ static inline const lv_font_t *font_mute_icon(void) { return &lv_font_montserrat
 // Forward declarations
 static void apply_state(const struct ui_state *state);
 static void build_layout(void);
+static void build_detail_overlay(void);
 static void poll_pending(lv_timer_t *timer);
 static void set_status_dot(bool online);
 static void mute_region_long_press_cb(lv_event_t *e);
@@ -231,6 +252,21 @@ static void battery_poll_timer_cb(lv_timer_t *timer);
 static void battery_flash_timer_cb(lv_timer_t *timer);
 static void reset_volume_emphasis_timer_cb(lv_timer_t *timer);
 static void emphasize_volume_label(void);
+
+// ============================================================================
+// Progress Time Formatting Helper
+// ============================================================================
+
+// "M:SS" (or "MM:SS" past 9:59) - total_ms is whole milliseconds, already
+// converted from the bridge's whole-seconds seek_position/length (see
+// apply_state()'s comment on that unit mismatch).
+static inline void format_mmss(char *buf, size_t len, int total_ms) {
+    if (total_ms < 0) {
+        total_ms = 0;
+    }
+    int total_seconds = total_ms / 1000;
+    snprintf(buf, len, "%d:%02d", total_seconds / 60, total_seconds % 60);
+}
 
 // ============================================================================
 // Volume Formatting Helper
@@ -487,6 +523,19 @@ static void progress_interp_timer_cb(lv_timer_t *timer) {
     if (progress_pct > 100) progress_pct = 100;
     if (progress_pct < 0) progress_pct = 0;
     lv_arc_set_value(s_progress_arc, progress_pct);
+
+    // Detail screen's "2:12 / 4:15" - only while actually visible, same
+    // reasoning as everywhere else in this file that skips work for hidden
+    // widgets.
+    if (s_detail_mode_visible && s_detail_progress_label) {
+        char elapsed_text[16];
+        char total_text[16];
+        format_mmss(elapsed_text, sizeof(elapsed_text), estimated_ms);
+        format_mmss(total_text, sizeof(total_text), s_progress_length_ms);
+        char combined[40];
+        snprintf(combined, sizeof(combined), "%s / %s", elapsed_text, total_text);
+        lv_label_set_text(s_detail_progress_label, combined);
+    }
 }
 
 // ============================================================================
@@ -974,6 +1023,7 @@ static void build_layout(void) {
     }
 
     build_mute_overlay();
+    build_detail_overlay();
 }
 
 // TV/Vinyl screen (ADR Screen 2) - sibling of s_ui_container, built after
@@ -1086,6 +1136,69 @@ static void build_mute_overlay(void) {
     lv_obj_set_style_text_color(icon, lv_color_hex(0xff3333), 0);
     lv_obj_center(icon);  // True center - owner feedback: was offset high, and "MUTED" text (removed) isn't needed
 #endif
+}
+
+// Detail info screen (see ui_set_detail_mode) - thumbnail in the top third,
+// title/artist/album/progress stacked around center, matching the same
+// "first pass, tune on hardware by eye" spirit as the rest of this layout
+// rather than pixel-verified boundaries. No lowest-third "coming up next" -
+// deliberately left out, not even as a placeholder, since neither the
+// bridge nor Home Assistant currently exposes queue/next-track data (see
+// the design discussion this was built from); revisit once that data
+// exists rather than shipping an empty promise.
+static void build_detail_overlay(void) {
+    s_detail_overlay = lv_obj_create(s_artwork_container);
+    lv_obj_set_size(s_detail_overlay, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_center(s_detail_overlay);
+    lv_obj_set_style_bg_color(s_detail_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_detail_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_detail_overlay, 0, 0);
+    lv_obj_set_style_radius(s_detail_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_detail_overlay, 0, 0);
+    // Swallow touches like the mute overlay does, rather than letting them
+    // fall through to whatever long-press regions sit on the screen
+    // underneath - swipe up (handled at the platform layer, not as an
+    // LVGL event) is the only way out.
+    lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    // Thumbnail - shares s_artwork_img's pixel buffer via lv_image_set_src,
+    // scaled down (see ui_set_artwork()); not its own decode/copy.
+    s_detail_thumbnail = lv_img_create(s_detail_overlay);
+    lv_obj_set_size(s_detail_thumbnail, 100, 100);
+    lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 55);
+    lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
+
+    s_detail_title_label = lv_label_create(s_detail_overlay);
+    lv_obj_set_width(s_detail_title_label, SCREEN_SIZE - 80);
+    lv_obj_set_style_text_font(s_detail_title_label, font_normal(), 0);
+    lv_obj_set_style_text_align(s_detail_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_title_label, lv_color_hex(0xfafafa), 0);
+    lv_label_set_long_mode(s_detail_title_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_detail_title_label, LV_ALIGN_CENTER, 0, -44);
+
+    s_detail_artist_label = lv_label_create(s_detail_overlay);
+    lv_obj_set_width(s_detail_artist_label, SCREEN_SIZE - 80);
+    lv_obj_set_style_text_font(s_detail_artist_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_detail_artist_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_artist_label, lv_color_hex(0xc0c0c0), 0);
+    lv_label_set_long_mode(s_detail_artist_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_detail_artist_label, LV_ALIGN_CENTER, 0, -14);
+
+    s_detail_album_label = lv_label_create(s_detail_overlay);
+    lv_obj_set_width(s_detail_album_label, SCREEN_SIZE - 80);
+    lv_obj_set_style_text_font(s_detail_album_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_detail_album_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_album_label, lv_color_hex(0x888888), 0);
+    lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_detail_album_label, LV_ALIGN_CENTER, 0, 12);
+
+    s_detail_progress_label = lv_label_create(s_detail_overlay);
+    lv_obj_set_style_text_font(s_detail_progress_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_detail_progress_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_progress_label, lv_color_hex(0x7bb9e8), 0);
+    lv_label_set_text(s_detail_progress_label, "");
+    lv_obj_align(s_detail_progress_label, LV_ALIGN_CENTER, 0, 46);
 }
 
 // ============================================================================
@@ -1202,6 +1315,22 @@ static void apply_state(const struct ui_state *state) {
         ESP_LOGE(UI_TAG, "Label pointers are NULL! track=%p artist=%p", s_track_label, s_artist_label);
     }
 
+    // Detail screen's own title/artist/album labels - separate widgets from
+    // the ones above (different position/size), same source data. Updated
+    // unconditionally like the main labels above rather than gated on
+    // s_detail_mode_visible - cheap text-set calls, and it means the screen
+    // shows current info immediately on entry rather than stale text from
+    // whenever it was last visible.
+    if (s_detail_title_label) {
+        lv_label_set_text(s_detail_title_label, state->line1);
+    }
+    if (s_detail_artist_label) {
+        lv_label_set_text(s_detail_artist_label, state->line2);
+    }
+    if (s_detail_album_label) {
+        lv_label_set_text(s_detail_album_label, state->line3);
+    }
+
     // Update volume arc and label, emphasize if volume changed
     // Volume is in dB with zone-specific min/max range
     static float last_volume = -9999.0f;  // Sentinel value (unlikely real volume)
@@ -1278,9 +1407,21 @@ static void apply_state(const struct ui_state *state) {
         s_progress_length_ms = state->length * 1000;
         s_progress_base_uptime_ms = platform_millis();
         s_progress_is_playing = state->playing;
+        if (s_detail_progress_label) {
+            char elapsed_text[16];
+            char total_text[16];
+            format_mmss(elapsed_text, sizeof(elapsed_text), s_progress_base_ms);
+            format_mmss(total_text, sizeof(total_text), s_progress_length_ms);
+            char combined[40];
+            snprintf(combined, sizeof(combined), "%s / %s", elapsed_text, total_text);
+            lv_label_set_text(s_detail_progress_label, combined);
+        }
     } else if (s_progress_arc) {
         lv_arc_set_value(s_progress_arc, 0);
         s_progress_base_ms = -1;  // No track/length - nothing to interpolate
+        if (s_detail_progress_label) {
+            lv_label_set_text(s_detail_progress_label, "");
+        }
     }
 
     // Update play/pause icon - only on an actual state change.
@@ -1808,6 +1949,18 @@ void ui_set_track(const char *line1, const char *line2) {
     os_mutex_unlock(&s_state_lock);
 }
 
+void ui_set_album(const char *album) {
+    os_mutex_lock(&s_state_lock);
+    if (album) {
+        strncpy(s_pending.line3, album, sizeof(s_pending.line3) - 1);
+        s_pending.line3[sizeof(s_pending.line3) - 1] = '\0';
+    } else {
+        s_pending.line3[0] = '\0';
+    }
+    s_dirty = true;
+    os_mutex_unlock(&s_state_lock);
+}
+
 void ui_set_volume(int vol) {
     os_mutex_lock(&s_state_lock);
     s_pending.volume = vol;
@@ -1990,6 +2143,7 @@ void ui_set_artwork(const char *image_key) {
         // No artwork - hide image
         if (s_last_image_key[0]) {
             lv_obj_add_flag(s_artwork_image, LV_OBJ_FLAG_HIDDEN);
+            if (s_detail_thumbnail) lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);
             s_last_image_key[0] = '\0';
         }
         return;
@@ -2066,6 +2220,24 @@ void ui_set_artwork(const char *image_key) {
                     s_artwork_img.dsc.header.h);
     lv_obj_center(s_artwork_image);
     lv_obj_invalidate(s_artwork_image);
+
+    // Detail screen's thumbnail - shares the same decoded pixel buffer via
+    // its own lv_img object rather than a separate decode/resize, scaled
+    // down with lv_image_set_scale() (256 = 1:1). Kept in sync here so it's
+    // never stale even though it's usually hidden (ui_set_detail_mode).
+    if (s_detail_thumbnail && s_artwork_img.dsc.header.w > 0) {
+        lv_image_set_src(s_detail_thumbnail, &s_artwork_img.dsc);
+        lv_image_set_scale(s_detail_thumbnail, (100 * 256) / s_artwork_img.dsc.header.w);
+        lv_obj_set_size(s_detail_thumbnail, 100, 100);
+        lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 55);
+        // Nested inside s_detail_overlay, whose own HIDDEN flag already
+        // governs whether any of this actually renders - clearing this
+        // one unconditionally (like s_artwork_image does) is harmless
+        // either way, not gated on whether detail mode happens to be
+        // active right now.
+        lv_obj_clear_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(s_detail_thumbnail);
+    }
 
     strncpy(s_last_image_key, image_key, sizeof(s_last_image_key) - 1);
     s_last_image_key[sizeof(s_last_image_key) - 1] = '\0';
@@ -2270,5 +2442,40 @@ void ui_set_controls_visible(bool visible) {
         // Make artwork fully visible in art mode
         if (s_artwork_image) lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
         ESP_LOGI(UI_TAG, "Controls hidden (art mode)");
+    }
+}
+
+// ============================================================================
+// Display State Control - Detail Info Screen
+// ============================================================================
+
+void ui_set_detail_mode(bool active) {
+    if (!s_detail_overlay || active == s_detail_mode_visible) {
+        return;
+    }
+    s_detail_mode_visible = active;
+    if (active) {
+        // Explicit foreground move rather than relying on creation order -
+        // see build_detail_overlay()'s comment on why.
+        lv_obj_move_foreground(s_detail_overlay);
+        lv_obj_remove_flag(s_detail_overlay, LV_OBJ_FLAG_HIDDEN);
+        // Paint current values immediately rather than waiting for the next
+        // poll or interpolation tick - title/artist/album already get
+        // updated unconditionally in apply_state(), but the progress label
+        // only updates when this flag is already true (see
+        // progress_interp_timer_cb), so force one now.
+        if (s_detail_progress_label && s_progress_base_ms >= 0 && s_progress_length_ms > 0) {
+            char elapsed_text[16];
+            char total_text[16];
+            format_mmss(elapsed_text, sizeof(elapsed_text), s_progress_base_ms);
+            format_mmss(total_text, sizeof(total_text), s_progress_length_ms);
+            char combined[40];
+            snprintf(combined, sizeof(combined), "%s / %s", elapsed_text, total_text);
+            lv_label_set_text(s_detail_progress_label, combined);
+        }
+        ESP_LOGI(UI_TAG, "Detail info screen shown");
+    } else {
+        lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_HIDDEN);
+        ESP_LOGI(UI_TAG, "Detail info screen hidden");
     }
 }
