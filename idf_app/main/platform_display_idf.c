@@ -40,6 +40,22 @@ static bool s_touch_tracking = false;
 // see the comment in lvgl_touch_read_cb() below for why the fixed window
 // alone isn't enough.
 static bool s_suppress_until_release = false;
+// Deferred display_activity_detected() call (touch-triggered wake from
+// art mode/dim/sleep). Was called synchronously, inline, from the touch
+// read callback below - the one heavy call left on that path after
+// everything else here was already deferred. display_wake() (which this
+// reaches into ART_MODE) does real work under a mutex plus several
+// esp_timer_stop()/esp_timer_start_once() calls; that was enough to delay
+// this callback's return past the next indev read cycle for a real
+// in-flight swipe, which explains a reproducible symptom: a swipe
+// starting in art mode measured dx=0 dy=0 at release on every attempt,
+// while the identical motion from the normal screen measured correctly.
+// Deferring to platform_display_process_pending() (called once per
+// ui_loop iteration, same as every other pending flag here) keeps this
+// callback's own work down to touch-position bookkeeping only, so the
+// swipe distance computed at release reflects where the finger actually
+// went instead of a stale first-sample position.
+static volatile bool s_pending_wake_from_touch = false;
 static volatile bool s_pending_art_mode = false;   // Deferred art mode activation
 static volatile bool s_pending_exit_art_mode = false;  // Deferred art mode exit
 // Deferred previous/next track dispatch (horizontal swipe) - same
@@ -402,7 +418,7 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                 // art-mode-swipe investigation, not a hot-loop log.
                 ESP_LOGI(TAG, "Touch start while state=%d (waking)", (int)state);
             }
-            display_activity_detected();  // Wake display
+            s_pending_wake_from_touch = true;  // Wake display - deferred, see the flag's own comment
             // Consume this touch - don't pass to LVGL widgets (prevents accidental activation)
             data->point.x = x;
             data->point.y = y;
@@ -768,6 +784,16 @@ bool platform_display_is_sleeping(void) {
 }
 
 void platform_display_process_pending(void) {
+    // Process deferred touch-triggered wake first - queued by the very
+    // first touch sample of a gesture that started in art mode/dim/sleep,
+    // so it runs (and any resulting state/UI change settles) before this
+    // same iteration's indev read picks up the next sample of that same
+    // gesture. See s_pending_wake_from_touch's own comment for why this
+    // moved out of the touch read callback.
+    if (s_pending_wake_from_touch) {
+        s_pending_wake_from_touch = false;
+        display_activity_detected();
+    }
     // Process deferred swipe gesture art mode
     if (s_pending_art_mode) {
         s_pending_art_mode = false;
