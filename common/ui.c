@@ -1331,12 +1331,15 @@ static void build_playback_icon_overlay(void) {
     lv_obj_set_style_text_color(s_playback_icon_overlay, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_opa(s_playback_icon_overlay, LV_OPA_50, 0);
     lv_obj_set_style_bg_opa(s_playback_icon_overlay, LV_OPA_TRANSP, 0);
-    // 2x via transform scale rather than a new 280px font asset - this is
-    // an already-large, simple glyph (not fine text), so the softness from
-    // upscaling an already-rasterized bitmap font is a good trade against
-    // meaningfully increasing flash usage for a bigger font asset.
-    lv_obj_set_style_transform_scale_x(s_playback_icon_overlay, 512, 0);
-    lv_obj_set_style_transform_scale_y(s_playback_icon_overlay, 512, 0);
+    // Reverted: doubling this via lv_obj_set_style_transform_scale_x/y
+    // crashed WiFi on hardware - LVGL 9's transform rendering composites a
+    // scaled widget through an intermediate layer buffer sized to the
+    // scaled bounding box (roughly 280x280 here), and that allocation
+    // competes with the same DMA-capable heap region WiFi/BLE need (see
+    // the LVGL_BUF_HEIGHT comment earlier in this codebase for the same
+    // memory pressure showing up elsewhere). A real size increase needs a
+    // bigger font asset (flash, not runtime heap) instead - see
+    // idf_app/scripts/generate_fonts.sh's material_icons_140 block.
     lv_obj_center(s_playback_icon_overlay);
     lv_obj_remove_flag(s_playback_icon_overlay, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_playback_icon_overlay, LV_OBJ_FLAG_HIDDEN);
