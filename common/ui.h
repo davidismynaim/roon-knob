@@ -46,6 +46,17 @@ void ui_set_controls_visible(bool visible);  // Show/hide UI controls for art mo
 // on the ART_MODE display_state_t at all, since this stays fully awake.
 void ui_set_detail_mode(bool active);
 
+// True if the last known playback state was "playing" - used by the
+// platform layer's swipe gesture handling to decide whether a detail-
+// screen swipe down/up should mean "pause"/"play" (see
+// platform_display_idf.c's swipe-down/up branching).
+bool ui_is_playing(void);
+
+// Large semi-transparent play/pause icon shown briefly (3s) as visual
+// confirmation whenever playback is toggled - see common/ui.c's
+// ui_show_playback_feedback for exactly what it shows.
+void ui_show_playback_feedback(bool now_playing);
+
 // Network status banner (persistent, doesn't auto-clear)
 void ui_set_network_status(const char *status);  // Show persistent network status (NULL to clear)
 

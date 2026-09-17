@@ -146,6 +146,14 @@ static lv_obj_t *s_detail_album_label;
 static lv_obj_t *s_detail_progress_label;  // "2:12 / 4:15" - shares the progress interpolation timer
 static bool s_detail_mode_visible = false;
 
+// Large semi-transparent play/pause confirmation icon - shown briefly
+// (ui_show_playback_feedback) whenever playback is toggled, whether from
+// the transport button on the main screen or a swipe gesture on the
+// detail screen. A child of s_artwork_container (like the mute/detail
+// overlays) so it can show above either one.
+static lv_obj_t *s_playback_icon_overlay;
+static lv_timer_t *s_playback_icon_timer;  // Auto-hides it again - see playback_icon_timer_cb
+
 // Reusable styles - smart-knob inspired
 static lv_style_t style_button_primary;    // Center play/pause button
 static lv_style_t style_button_secondary;  // Prev/next buttons
@@ -220,7 +228,7 @@ static inline const lv_font_t *font_db_large(void) { return font_manager_get_db_
 static inline const lv_font_t *font_icon_small(void) { return font_manager_get_icon_small(); }
 static inline const lv_font_t *font_icon_normal(void) { return font_manager_get_icon_normal(); }
 static inline const lv_font_t *font_icon_large(void) { return font_manager_get_icon_large(); }
-static inline const lv_font_t *font_mute_icon(void) { return font_manager_get_mute_icon(); }
+static inline const lv_font_t *font_large_icon(void) { return font_manager_get_large_icon(); }
 // Icon aliases (Material Symbols on ESP32)
 #define UI_ICON_DOWNLOAD  ICON_DOWNLOAD
 #else
@@ -234,7 +242,7 @@ static inline const lv_font_t *font_db_large(void) { return &lv_font_montserrat_
 static inline const lv_font_t *font_icon_small(void) { return &lv_font_montserrat_20; }
 static inline const lv_font_t *font_icon_normal(void) { return &lv_font_montserrat_28; }
 static inline const lv_font_t *font_icon_large(void) { return &lv_font_montserrat_48; }
-static inline const lv_font_t *font_mute_icon(void) { return &lv_font_montserrat_48; }  // PC sim has no 140px asset
+static inline const lv_font_t *font_large_icon(void) { return &lv_font_montserrat_48; }  // PC sim has no 140px asset
 // Icon aliases (LVGL symbols on PC)
 #define UI_ICON_DOWNLOAD  LV_SYMBOL_DOWNLOAD
 #endif
@@ -261,6 +269,8 @@ static void update_battery_display(void);
 static void battery_poll_timer_cb(lv_timer_t *timer);
 static void battery_flash_timer_cb(lv_timer_t *timer);
 static void reset_volume_emphasis_timer_cb(lv_timer_t *timer);
+static void build_playback_icon_overlay(void);
+static void playback_icon_timer_cb(lv_timer_t *timer);
 static void emphasize_volume_label(void);
 
 // ============================================================================
@@ -1032,6 +1042,113 @@ static void build_layout(void) {
 
     build_mute_overlay();
     build_detail_overlay();
+    build_playback_icon_overlay();
+}
+
+// Detail info screen (see ui_set_detail_mode) - thumbnail in the top third,
+// title/artist/album/progress stacked around center, matching the same
+// "first pass, tune on hardware by eye" spirit as the rest of this layout
+// rather than pixel-verified boundaries. No lowest-third "coming up next" -
+// deliberately left out, not even as a placeholder, since neither the
+// bridge nor Home Assistant currently exposes queue/next-track data (see
+// the design discussion this was built from); revisit once that data
+// exists rather than shipping an empty promise.
+static void build_detail_overlay(void) {
+    s_detail_overlay = lv_obj_create(s_artwork_container);
+    lv_obj_set_size(s_detail_overlay, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_center(s_detail_overlay);
+    lv_obj_set_style_bg_color(s_detail_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_detail_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_detail_overlay, 0, 0);
+    lv_obj_set_style_radius(s_detail_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_detail_overlay, 0, 0);
+    // Swallow touches like the mute overlay does, rather than letting them
+    // fall through to whatever long-press regions sit on the screen
+    // underneath - swipe up (handled at the platform layer, not as an
+    // LVGL event) is the only way out. A long-press anywhere on this
+    // screen mutes, same action and callback as the top-third region on
+    // Music/TV/Vinyl - no top/bottom split here since there's nothing
+    // else to long-press for on this screen (owner direction).
+    lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_detail_overlay, mute_region_long_press_cb,
+                        LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    // Thumbnail - shares s_artwork_img's pixel buffer via lv_image_set_src,
+    // scaled down (see ui_set_artwork()); not its own decode/copy.
+    s_detail_thumbnail = lv_img_create(s_detail_overlay);
+    lv_obj_set_size(s_detail_thumbnail, 100, 100);
+    lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 5);  // Moved up ~5mm (50px @ PX_PER_MM=10) per owner feedback on hardware
+    lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
+
+    // Title/artist/album/progress stack in a flex column rather than at
+    // fixed offsets from each other - a long title or album name wraps to
+    // a second line (LV_LABEL_LONG_DOT was set here originally, but that
+    // mode only truncates with "..." when the label's HEIGHT is also
+    // constrained; these only had a width limit, so long text just wrapped
+    // instead, and the fixed offsets below made the next element overlap
+    // it). A flex column with each label's height left at its natural
+    // content size means a wrapped 2-line title pushes the artist/album/
+    // progress lines below it down instead of colliding with them.
+    // Anchored below the thumbnail and growing downward, rather than kept
+    // centered as a block, specifically so it can only ever grow away
+    // from the thumbnail, never into it, regardless of how many lines
+    // wrap on a given track.
+    s_detail_text_group = lv_obj_create(s_detail_overlay);
+    lv_obj_set_size(s_detail_text_group, SCREEN_SIZE - 80, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_detail_text_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_detail_text_group, 0, 0);
+    lv_obj_set_style_pad_all(s_detail_text_group, 0, 0);
+    lv_obj_set_style_pad_row(s_detail_text_group, 4, 0);
+    lv_obj_set_layout(s_detail_text_group, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_detail_text_group, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_detail_text_group, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(s_detail_text_group, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(s_detail_text_group, LV_ALIGN_TOP_MID, 0, 115);  // 10px below the thumbnail (ends at y=105)
+
+    s_detail_title_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_title_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_detail_title_label, font_normal(), 0);
+    lv_obj_set_style_text_align(s_detail_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_title_label, lv_color_hex(0xfafafa), 0);
+    lv_label_set_long_mode(s_detail_title_label, LV_LABEL_LONG_WRAP);
+
+    s_detail_artist_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_artist_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_detail_artist_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_detail_artist_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_artist_label, lv_color_hex(0xc0c0c0), 0);
+    lv_label_set_long_mode(s_detail_artist_label, LV_LABEL_LONG_WRAP);
+
+    s_detail_album_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_album_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_detail_album_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_detail_album_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_album_label, lv_color_hex(0x888888), 0);
+    lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_WRAP);
+
+    s_detail_progress_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_progress_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_detail_progress_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_detail_progress_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_progress_label, lv_color_hex(0x7bb9e8), 0);
+    lv_label_set_text(s_detail_progress_label, "");
+}
+
+// Large semi-transparent play/pause confirmation icon (see
+// ui_show_playback_feedback) - a plain label, not an opaque overlay like
+// mute/detail: it's meant to sit visibly on top of whatever's already
+// showing, not replace it. Text opacity carries the "semi-transparent"
+// look rather than the object's own bg (which stays fully transparent).
+static void build_playback_icon_overlay(void) {
+    s_playback_icon_overlay = lv_label_create(s_artwork_container);
+    lv_obj_set_style_text_font(s_playback_icon_overlay, font_large_icon(), 0);
+    lv_obj_set_style_text_color(s_playback_icon_overlay, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_opa(s_playback_icon_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_bg_opa(s_playback_icon_overlay, LV_OPA_TRANSP, 0);
+    lv_obj_center(s_playback_icon_overlay);
+    lv_obj_remove_flag(s_playback_icon_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_playback_icon_overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
 // TV/Vinyl screen (ADR Screen 2) - sibling of s_ui_container, built after
@@ -1140,95 +1257,10 @@ static void build_mute_overlay(void) {
 #if !TARGET_PC
     lv_obj_t *icon = lv_label_create(s_mute_overlay);
     lv_label_set_text(icon, ICON_VOLUME_OFF);
-    lv_obj_set_style_text_font(icon, font_mute_icon(), 0);
+    lv_obj_set_style_text_font(icon, font_large_icon(), 0);
     lv_obj_set_style_text_color(icon, lv_color_hex(0xff3333), 0);
     lv_obj_center(icon);  // True center - owner feedback: was offset high, and "MUTED" text (removed) isn't needed
 #endif
-}
-
-// Detail info screen (see ui_set_detail_mode) - thumbnail in the top third,
-// title/artist/album/progress stacked around center, matching the same
-// "first pass, tune on hardware by eye" spirit as the rest of this layout
-// rather than pixel-verified boundaries. No lowest-third "coming up next" -
-// deliberately left out, not even as a placeholder, since neither the
-// bridge nor Home Assistant currently exposes queue/next-track data (see
-// the design discussion this was built from); revisit once that data
-// exists rather than shipping an empty promise.
-static void build_detail_overlay(void) {
-    s_detail_overlay = lv_obj_create(s_artwork_container);
-    lv_obj_set_size(s_detail_overlay, SCREEN_SIZE, SCREEN_SIZE);
-    lv_obj_center(s_detail_overlay);
-    lv_obj_set_style_bg_color(s_detail_overlay, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_detail_overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_detail_overlay, 0, 0);
-    lv_obj_set_style_radius(s_detail_overlay, 0, 0);
-    lv_obj_set_style_pad_all(s_detail_overlay, 0, 0);
-    // Swallow touches like the mute overlay does, rather than letting them
-    // fall through to whatever long-press regions sit on the screen
-    // underneath - swipe up (handled at the platform layer, not as an
-    // LVGL event) is the only way out.
-    lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_HIDDEN);
-
-    // Thumbnail - shares s_artwork_img's pixel buffer via lv_image_set_src,
-    // scaled down (see ui_set_artwork()); not its own decode/copy.
-    s_detail_thumbnail = lv_img_create(s_detail_overlay);
-    lv_obj_set_size(s_detail_thumbnail, 100, 100);
-    lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 5);  // Moved up ~5mm (50px @ PX_PER_MM=10) per owner feedback on hardware
-    lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
-
-    // Title/artist/album/progress stack in a flex column rather than at
-    // fixed offsets from each other - a long title or album name wraps to
-    // a second line (LV_LABEL_LONG_DOT was set here originally, but that
-    // mode only truncates with "..." when the label's HEIGHT is also
-    // constrained; these only had a width limit, so long text just wrapped
-    // instead, and the fixed offsets below made the next element overlap
-    // it). A flex column with each label's height left at its natural
-    // content size means a wrapped 2-line title pushes the artist/album/
-    // progress lines below it down instead of colliding with them.
-    // Anchored below the thumbnail and growing downward, rather than kept
-    // centered as a block, specifically so it can only ever grow away
-    // from the thumbnail, never into it, regardless of how many lines
-    // wrap on a given track.
-    s_detail_text_group = lv_obj_create(s_detail_overlay);
-    lv_obj_set_size(s_detail_text_group, SCREEN_SIZE - 80, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(s_detail_text_group, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(s_detail_text_group, 0, 0);
-    lv_obj_set_style_pad_all(s_detail_text_group, 0, 0);
-    lv_obj_set_style_pad_row(s_detail_text_group, 4, 0);
-    lv_obj_set_layout(s_detail_text_group, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(s_detail_text_group, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_detail_text_group, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_remove_flag(s_detail_text_group, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_align(s_detail_text_group, LV_ALIGN_TOP_MID, 0, 115);  // 10px below the thumbnail (ends at y=105)
-
-    s_detail_title_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_title_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_detail_title_label, font_normal(), 0);
-    lv_obj_set_style_text_align(s_detail_title_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_detail_title_label, lv_color_hex(0xfafafa), 0);
-    lv_label_set_long_mode(s_detail_title_label, LV_LABEL_LONG_WRAP);
-
-    s_detail_artist_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_artist_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_detail_artist_label, font_small(), 0);
-    lv_obj_set_style_text_align(s_detail_artist_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_detail_artist_label, lv_color_hex(0xc0c0c0), 0);
-    lv_label_set_long_mode(s_detail_artist_label, LV_LABEL_LONG_WRAP);
-
-    s_detail_album_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_album_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_detail_album_label, font_small(), 0);
-    lv_obj_set_style_text_align(s_detail_album_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_detail_album_label, lv_color_hex(0x888888), 0);
-    lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_WRAP);
-
-    s_detail_progress_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_progress_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_detail_progress_label, font_small(), 0);
-    lv_obj_set_style_text_align(s_detail_progress_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_detail_progress_label, lv_color_hex(0x7bb9e8), 0);
-    lv_label_set_text(s_detail_progress_label, "");
 }
 
 // ============================================================================
@@ -1280,6 +1312,12 @@ static void btn_play_event_cb(lv_event_t *e) {
 #if !TARGET_PC
     haptic_driver_pulse();
 #endif
+    // Shown optimistically (what this toggle is about to make it become)
+    // rather than waiting for the next poll to confirm it - unlike the
+    // button's own small icon, which only updates once state->playing
+    // actually changes in apply_state(). A multi-second wait for a
+    // confirmation icon would defeat the point of it.
+    ui_show_playback_feedback(!ui_is_playing());
     controller_action_t action = controller_action_command(
         controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
     (void)controller_input_dispatch_action(&action);
@@ -1802,6 +1840,43 @@ static void emphasize_volume_label(void) {
     }
 }
 
+static void playback_icon_timer_cb(lv_timer_t *timer) {
+    (void)timer;
+    if (s_playback_icon_overlay) {
+        lv_obj_add_flag(s_playback_icon_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+    s_playback_icon_timer = NULL;  // One-shot - LVGL already freed it
+}
+
+// Shown briefly as visual confirmation whenever playback is toggled -
+// from the main screen's transport button, or a swipe gesture on the
+// detail screen. now_playing is what the action is COMMANDING playback
+// to become (shown immediately/optimistically), not necessarily the
+// latest polled state.
+void ui_show_playback_feedback(bool now_playing) {
+    if (!s_playback_icon_overlay) {
+        return;
+    }
+#if !TARGET_PC
+    lv_label_set_text(s_playback_icon_overlay, now_playing ? ICON_PLAY : ICON_PAUSE);
+#else
+    lv_label_set_text(s_playback_icon_overlay, now_playing ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
+#endif
+    // Foreground move rather than relying on creation order - this needs
+    // to show above either the main screen or the detail overlay,
+    // whichever is currently up.
+    lv_obj_move_foreground(s_playback_icon_overlay);
+    lv_obj_remove_flag(s_playback_icon_overlay, LV_OBJ_FLAG_HIDDEN);
+    if (s_playback_icon_timer) {
+        lv_timer_reset(s_playback_icon_timer);
+    } else {
+        s_playback_icon_timer = lv_timer_create(playback_icon_timer_cb, 3000, NULL);
+        if (s_playback_icon_timer) {
+            lv_timer_set_repeat_count(s_playback_icon_timer, 1);
+        }
+    }
+}
+
 // ============================================================================
 // Zone Picker - LVGL List Widget (supports per-item icons)
 // ============================================================================
@@ -2022,6 +2097,11 @@ void ui_set_album(const char *album) {
     if (album) {
         strncpy(s_pending.line3, album, sizeof(s_pending.line3) - 1);
         s_pending.line3[sizeof(s_pending.line3) - 1] = '\0';
+        // Same streaming-service noise ("(Remastered 2011)", "[24-bit/96kHz]",
+        // etc.) shows up in album names as often as track titles - owner
+        // request to strip it here too, using the same pattern list
+        // (ui_set_track applies it to line1 the same way).
+        track_title_filter_apply(s_pending.line3, sizeof(s_pending.line3));
     } else {
         s_pending.line3[0] = '\0';
     }
@@ -2338,6 +2418,13 @@ void ui_set_artwork(const char *image_key) {
 bool ui_is_zone_picker_visible(void) {
     // Don't log every call - too noisy
     return s_zone_picker_visible;
+}
+
+bool ui_is_playing(void) {
+    os_mutex_lock(&s_state_lock);
+    bool playing = s_pending.playing;
+    os_mutex_unlock(&s_state_lock);
+    return playing;
 }
 
 int ui_zone_picker_get_selected(void) {

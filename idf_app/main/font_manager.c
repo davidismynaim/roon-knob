@@ -27,7 +27,7 @@ extern const lv_font_t material_icons_28;
 extern const lv_font_t material_icons_44;
 extern const lv_font_t material_icons_60;
 extern const lv_font_t lucide_battery_22;
-extern const lv_font_t material_icons_140;   // volume_off glyph only - mute screen
+extern const lv_font_t material_icons_140;   // volume_off/pause/play glyphs - mute screen and the transient playback-confirmation overlay
 
 static bool s_initialized = false;
 
@@ -83,7 +83,7 @@ const lv_font_t *font_manager_get_icon_large(void) {
     return &material_icons_60;  // Increased from 48px to match 80px play button
 }
 
-const lv_font_t *font_manager_get_mute_icon(void) {
+const lv_font_t *font_manager_get_large_icon(void) {
     return &material_icons_140;
 }
 
