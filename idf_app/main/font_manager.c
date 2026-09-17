@@ -27,7 +27,7 @@ extern const lv_font_t material_icons_28;
 extern const lv_font_t material_icons_44;
 extern const lv_font_t material_icons_60;
 extern const lv_font_t lucide_battery_22;
-extern const lv_font_t material_icons_140;   // volume_off/pause/play glyphs - mute screen and the transient playback-confirmation overlay
+extern const lv_font_t material_icons_140;   // volume_off/pause/play/skip_next/skip_previous glyphs - mute screen and the transient playback/track-confirmation overlay
 
 static bool s_initialized = false;
 

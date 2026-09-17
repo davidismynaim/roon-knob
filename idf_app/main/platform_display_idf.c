@@ -791,12 +791,14 @@ void platform_display_process_pending(void) {
     // once it lands.
     if (s_pending_previous_track) {
         s_pending_previous_track = false;
+        ui_show_track_feedback(false);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_PREVIOUS_TRACK));
         (void)controller_input_dispatch_action(&action);
     }
     if (s_pending_next_track) {
         s_pending_next_track = false;
+        ui_show_track_feedback(true);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_NEXT_TRACK));
         (void)controller_input_dispatch_action(&action);
