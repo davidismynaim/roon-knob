@@ -89,9 +89,9 @@ static char s_progress_last_line1[128] = "";  // Track identity, to tell a real 
 // Detail screen's seek-jog (ui_seek_adjust): the encoder owns this arc
 // instead of volume there, so it grows to where the volume ring used to be
 // (SCREEN_SIZE-30 -> SCREEN_SIZE-10, still leaving a gap to the true edge)
-// and thickens 3x (4px -> 12px) while turning amber; both revert once the
-// seek commits. PROGRESS_ARC_COLOR_NORMAL matches the indicator color set
-// at creation time below.
+// and thickens 3x (4px -> 12px) for the whole detail-screen visit, not just
+// while actively seeking. PROGRESS_ARC_COLOR_NORMAL matches the indicator
+// color set at creation time below.
 #define PROGRESS_ARC_SIZE_NORMAL (SCREEN_SIZE - 30)
 #define PROGRESS_ARC_SIZE_SEEK (SCREEN_SIZE - 10)
 #define PROGRESS_ARC_WIDTH_NORMAL 4
@@ -103,9 +103,20 @@ static char s_progress_last_line1[128] = "";  // Track identity, to tell a real 
 // knob from firing a network seek per detent.
 #define SEEK_COMMIT_DEBOUNCE_MS 300
 static bool s_seek_active = false;       // Previewing a seek - polls/interpolation are frozen meanwhile
+static int s_seek_start_seconds = 0;     // Where the preview started - s_progress_arc stays frozen here
 static int s_seek_preview_seconds = 0;   // Position the preview is currently showing
 static int s_seek_step_seconds = 1;      // Seconds per raw encoder tick, sized to the current track's length
 static lv_timer_t *s_seek_commit_timer;  // One-shot SEEK_COMMIT_DEBOUNCE_MS after the last tick - see ui_seek_adjust
+// Amber overlay spanning only the [start, preview] range being scrubbed -
+// s_progress_arc itself stays blue and frozen at s_seek_start_seconds for
+// the whole preview, so only the actual movement highlights, not the
+// entire played portion of the track (owner feedback: the first pass
+// recolored the whole ring, which read as "the whole thing is pending"
+// rather than "this much is moving"). Same size/rotation/bg_angles as
+// s_progress_arc so its indicator angles land on the same ring; driven
+// directly via lv_arc_set_start_angle/end_angle rather than
+// lv_arc_set_value, since value-based indicators always start from zero.
+static lv_obj_t *s_seek_delta_arc;
 static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - primary display
 static lv_obj_t *s_volume_label_halo[8]; // 8-directional legibility halo behind s_volume_label_large
 static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old position
@@ -584,13 +595,32 @@ static void progress_interp_timer_cb(lv_timer_t *timer) {
     }
 }
 
+// Raw indicator angle (0..359, before s_progress_arc's own 270 rotation is
+// added by LVGL) for a position in seconds - mirrors lv_arc's own internal
+// value-to-angle mapping (see lv_arc.c's value_update(), LV_ARC_MODE_NORMAL
+// case: lv_map(value, min, max, bg_angle_start, bg_angle_end)) so
+// s_seek_delta_arc's angle-driven boundary lines up exactly with where
+// s_progress_arc's value-driven indicator would end at the same position.
+static int32_t seek_arc_angle_for_seconds(int seconds) {
+    if (s_progress_length_ms <= 0) {
+        return 0;
+    }
+    int32_t angle = (int32_t)(((int64_t)seconds * 1000 * 359) / s_progress_length_ms);
+    if (angle < 0) angle = 0;
+    if (angle > 359) angle = 359;
+    return angle;
+}
+
 // Detail screen's seek-jog - see ui.h for the overall contract. First tick
 // of a gesture seeds the preview from wherever the (possibly still-
 // interpolating) progress arc currently sits and sizes the per-tick step
 // to the track's own length; every tick after that just moves the preview
-// and (re)arms the commit debounce.
+// and (re)arms the commit debounce. s_progress_arc itself never moves
+// during a preview - only s_seek_delta_arc, an amber overlay spanning just
+// [s_seek_start_seconds, s_seek_preview_seconds], so the ring shows how far
+// the knob has moved rather than recoloring the whole played portion.
 void ui_seek_adjust(int32_t ticks) {
-    if (ticks == 0 || !s_progress_arc) {
+    if (ticks == 0 || !s_progress_arc || !s_seek_delta_arc) {
         return;
     }
     if (!s_seek_active) {
@@ -603,7 +633,8 @@ void ui_seek_adjust(int32_t ticks) {
         }
         if (start_ms > s_progress_length_ms) start_ms = s_progress_length_ms;
         if (start_ms < 0) start_ms = 0;
-        s_seek_preview_seconds = start_ms / 1000;
+        s_seek_start_seconds = start_ms / 1000;
+        s_seek_preview_seconds = s_seek_start_seconds;
 
         // One tick's worth of seconds, scaled to the track's own length so
         // a full encoder rotation (~20-30 detents) can span a meaningful
@@ -616,7 +647,8 @@ void ui_seek_adjust(int32_t ticks) {
         if (s_seek_step_seconds > 30) s_seek_step_seconds = 30;
 
         s_seek_active = true;
-        lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(PROGRESS_ARC_COLOR_SEEK), LV_PART_INDICATOR);
+        lv_obj_move_foreground(s_seek_delta_arc);
+        lv_obj_remove_flag(s_seek_delta_arc, LV_OBJ_FLAG_HIDDEN);
     }
 
     int length_seconds = s_progress_length_ms / 1000;
@@ -624,11 +656,13 @@ void ui_seek_adjust(int32_t ticks) {
     if (s_seek_preview_seconds < 0) s_seek_preview_seconds = 0;
     if (s_seek_preview_seconds > length_seconds) s_seek_preview_seconds = length_seconds;
 
-    int progress_scaled = (int)(((int64_t)s_seek_preview_seconds * 1000 * PROGRESS_ARC_MAX) /
-                                 s_progress_length_ms);
-    if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
-    if (progress_scaled < 0) progress_scaled = 0;
-    lv_arc_set_value(s_progress_arc, progress_scaled);
+    int32_t start_angle = seek_arc_angle_for_seconds(s_seek_start_seconds);
+    int32_t preview_angle = seek_arc_angle_for_seconds(s_seek_preview_seconds);
+    if (start_angle <= preview_angle) {
+        lv_arc_set_angles(s_seek_delta_arc, start_angle, preview_angle);
+    } else {
+        lv_arc_set_angles(s_seek_delta_arc, preview_angle, start_angle);
+    }
 
     if (s_detail_progress_label) {
         char elapsed_text[16];
@@ -665,8 +699,15 @@ static void seek_commit(void) {
         return;
     }
     s_seek_active = false;
-    if (s_progress_arc) {
-        lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(PROGRESS_ARC_COLOR_NORMAL), LV_PART_INDICATOR);
+    if (s_seek_delta_arc) {
+        lv_obj_add_flag(s_seek_delta_arc, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_progress_arc && s_progress_length_ms > 0) {
+        int progress_scaled = (int)(((int64_t)s_seek_preview_seconds * 1000 * PROGRESS_ARC_MAX) /
+                                     s_progress_length_ms);
+        if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
+        if (progress_scaled < 0) progress_scaled = 0;
+        lv_arc_set_value(s_progress_arc, progress_scaled);
     }
     controller_action_t action = controller_action_command(
         controller_command_seek_to(s_seek_preview_seconds));
@@ -1157,11 +1198,32 @@ static void build_layout(void) {
     // Progress arc colors - unplayed track isn't drawn at all (owner
     // feedback: the dark tint there, tried in an earlier pass, was "just
     // distracting and adds no value") - only the played/blue indicator
-    // shows. Turns amber instead while the detail screen's seek-jog is
-    // previewing - see ui_seek_adjust/seek_commit.
+    // shows. Stays this color even while seek-previewing - see
+    // s_seek_delta_arc below for the amber movement indicator.
     lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(PROGRESS_ARC_COLOR_NORMAL), LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_COVER, LV_PART_INDICATOR);
+
+    // Amber seek-delta overlay - see its own declaration comment. Same
+    // geometry as s_progress_arc; driven via start/end angle, not value,
+    // so it can show an arbitrary [start, preview] span instead of always
+    // starting from zero. Created after s_progress_arc so it draws on top.
+    s_seek_delta_arc = lv_arc_create(s_artwork_container);
+    lv_obj_set_size(s_seek_delta_arc, PROGRESS_ARC_SIZE_SEEK, PROGRESS_ARC_SIZE_SEEK);
+    lv_obj_center(s_seek_delta_arc);
+    lv_arc_set_bg_angles(s_seek_delta_arc, 0, 359);
+    lv_arc_set_rotation(s_seek_delta_arc, 270);
+    lv_arc_set_mode(s_seek_delta_arc, LV_ARC_MODE_NORMAL);
+    lv_arc_set_angles(s_seek_delta_arc, 0, 0);
+    lv_obj_set_style_arc_width(s_seek_delta_arc, PROGRESS_ARC_WIDTH_SEEK, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_seek_delta_arc, PROGRESS_ARC_WIDTH_SEEK, LV_PART_INDICATOR);
+    lv_obj_remove_flag(s_seek_delta_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(s_seek_delta_arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_seek_delta_arc, 0, LV_PART_KNOB);
+    lv_obj_set_style_arc_opa(s_seek_delta_arc, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_seek_delta_arc, lv_color_hex(PROGRESS_ARC_COLOR_SEEK), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(s_seek_delta_arc, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_add_flag(s_seek_delta_arc, LV_OBJ_FLAG_HIDDEN);
 
     build_mute_overlay();
     build_detail_overlay();
