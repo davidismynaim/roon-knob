@@ -137,8 +137,15 @@ Why defer? The touch callback runs from LVGL's internal context. Calling display
 |---------|--------|-----------|
 | Swipe Up | Enter art mode | dy < -60px, time < 500ms |
 | Swipe Down | Exit art mode | dy > +60px, time < 500ms |
+| Swipe Left | Previous track | dx < -60px, time < 500ms |
+| Swipe Right | Next track | dx > +60px, time < 500ms |
 | Double-tap | Enter art mode | 2 taps within 400ms, < 40px apart |
 | Any tap | Exit art mode | (when in art mode) |
+
+Swipe left/right dispatch the same previous/next-track command the transport
+buttons use, and are deliberately not gated on display state at all - unlike
+the vertical swipes, they work identically whether controls are showing or
+hidden (art mode).
 
 Art mode hides the control UI and shows fullscreen album artwork.
 
