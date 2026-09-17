@@ -395,6 +395,12 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 
         // Wake display if needed
         if (was_not_normal) {
+            if (s_touch_start_x == x && s_touch_start_y == y) {
+                // Only log on the very first sample of this touch (start
+                // coords still match this one) - diagnostic for the
+                // art-mode-swipe investigation, not a hot-loop log.
+                ESP_LOGI(TAG, "Touch start while state=%d (waking)", (int)state);
+            }
             display_activity_detected();  // Wake display
             // Consume this touch - don't pass to LVGL widgets (prevents accidental activation)
             data->point.x = x;
@@ -455,6 +461,16 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
         if (s_touch_tracking) {
             int64_t elapsed = (esp_timer_get_time() / 1000) - s_touch_start_time;
             int64_t now_ms = esp_timer_get_time() / 1000;
+
+            // Diagnostic: log every release's raw swipe inputs, not just
+            // successful matches, so a hardware test can show exactly why a
+            // given gesture failed to classify (distance, timing, or wrong
+            // axis) rather than just "nothing happened". Safe to leave in -
+            // one line per touch release, not a hot loop.
+            ESP_LOGI(TAG, "Touch release: elapsed=%lldms dx=%d dy=%d start=(%d,%d) end=(%d,%d)",
+                     elapsed, (int)(data->point.x - s_touch_start_x),
+                     (int)(data->point.y - s_touch_start_y),
+                     s_touch_start_x, s_touch_start_y, data->point.x, data->point.y);
 
             if (elapsed < SWIPE_MAX_TIME_MS) {
                 int16_t dx = data->point.x - s_touch_start_x;
