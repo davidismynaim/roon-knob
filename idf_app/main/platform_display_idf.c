@@ -807,7 +807,14 @@ void platform_display_process_pending(void) {
     // moved out of the touch read callback.
     if (s_pending_wake_from_touch) {
         s_pending_wake_from_touch = false;
+        // Diagnostic: measuring, not guessing, whether display_activity_detected()
+        // (-> display_wake() -> ui_set_controls_visible(true) for ART_MODE) is
+        // itself the multi-hundred-ms block that swallows every touch sample
+        // between an art-mode gesture's first sample and its release.
+        int64_t wake_start_us = esp_timer_get_time();
         display_activity_detected();
+        int64_t wake_us = esp_timer_get_time() - wake_start_us;
+        ESP_LOGI(TAG, "display_activity_detected() took %lldms", wake_us / 1000);
     }
     // Process deferred swipe gesture art mode
     if (s_pending_art_mode) {
