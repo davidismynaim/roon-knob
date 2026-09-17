@@ -17,10 +17,14 @@
 #define RK_TITLE_FILTER_CFG_CURRENT_VER 1
 
 // One pattern per line - just the inner phrase, e.g. "Remastered YYYY", not
-// "(Remastered YYYY)". track_title_filter.c's matcher automatically tries
-// each phrase wrapped in (), [], {}, and as a "- phrase" dash suffix, and
-// strips whichever form (if any) is actually found, brackets/dash included
-// - so there's no need to spell out the delimiter style per pattern.
+// "(Remastered YYYY)". track_title_filter.c's matcher strips a whole
+// (), [], or {} segment if it contains ANY configured pattern anywhere
+// within it (not necessarily the segment's entire content - real tags
+// often stack several fragments in one bracket, e.g.
+// "(2009 Remaster; Remastered LP Version)", which no single phrase would
+// ever match end-to-end). A "- phrase" dash suffix has no closing
+// delimiter to bound a segment, so that form still requires an exact
+// literal match.
 //
 // Two wildcard tokens, both crude on purpose (no real regex support):
 //   YYYY  matches exactly 4 consecutive digits (e.g. "2011")

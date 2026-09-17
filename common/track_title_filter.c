@@ -172,24 +172,64 @@ static void build_wrapped(char *out, const char *prefix, const char *phrase,
 }
 
 // Configured patterns are bare inner phrases ("Remastered YYYY"), not
-// "(Remastered YYYY)" - real-world tags show up wrapped in any of (), [],
-// {}, or as a "- phrase" dash suffix, and spelling out the delimiter per
-// pattern would just be repetitive. Try each wrapped form in turn and
-// strip whichever one (if any) is actually present, delimiters included.
-static void strip_phrase_everywhere(char *title, const char *phrase) {
+// "- Remastered YYYY" - a dash-suffix tag has no closing delimiter to
+// bound a "segment" the way (), [], {} do (see strip_flagged_segment
+// below, which handles those instead), so this stays an exact
+// literal-phrase match.
+static void strip_dash_suffix_everywhere(char *title, const char *phrase) {
     char wrapped[MAX_PATTERN_LEN + 4];
-
-    build_wrapped(wrapped, "(", phrase, ")");
-    while (strip_first_match(title, wrapped)) {
-    }
-    build_wrapped(wrapped, "[", phrase, "]");
-    while (strip_first_match(title, wrapped)) {
-    }
-    build_wrapped(wrapped, "{", phrase, "}");
-    while (strip_first_match(title, wrapped)) {
-    }
     build_wrapped(wrapped, "- ", phrase, "");
     while (strip_first_match(title, wrapped)) {
+    }
+}
+
+// Finds the first `open...close` segment anywhere in `title` that contains
+// ANY configured pattern anywhere within it - not necessarily spanning the
+// whole segment - and strips the segment wholesale, delimiters included.
+// Real-world tags stack several fragments in one bracket
+// ("2009 Remaster; Remastered LP Version") that no single configured
+// phrase would ever exactly match end-to-end; requiring only that one
+// known fragment be *present* catches the whole combination without an
+// ever-growing list of every phrase-combination anyone has ever used.
+// Returns true (and stops at the first hit) if a segment was stripped, so
+// the caller can loop for any further matching segments in the title.
+static bool strip_flagged_segment(char *title, char open, char close) {
+    size_t len = strlen(title);
+    for (size_t i = 0; i < len; i++) {
+        if (title[i] != open) {
+            continue;
+        }
+        size_t j = i + 1;
+        while (j < len && title[j] != close) {
+            j++;
+        }
+        if (j >= len) {
+            break;  // Unbalanced open with no matching close - nothing left to find
+        }
+
+        bool flagged = false;
+        for (int p = 0; p < s_pattern_count && !flagged; p++) {
+            for (size_t k = i + 1; k < j && !flagged; k++) {
+                size_t consumed = match_pattern_at(title + k, s_patterns[p]);
+                // Must land fully inside the segment - a match that runs
+                // past the closing delimiter isn't really "in" it.
+                if (consumed > 0 && k + consumed <= j) {
+                    flagged = true;
+                }
+            }
+        }
+
+        if (flagged) {
+            memmove(title + i, title + j + 1, len - j);  // len-j includes the NUL
+            return true;
+        }
+        i = j;  // Not flagged - skip past this segment and keep scanning
+    }
+    return false;
+}
+
+static void strip_flagged_segments_everywhere(char *title, char open, char close) {
+    while (strip_flagged_segment(title, open, close)) {
     }
 }
 
@@ -225,8 +265,15 @@ void track_title_filter_apply(char *title, size_t title_buf_len) {
     }
 
     os_mutex_lock(&s_lock);
+    // Bracketed/parenthesized/braced segments: fuzzy - stripped whole if
+    // they contain any configured pattern anywhere within them.
+    strip_flagged_segments_everywhere(title, '(', ')');
+    strip_flagged_segments_everywhere(title, '[', ']');
+    strip_flagged_segments_everywhere(title, '{', '}');
+    // Dash suffixes: no bounding close delimiter, so still an exact
+    // literal-phrase match per configured pattern.
     for (int i = 0; i < s_pattern_count; i++) {
-        strip_phrase_everywhere(title, s_patterns[i]);
+        strip_dash_suffix_everywhere(title, s_patterns[i]);
     }
     os_mutex_unlock(&s_lock);
 
