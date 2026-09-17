@@ -83,6 +83,8 @@ static int s_progress_base_ms = -1;    // Last known real seek position (-1 = no
 static int s_progress_length_ms;       // Track length at the time s_progress_base_ms was recorded
 static uint64_t s_progress_base_uptime_ms;  // platform_millis() at the moment s_progress_base_ms arrived
 static bool s_progress_is_playing;     // Whether to keep advancing the local estimate
+static char s_progress_last_line1[128] = "";  // Track identity, to tell a real track change
+                                               // apart from ordinary same-track poll noise
 static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - primary display
 static lv_obj_t *s_volume_label_halo[8]; // 8-directional legibility halo behind s_volume_label_large
 static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old position
@@ -136,6 +138,7 @@ static bool s_mute_overlay_visible = false;  // Avoid redundant show/hide calls 
 // creation order is exactly what caused the volume-ring z-order regression
 // earlier this project.
 static lv_obj_t *s_detail_overlay;
+static lv_obj_t *s_detail_text_group;  // Flex column: stacks title/artist/album/progress without overlap
 static lv_obj_t *s_detail_thumbnail;   // Small square album art (shares s_artwork_img's pixel data)
 static lv_obj_t *s_detail_title_label;
 static lv_obj_t *s_detail_artist_label;
@@ -728,30 +731,9 @@ static void build_layout(void) {
     lv_obj_set_style_radius(s_lower_tint, 0, 0);
     lv_obj_remove_flag(s_lower_tint, LV_OBJ_FLAG_CLICKABLE);  // Let long-press reach source_region beneath it
 
-    // Inner progress arc - full circle for track playback progress
-    s_progress_arc = lv_arc_create(s_ui_container);
-    lv_obj_set_size(s_progress_arc, SCREEN_SIZE - 30, SCREEN_SIZE - 30);
-    lv_obj_center(s_progress_arc);
-    lv_arc_set_range(s_progress_arc, 0, PROGRESS_ARC_MAX);
-    lv_arc_set_value(s_progress_arc, 0);
-    lv_arc_set_bg_angles(s_progress_arc, 0, 359);  // Nearly full circle
-    lv_arc_set_rotation(s_progress_arc, 270);  // Start at top (12 o'clock)
-    lv_arc_set_mode(s_progress_arc, LV_ARC_MODE_NORMAL);
-    lv_obj_set_style_arc_width(s_progress_arc, 4, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(s_progress_arc, 4, LV_PART_INDICATOR);
-    lv_obj_remove_flag(s_progress_arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_KNOB);
-    lv_obj_set_style_pad_all(s_progress_arc, 0, LV_PART_KNOB);
-
-    // Progress arc colors - unplayed track isn't drawn at all (owner
-    // feedback: the dark tint there, tried in an earlier pass, was "just
-    // distracting and adds no value") - only the played/blue indicator
-    // shows.
-    lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(0x7bb9e8), LV_PART_INDICATOR);
-    lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_COVER, LV_PART_INDICATOR);
-
-
+    // Outer volume ring and inner progress arc are built further down, as
+    // direct children of s_artwork_container rather than s_ui_container -
+    // see that comment for why.
 
     // Status dot - top right (on the outer ring)
     s_status_dot = lv_obj_create(s_ui_container);
@@ -994,21 +976,17 @@ static void build_layout(void) {
 
     build_tv_vinyl_layout();
 
-    // Outer volume ring - 256 dots around the display edge (one per HA
-    // volume click, i.e. every 0.5dB on the direct-to-HA Nexus path),
-    // hand-drawn once per volume change into a canvas rather than redrawn
-    // live every LVGL refresh - see redraw_volume_ring() above for why.
-    // A sibling of s_ui_container/s_tv_vinyl_container (not a child of
-    // either) so it stays visible across all three screens without
-    // needing two copies (ADR: "outer volume ring retained, same
-    // behavior as Music" on TV/Vinyl too) - created after both of them,
-    // not before: Music's lower-third tint is a child of s_ui_container,
-    // and s_ui_container draws as one block relative to this sibling, so
-    // the ring has to come after that whole block to render above the
-    // tint rather than getting hidden behind it (regression fixed here -
-    // it briefly sat before s_ui_container, which put it under the tint).
-    // Doesn't visually conflict with s_progress_arc (a different radius,
-    // inside s_ui_container, unaffected either way).
+    // Outer volume ring and inner progress arc - siblings of
+    // s_ui_container/s_tv_vinyl_container (children of s_artwork_container
+    // directly), not nested inside either, so both stay visible across all
+    // three screens without needing copies, AND can be explicitly raised
+    // above s_detail_overlay when the detail info screen is shown
+    // (ui_set_detail_mode) - owner feedback that they should stay visible
+    // there too rather than getting covered by that screen's opaque
+    // background like everything else does. Created here, after both
+    // screen containers, so they already draw on top of them by default
+    // even outside detail mode (regression fixed once before when the
+    // ring briefly sat before s_ui_container instead).
     {
         uint32_t stride = lv_draw_buf_width_to_stride(VOLUME_RING_SIZE, LV_COLOR_FORMAT_ARGB8888);
         size_t buf_size = (size_t)stride * VOLUME_RING_SIZE;
@@ -1029,6 +1007,28 @@ static void build_layout(void) {
             redraw_volume_ring(0.0f, 0.0f, 0.0f);  // Forces the canvas's first real draw (transparent/empty until real data arrives)
         }
     }
+
+    s_progress_arc = lv_arc_create(s_artwork_container);
+    lv_obj_set_size(s_progress_arc, SCREEN_SIZE - 30, SCREEN_SIZE - 30);
+    lv_obj_center(s_progress_arc);
+    lv_arc_set_range(s_progress_arc, 0, PROGRESS_ARC_MAX);
+    lv_arc_set_value(s_progress_arc, 0);
+    lv_arc_set_bg_angles(s_progress_arc, 0, 359);  // Nearly full circle
+    lv_arc_set_rotation(s_progress_arc, 270);  // Start at top (12 o'clock)
+    lv_arc_set_mode(s_progress_arc, LV_ARC_MODE_NORMAL);
+    lv_obj_set_style_arc_width(s_progress_arc, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_progress_arc, 4, LV_PART_INDICATOR);
+    lv_obj_remove_flag(s_progress_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_progress_arc, 0, LV_PART_KNOB);
+
+    // Progress arc colors - unplayed track isn't drawn at all (owner
+    // feedback: the dark tint there, tried in an earlier pass, was "just
+    // distracting and adds no value") - only the played/blue indicator
+    // shows.
+    lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_progress_arc, lv_color_hex(0x7bb9e8), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(s_progress_arc, LV_OPA_COVER, LV_PART_INDICATOR);
 
     build_mute_overlay();
     build_detail_overlay();
@@ -1177,36 +1177,58 @@ static void build_detail_overlay(void) {
     lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 5);  // Moved up ~5mm (50px @ PX_PER_MM=10) per owner feedback on hardware
     lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
 
-    s_detail_title_label = lv_label_create(s_detail_overlay);
-    lv_obj_set_width(s_detail_title_label, SCREEN_SIZE - 80);
+    // Title/artist/album/progress stack in a flex column rather than at
+    // fixed offsets from each other - a long title or album name wraps to
+    // a second line (LV_LABEL_LONG_DOT was set here originally, but that
+    // mode only truncates with "..." when the label's HEIGHT is also
+    // constrained; these only had a width limit, so long text just wrapped
+    // instead, and the fixed offsets below made the next element overlap
+    // it). A flex column with each label's height left at its natural
+    // content size means a wrapped 2-line title pushes the artist/album/
+    // progress lines below it down instead of colliding with them.
+    // Anchored below the thumbnail and growing downward, rather than kept
+    // centered as a block, specifically so it can only ever grow away
+    // from the thumbnail, never into it, regardless of how many lines
+    // wrap on a given track.
+    s_detail_text_group = lv_obj_create(s_detail_overlay);
+    lv_obj_set_size(s_detail_text_group, SCREEN_SIZE - 80, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(s_detail_text_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_detail_text_group, 0, 0);
+    lv_obj_set_style_pad_all(s_detail_text_group, 0, 0);
+    lv_obj_set_style_pad_row(s_detail_text_group, 4, 0);
+    lv_obj_set_layout(s_detail_text_group, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_detail_text_group, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_detail_text_group, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(s_detail_text_group, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(s_detail_text_group, LV_ALIGN_TOP_MID, 0, 115);  // 10px below the thumbnail (ends at y=105)
+
+    s_detail_title_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_title_label, LV_PCT(100));
     lv_obj_set_style_text_font(s_detail_title_label, font_normal(), 0);
     lv_obj_set_style_text_align(s_detail_title_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_title_label, lv_color_hex(0xfafafa), 0);
-    lv_label_set_long_mode(s_detail_title_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_detail_title_label, LV_ALIGN_CENTER, 0, -44);
+    lv_label_set_long_mode(s_detail_title_label, LV_LABEL_LONG_WRAP);
 
-    s_detail_artist_label = lv_label_create(s_detail_overlay);
-    lv_obj_set_width(s_detail_artist_label, SCREEN_SIZE - 80);
+    s_detail_artist_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_artist_label, LV_PCT(100));
     lv_obj_set_style_text_font(s_detail_artist_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_artist_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_artist_label, lv_color_hex(0xc0c0c0), 0);
-    lv_label_set_long_mode(s_detail_artist_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_detail_artist_label, LV_ALIGN_CENTER, 0, -14);
+    lv_label_set_long_mode(s_detail_artist_label, LV_LABEL_LONG_WRAP);
 
-    s_detail_album_label = lv_label_create(s_detail_overlay);
-    lv_obj_set_width(s_detail_album_label, SCREEN_SIZE - 80);
+    s_detail_album_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_album_label, LV_PCT(100));
     lv_obj_set_style_text_font(s_detail_album_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_album_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_album_label, lv_color_hex(0x888888), 0);
-    lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_detail_album_label, LV_ALIGN_CENTER, 0, 12);
+    lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_WRAP);
 
-    s_detail_progress_label = lv_label_create(s_detail_overlay);
+    s_detail_progress_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_progress_label, LV_PCT(100));
     lv_obj_set_style_text_font(s_detail_progress_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_progress_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_progress_label, lv_color_hex(0x7bb9e8), 0);
     lv_label_set_text(s_detail_progress_label, "");
-    lv_obj_align(s_detail_progress_label, LV_ALIGN_CENTER, 0, 46);
 }
 
 // ============================================================================
@@ -1410,34 +1432,36 @@ static void apply_state(const struct ui_state *state) {
         int reported_ms = state->seek_position * 1000;
         uint64_t now = platform_millis();
 
-        // Roon reports seek_position as a whole integer second, which
-        // lags slightly behind wherever local interpolation has already
-        // smoothly advanced to - accepting every poll's value literally
-        // means every single poll visibly rewinds the arc by up to
-        // ~1 second before continuing forward again ("flickers or
-        // judders" on hardware). Estimate where we already believe
-        // playback is right now, and if this poll's report is behind
-        // that by only a small amount, treat it as truncation noise and
-        // keep coasting from the existing baseline instead of snapping
-        // backward. A real seek/skip/track-change produces a much bigger
-        // gap and still snaps immediately.
-        int estimated_now_ms = reported_ms;
-        if (s_progress_base_ms >= 0 && s_progress_length_ms > 0) {
-            estimated_now_ms = s_progress_base_ms + (int)(now - s_progress_base_uptime_ms);
-        }
-        bool small_backward_correction =
-            s_progress_is_playing && state->playing &&
-            reported_ms < estimated_now_ms &&
-            (estimated_now_ms - reported_ms) <= 2000;
+        // A first attempt rejected small (<=2s) backward corrections,
+        // guessing that Roon's own integer-second truncation plus request
+        // latency wouldn't exceed that. Wrong in practice - on hardware
+        // the arc still snapped backward at every single poll, meaning
+        // the real lag isn't reliably "small". Rather than chase a bigger
+        // magic number, don't compare a gap size at all: while the same
+        // track keeps playing, the displayed position can only move
+        // forward, full stop. Take whichever of "what this poll reports"
+        // and "where local interpolation already estimates we are" is
+        // further along - a real seek/skip is caught separately (below,
+        // via the track-identity/pause checks) and still takes effect
+        // immediately.
+        bool same_track = strcmp(state->line1, s_progress_last_line1) == 0;
+        strncpy(s_progress_last_line1, state->line1, sizeof(s_progress_last_line1) - 1);
+        s_progress_last_line1[sizeof(s_progress_last_line1) - 1] = '\0';
 
-        if (!small_backward_correction) {
-            int progress_scaled = (reported_ms * PROGRESS_ARC_MAX) / (state->length * 1000);
-            if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
-            if (progress_scaled < 0) progress_scaled = 0;
-            lv_arc_set_value(s_progress_arc, progress_scaled);
-            s_progress_base_ms = reported_ms;
-            s_progress_base_uptime_ms = now;
+        int effective_ms = reported_ms;
+        if (same_track && s_progress_is_playing && state->playing && s_progress_base_ms >= 0) {
+            int estimated_now_ms = s_progress_base_ms + (int)(now - s_progress_base_uptime_ms);
+            if (estimated_now_ms > effective_ms) {
+                effective_ms = estimated_now_ms;
+            }
         }
+
+        int progress_scaled = (effective_ms * PROGRESS_ARC_MAX) / (state->length * 1000);
+        if (progress_scaled > PROGRESS_ARC_MAX) progress_scaled = PROGRESS_ARC_MAX;
+        if (progress_scaled < 0) progress_scaled = 0;
+        lv_arc_set_value(s_progress_arc, progress_scaled);
+        s_progress_base_ms = effective_ms;
+        s_progress_base_uptime_ms = now;
         s_progress_length_ms = state->length * 1000;
         s_progress_is_playing = state->playing;
         if (s_detail_progress_label) {
@@ -1452,6 +1476,7 @@ static void apply_state(const struct ui_state *state) {
     } else if (s_progress_arc) {
         lv_arc_set_value(s_progress_arc, 0);
         s_progress_base_ms = -1;  // No track/length - nothing to interpolate
+        s_progress_last_line1[0] = '\0';  // Force "different track" on whatever plays next
         if (s_detail_progress_label) {
             lv_label_set_text(s_detail_progress_label, "");
         }
@@ -1552,6 +1577,16 @@ static void apply_mute_overlay(void) {
     }
     s_mute_overlay_visible = muted;
     if (muted) {
+        // Explicit foreground move, not just relying on creation order -
+        // ui_set_detail_mode() promotes the volume ring/progress arc above
+        // whatever they were originally stacked under so they stay visible
+        // on the detail screen, and that promotion persists afterward (it's
+        // their normal resting z-order, not something detail-mode-only).
+        // Without reasserting mute's own position here, muting after ever
+        // having shown the detail screen would leave those rings visible
+        // on top of what's supposed to be an "everything else hidden" mute
+        // screen.
+        lv_obj_move_foreground(s_mute_overlay);
         lv_obj_remove_flag(s_mute_overlay, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_mute_overlay, LV_OBJ_FLAG_HIDDEN);
@@ -2492,6 +2527,14 @@ void ui_set_detail_mode(bool active) {
         // see build_detail_overlay()'s comment on why.
         lv_obj_move_foreground(s_detail_overlay);
         lv_obj_remove_flag(s_detail_overlay, LV_OBJ_FLAG_HIDDEN);
+        // Re-raise the rings above the overlay we just moved in front of
+        // them - owner feedback that they should stay visible on this
+        // screen rather than getting covered like everything else. Safe to
+        // leave them promoted after exiting detail mode too: this is their
+        // already-correct resting z-order (on top of s_ui_container), not
+        // something special to detail mode.
+        if (s_volume_canvas) lv_obj_move_foreground(s_volume_canvas);
+        if (s_progress_arc) lv_obj_move_foreground(s_progress_arc);
         // Paint current values immediately rather than waiting for the next
         // poll or interpolation tick - title/artist/album already get
         // updated unconditionally in apply_state(), but the progress label
