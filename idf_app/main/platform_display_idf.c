@@ -403,12 +403,21 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
         bool was_not_normal = (state != DISPLAY_STATE_NORMAL);
 
         // Always track touch for swipe detection (even during wake)
+        static int s_touch_sample_count = 0;
         if (!s_touch_tracking) {
             s_touch_start_x = x;
             s_touch_start_y = y;
             s_touch_start_time = esp_timer_get_time() / 1000;  // Convert to ms
             s_touch_tracking = true;
+            s_touch_sample_count = 0;
         }
+        s_touch_sample_count++;
+        // Diagnostic: every raw sample of a tracked touch, not just first/
+        // last - to see how many real indev-read samples a gesture that
+        // starts in art mode actually gets before release, versus one
+        // starting from the normal screen (which classifies correctly).
+        ESP_LOGI(TAG, "Touch sample #%d: state=%d x=%d y=%d",
+                 s_touch_sample_count, (int)state, (int)x, (int)y);
 
         // Wake display if needed
         if (was_not_normal) {
