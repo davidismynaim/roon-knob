@@ -22,6 +22,7 @@ void ui_zone_picker_get_selected_id(char *out, size_t len);
 void ui_zone_picker_scroll(int delta);
 bool ui_zone_picker_is_current_selection(void);  // Returns true if selected zone == current zone
 void ui_set_artwork(const char *image_key);  // Set album artwork (placeholder for now)
+void ui_set_album(const char *album);  // Album name (line3) - previously received and discarded
 void ui_show_volume_change(float vol, float vol_step);  // Show volume overlay when adjusting
 void ui_test_pattern(void);  // Debug: Show RGB test pattern to verify color format
 
@@ -37,6 +38,13 @@ void ui_trigger_update(void);  // Called when user taps update notification
 
 // Display state control
 void ui_set_controls_visible(bool visible);  // Show/hide UI controls for art mode
+
+// Detail info screen - a third content state (distinct from art mode's
+// power/backlight handling in display_sleep.c) showing a thumbnail, title,
+// artist, album, and live progress numerics. Entered/exited by
+// idf_app/main/platform_display_idf.c's swipe-down/up handling; not gated
+// on the ART_MODE display_state_t at all, since this stays fully awake.
+void ui_set_detail_mode(bool active);
 
 // Network status banner (persistent, doesn't auto-clear)
 void ui_set_network_status(const char *status);  // Show persistent network status (NULL to clear)

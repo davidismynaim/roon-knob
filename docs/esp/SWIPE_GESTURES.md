@@ -135,8 +135,8 @@ Why defer? The touch callback runs from LVGL's internal context. Calling display
 
 | Gesture | Action | Condition |
 |---------|--------|-----------|
-| Swipe Up | Enter art mode | dy < -60px, time < 500ms |
-| Swipe Down | Exit art mode | dy > +60px, time < 500ms |
+| Swipe Up | Exit detail screen, or enter art mode | dy < -60px, time < 500ms |
+| Swipe Down | Exit art mode, or enter detail screen | dy > +60px, time < 500ms |
 | Swipe Left | Previous track | dx < -60px, time < 500ms |
 | Swipe Right | Next track | dx > +60px, time < 500ms |
 | Double-tap | Enter art mode | 2 taps within 400ms, < 40px apart |
@@ -148,6 +148,18 @@ the vertical swipes, they work identically whether controls are showing or
 hidden (art mode).
 
 Art mode hides the control UI and shows fullscreen album artwork.
+
+Swipe up/down is a three-state cycle, not two independent toggles:
+- From normal (controls showing): swipe up enters art mode, swipe down
+  enters the detail info screen (thumbnail/title/artist/album/progress -
+  see common/ui.c's build_detail_overlay).
+- From art mode: swipe down returns to normal (unchanged from before).
+- From the detail screen: swipe up returns to normal.
+
+Detail mode is tracked independently of `display_state_t` in
+platform_display_idf.c (`s_detail_mode_active`) - it's a pure content-layout
+state, not a power/backlight one, so it doesn't touch display_sleep.c at
+all.
 
 ### Double-tap Detection
 
