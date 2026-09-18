@@ -245,6 +245,7 @@ static char s_network_status[128] = "";   // Persistent network status (doesn't 
 static bool s_network_status_dirty = false;
 static char s_last_image_key[128] = "";  // Track last loaded artwork
 static float s_last_predicted_volume = -9999.0f;  // Track user's predicted volume for emphasis suppression
+static float s_volume_label_resting_db = -9999.0f;  // dB behind the label's current non-flash color - see reset_volume_emphasis_timer_cb
 #ifdef ESP_PLATFORM
 static ui_jpeg_image_t s_artwork_img;  // Decoded RGB565 image for artwork (ESP32)
 #else
@@ -369,6 +370,22 @@ static inline float derive_volume_db_equivalent(float volume, float volume_min, 
         return volume / 2.0f - 127.5f;
     }
     return volume;
+}
+
+// Loud-volume warning coloring for the volume ring and its numeric label -
+// amber above -7.5dB, red above -2.5dB (owner-specified thresholds; on
+// Dial's 0-255 position scale via derive_volume_db_equivalent above, that's
+// 240 and 250 respectively). Same red/amber hex as the battery warning
+// colors elsewhere in this file (update_battery_display), for one
+// consistent "entering warning territory" language across the UI rather
+// than a second unrelated color pairing.
+#define VOLUME_HOT_DB_AMBER -7.5f
+#define VOLUME_HOT_DB_RED -2.5f
+
+static inline lv_color_t volume_hot_color_for_db(float db, lv_color_t normal_color) {
+    if (db >= VOLUME_HOT_DB_RED) return lv_color_hex(0xff0000);    // Red
+    if (db >= VOLUME_HOT_DB_AMBER) return lv_color_hex(0xffaa00);  // Amber
+    return normal_color;
 }
 
 // Earlier versions of this tried a dark offset duplicate-label shadow
@@ -527,17 +544,29 @@ static void redraw_volume_ring(float volume, float volume_min, float volume_max)
 
     // Bright blue (owner-confirmed: size/weight/color are good as of this
     // pass), no glow - a glow pass was tried here and reverted (owner
-    // feedback: "just looks blurred").
-    dsc.color = lv_color_hex(0x4dabff);
+    // feedback: "just looks blurred"). Overridden per-tick below for ticks
+    // whose own represented volume is in the amber/red warning zone - see
+    // volume_hot_color_for_db().
     dsc.opa = LV_OPA_COVER;
     dsc.width = VOLUME_RING_TICK_WIDTH;
     dsc.round_start = false;
     dsc.round_end = false;
 
+    const float range = volume_max - volume_min;
+
     // Unlit ticks aren't drawn at all (owner feedback: the dark tint
     // there was "distracting and adds no value") - only the lit 0..
     // lit_ticks range gets a line.
     for (int tick_idx = 0; tick_idx < lit_ticks; tick_idx++) {
+        // Tick's own represented volume (inverse of calculate_volume_lit_ticks'
+        // volume->tick mapping), converted the same way the numeric label is,
+        // so a tick colors amber/red exactly where the label would too -
+        // this is what makes only the *new* high-volume segments change
+        // color as the ring fills, rather than recoloring the whole ring.
+        float tick_volume = volume_min + ((float)tick_idx / (float)VOLUME_RING_TICK_COUNT) * range;
+        float tick_db = derive_volume_db_equivalent(tick_volume, volume_min, volume_max);
+        dsc.color = volume_hot_color_for_db(tick_db, lv_color_hex(0x4dabff));
+
         // Same angle math as lv_scale's own ROUND_INNER tick placement
         // (lv_scale.c's scale_get_tick_points) - tenths of a degree,
         // tick 0 at VOLUME_RING_ROTATION, tick (count-1) at
@@ -1628,12 +1657,13 @@ static void apply_state(const struct ui_state *state) {
     static float last_volume = -9999.0f;  // Sentinel value (unlikely real volume)
     static bool volume_initialized = false;
     float vol_diff = state->volume < last_volume ? last_volume - state->volume : state->volume - last_volume;
+    bool should_emphasize = false;
     if (volume_initialized && vol_diff > 0.01f) {
         // Only emphasize if value differs from last user prediction
         // (suppresses redundant emphasis when poll confirms user's change)
         float pred_diff = state->volume < s_last_predicted_volume ? s_last_predicted_volume - state->volume : state->volume - s_last_predicted_volume;
         if (pred_diff > 0.01f) {
-            emphasize_volume_label();
+            should_emphasize = true;
         }
     }
     volume_initialized = true;
@@ -1655,6 +1685,21 @@ static void apply_state(const struct ui_state *state) {
         if (s_tv_vinyl_volume_label) lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
         strncpy(s_last_vol_text, vol_text, sizeof(s_last_vol_text) - 1);
         s_last_vol_text[sizeof(s_last_vol_text) - 1] = '\0';
+    }
+
+    // Loud-volume warning color for the big numeric label - see
+    // volume_hot_color_for_db(). Set every poll (not gated on the text
+    // change above) since it's a single cheap style call, and applied
+    // before emphasize_volume_label() below so a real change's blue flash
+    // still wins temporarily, settling back to this color once it resets.
+    s_volume_label_resting_db = derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max);
+    if (s_volume_label_large) {
+        lv_obj_set_style_text_color(
+            s_volume_label_large,
+            volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa)), 0);
+    }
+    if (should_emphasize) {
+        emphasize_volume_label();
     }
 
     static char s_last_db_text[16] = "";
@@ -2081,7 +2126,13 @@ static void clear_status_message_timer_cb(lv_timer_t *timer) {
 static void reset_volume_emphasis_timer_cb(lv_timer_t *timer) {
     (void)timer;
     if (s_volume_label_large) {
-        lv_obj_set_style_text_color(s_volume_label_large, lv_color_hex(0xfafafa), 0);  // Reset to white
+        // Reset to whichever color the current volume actually calls for
+        // (white/amber/red - see volume_hot_color_for_db), not always
+        // white, so the "just changed" blue flash settles back into the
+        // loud-volume warning color instead of masking it for 1.5s.
+        lv_obj_set_style_text_color(
+            s_volume_label_large,
+            volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa)), 0);
     }
     s_volume_emphasis_timer = NULL;
 }
@@ -2433,7 +2484,15 @@ void ui_show_volume_change(float vol, float vol_step) {
     char vol_text[16];
     format_volume_text(vol_text, sizeof(vol_text), vol, s_pending.volume_min, vol_step);
 
+    // Loud-volume warning color - see volume_hot_color_for_db(). Set before
+    // emphasize_volume_label() below so the "just changed" blue flash still
+    // wins temporarily; the flash's own reset timer settles back to this
+    // color via s_volume_label_resting_db rather than always white.
+    s_volume_label_resting_db = derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max);
     if (s_volume_label_large) {
+        lv_obj_set_style_text_color(
+            s_volume_label_large,
+            volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa)), 0);
         set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
         emphasize_volume_label();
     }
