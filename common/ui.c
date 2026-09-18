@@ -1654,6 +1654,20 @@ static void apply_state(const struct ui_state *state) {
             lv_obj_invalidate(s_track_label);
             strncpy(s_last_line1, state->line1, sizeof(s_last_line1) - 1);
             s_last_line1[sizeof(s_last_line1) - 1] = '\0';
+
+            // A new track resets the detail screen's scroll position too -
+            // otherwise a track with enough wrapped title/artist/album text
+            // to need scrolling (owner example: a long YES title) leaves
+            // the next track's detail view scrolled down, thumbnail no
+            // longer visible at the top, with no easy way back (a tap or
+            // swipe up there is already claimed by exit-detail/mute, not
+            // scroll-to-top). s_detail_overlay is the scrollable object -
+            // its children overflow the fixed-size screen by default LVGL
+            // behavior, not an explicit scrollable flag set elsewhere in
+            // this file.
+            if (s_detail_overlay) {
+                lv_obj_scroll_to_y(s_detail_overlay, 0, LV_ANIM_OFF);
+            }
         }
         if (strcmp(state->line2, s_last_line2) != 0) {
             lv_label_set_text(s_artist_label, state->line2);
