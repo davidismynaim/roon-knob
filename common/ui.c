@@ -372,6 +372,19 @@ static inline float derive_volume_db_equivalent(float volume, float volume_min, 
     return volume;
 }
 
+// Inverse of derive_volume_db_equivalent() - the raw "volume" that would
+// display as the given dB. Used to translate the volume-ring's fixed
+// amber/red dB thresholds into raw-volume terms once, so the tick index
+// each threshold first lights at can be computed with the exact same
+// calculate_volume_lit_ticks() rounding the live tick count itself uses -
+// see that function's own comment for why the two need to agree exactly.
+static inline float volume_for_db_equivalent(float db, float volume_min, float volume_max) {
+    if (volume_min == 0.0f && volume_max == 255.0f) {
+        return (db + 127.5f) * 2.0f;
+    }
+    return db;
+}
+
 // Loud-volume warning coloring for the volume ring and its numeric label -
 // amber above -7.5dB, red above -2.5dB (owner-specified thresholds; on
 // Dial's 0-255 position scale via derive_volume_db_equivalent above, that's
@@ -545,39 +558,43 @@ static void redraw_volume_ring(float volume, float volume_min, float volume_max)
     // Bright blue (owner-confirmed: size/weight/color are good as of this
     // pass), no glow - a glow pass was tried here and reverted (owner
     // feedback: "just looks blurred"). Overridden per-tick below for ticks
-    // whose own represented volume is in the amber/red warning zone - see
-    // volume_hot_color_for_db().
+    // at/past the amber/red warning thresholds.
     dsc.opa = LV_OPA_COVER;
     dsc.width = VOLUME_RING_TICK_WIDTH;
     dsc.round_start = false;
     dsc.round_end = false;
 
-    const float range = volume_max - volume_min;
-    const float live_db = derive_volume_db_equivalent(volume, volume_min, volume_max);
+    // Tick index each threshold first lights at, computed by running the
+    // threshold's own dB back through calculate_volume_lit_ticks() - the
+    // exact same round() the live tick count above went through. Matching
+    // rounding functions is the point: an earlier version compared each
+    // tick's own quantized value (floor-based) against these dB thresholds
+    // directly, which put it a fraction of a tick out of step with the
+    // live count (round-based), so as volume rose one raw unit at a time
+    // the *previously lit* leading tick would sometimes flip color when a
+    // new tick lit above it - e.g. hardware testing showed 250/251/253/255
+    // reading 3/4/5/5 amber and 1/1/1/2 red, an already-colored tick
+    // silently changing rather than a new one simply joining. Precomputing
+    // these once here means every tick's color is a fixed function of its
+    // own index - lit once, colored once, never revisited - so raising the
+    // volume can only ever light additional ticks in whatever color that
+    // index already had, never recolor one that's already lit.
+    const int amber_start_tick = calculate_volume_lit_ticks(
+        volume_for_db_equivalent(VOLUME_HOT_DB_AMBER, volume_min, volume_max), volume_min, volume_max);
+    const int red_start_tick = calculate_volume_lit_ticks(
+        volume_for_db_equivalent(VOLUME_HOT_DB_RED, volume_min, volume_max), volume_min, volume_max);
 
     // Unlit ticks aren't drawn at all (owner feedback: the dark tint
     // there was "distracting and adds no value") - only the lit 0..
     // lit_ticks range gets a line.
     for (int tick_idx = 0; tick_idx < lit_ticks; tick_idx++) {
-        // Tick's own represented volume (inverse of calculate_volume_lit_ticks'
-        // volume->tick mapping) is this tick's lower edge, not the actual
-        // live volume - a tick lights up as soon as the real volume passes
-        // its lower edge, so for most of a tick's lit lifetime the true
-        // volume sits somewhere above that edge, up to a full tick-width
-        // higher. Using the tick's own value for color made the topmost
-        // (leading) lit tick color roughly a tick late relative to the
-        // numeric label, which always uses the exact live value (owner
-        // feedback). Only the leading tick has this ambiguity - every tick
-        // below it is already fully behind the live volume - so only that
-        // one uses live_db directly; the rest keep using their own value.
-        float tick_db;
-        if (tick_idx == lit_ticks - 1) {
-            tick_db = live_db;
+        if (tick_idx >= red_start_tick) {
+            dsc.color = lv_color_hex(0xff0000);    // Red
+        } else if (tick_idx >= amber_start_tick) {
+            dsc.color = lv_color_hex(0xffaa00);    // Amber
         } else {
-            float tick_volume = volume_min + ((float)tick_idx / (float)VOLUME_RING_TICK_COUNT) * range;
-            tick_db = derive_volume_db_equivalent(tick_volume, volume_min, volume_max);
+            dsc.color = lv_color_hex(0x4dabff);    // Normal blue
         }
-        dsc.color = volume_hot_color_for_db(tick_db, lv_color_hex(0x4dabff));
 
         // Same angle math as lv_scale's own ROUND_INNER tick placement
         // (lv_scale.c's scale_get_tick_points) - tenths of a degree,
