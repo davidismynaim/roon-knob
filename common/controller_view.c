@@ -63,3 +63,19 @@ void controller_connectivity_view_init(
     copy_bounded(view->headline, sizeof(view->headline), headline);
     copy_bounded(view->detail, sizeof(view->detail), detail);
 }
+
+void controller_media_enrichment_view_init(
+    controller_media_enrichment_view_t *view,
+    const char *next_track_title,
+    const char *next_track_artist,
+    int32_t album_year,
+    const char *bit_info) {
+    if (!view) {
+        return;
+    }
+
+    copy_bounded(view->next_track_title, sizeof(view->next_track_title), next_track_title);
+    copy_bounded(view->next_track_artist, sizeof(view->next_track_artist), next_track_artist);
+    view->album_year = album_year;
+    copy_bounded(view->bit_info, sizeof(view->bit_info), bit_info);
+}

@@ -40,6 +40,10 @@ static bool s_picker_current = true;
 static const char *s_album;
 static int s_set_volume_range_calls;
 static int s_seek_adjust_calls;
+static const char *s_next_track_title;
+static const char *s_next_track_artist;
+static int s_album_year;
+static const char *s_bit_info;
 
 void ui_init(void) {}
 void ui_loop_iter(void) {}
@@ -87,6 +91,16 @@ void ui_set_volume_with_range(float vol, float vol_min, float vol_max, float vol
 void ui_seek_adjust(int32_t ticks) {
     (void)ticks;
     ++s_seek_adjust_calls;
+}
+void ui_set_next_track(const char *title, const char *artist) {
+    s_next_track_title = title;
+    s_next_track_artist = artist;
+}
+void ui_set_album_year(int year) {
+    s_album_year = year;
+}
+void ui_set_bit_info(const char *text) {
+    s_bit_info = text;
 }
 void ui_set_status(bool online) {
     assert(online);
@@ -202,6 +216,7 @@ int main(void) {
     controller_presentation_show_settings();
     controller_presentation_set_volume_range(42.0f, 2.0f, 98.0f, 0.5f);
     controller_presentation_seek_adjust(7);
+    controller_presentation_set_media_enrichment("next title", "next artist", 1974, "16-bit / 44.1kHz");
 
     assert(s_update_calls == 1);
     assert(strcmp(s_line1, "track") == 0);
@@ -230,6 +245,10 @@ int main(void) {
     assert(s_settings_calls == 1);
     assert(s_set_volume_range_calls == 1);
     assert(s_seek_adjust_calls == 1);
+    assert(strcmp(s_next_track_title, "next title") == 0);
+    assert(strcmp(s_next_track_artist, "next artist") == 0);
+    assert(s_album_year == 1974);
+    assert(strcmp(s_bit_info, "16-bit / 44.1kHz") == 0);
 
     controller_presentation_update(NULL, NULL, NULL, false, -1.0f, -2.0f,
                                    -3.0f, -4.0f, -5, -6);

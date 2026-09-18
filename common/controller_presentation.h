@@ -48,6 +48,17 @@ void controller_presentation_show_settings(void);
  * common/ui.c's ui_seek_adjust(). A no-op on targets with no detail screen. */
 void controller_presentation_seek_adjust(int32_t ticks);
 
+/* Dial-only: detail-screen enrichment (next track / album year / bit info),
+ * a separate call from controller_presentation_update() above rather than
+ * extra params on it - see controller_media_enrichment_view_t's own comment
+ * for why this is a distinct patch. Each field is independently absent-able:
+ * empty next_track_title means no next track (next_track_artist is ignored
+ * in that case), album_year 0 means unknown, empty bit_info means absent. A
+ * no-op on targets with no detail screen. */
+void controller_presentation_set_media_enrichment(
+    const char *next_track_title, const char *next_track_artist,
+    int32_t album_year, const char *bit_info);
+
 #ifdef __cplusplus
 }
 #endif

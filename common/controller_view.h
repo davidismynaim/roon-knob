@@ -39,6 +39,27 @@ typedef struct {
     char detail[CONTROLLER_CONNECTIVITY_TEXT_CAPACITY];
 } controller_connectivity_view_t;
 
+#define CONTROLLER_ENRICHMENT_TEXT_CAPACITY 128
+#define CONTROLLER_ENRICHMENT_BIT_INFO_CAPACITY 64
+
+/*
+ * Detail-screen enrichment (next track / album year / bit info) - a separate
+ * patch for the same reason connectivity is: these are Dial-only, optional,
+ * and absent far more often than present (no live source yet feeds them at
+ * all - see common/ui.h's ui_set_next_track()/ui_set_album_year()/
+ * ui_set_bit_info()), so folding them into controller_media_view_t would
+ * mean every target - including Frame/RLCD, which have no use for any of
+ * this - pays for the extra ~324 bytes on every single media update just to
+ * stay under that struct's own tight 576-byte budget. album_year 0 means
+ * unknown; empty strings mean absent, matching those setters' own contract.
+ */
+typedef struct {
+    char next_track_title[CONTROLLER_ENRICHMENT_TEXT_CAPACITY];
+    char next_track_artist[CONTROLLER_ENRICHMENT_TEXT_CAPACITY];
+    int32_t album_year;
+    char bit_info[CONTROLLER_ENRICHMENT_BIT_INFO_CAPACITY];
+} controller_media_enrichment_view_t;
+
 void controller_media_view_init(
     controller_media_view_t *view,
     const char *primary,
@@ -59,16 +80,27 @@ void controller_connectivity_view_init(
     const char *headline,
     const char *detail);
 
+void controller_media_enrichment_view_init(
+    controller_media_enrichment_view_t *view,
+    const char *next_track_title,
+    const char *next_track_artist,
+    int32_t album_year,
+    const char *bit_info);
+
 #if defined(__cplusplus)
 static_assert(sizeof(controller_media_view_t) <= 576,
               "controller media patch exceeds its ESP32 budget");
 static_assert(sizeof(controller_connectivity_view_t) <= 192,
               "controller connectivity patch exceeds its ESP32 budget");
+static_assert(sizeof(controller_media_enrichment_view_t) <= 384,
+              "controller media enrichment patch exceeds its ESP32 budget");
 #else
 _Static_assert(sizeof(controller_media_view_t) <= 576,
                "controller media patch exceeds its ESP32 budget");
 _Static_assert(sizeof(controller_connectivity_view_t) <= 192,
                "controller connectivity patch exceeds its ESP32 budget");
+_Static_assert(sizeof(controller_media_enrichment_view_t) <= 384,
+               "controller media enrichment patch exceeds its ESP32 budget");
 #endif
 
 #ifdef __cplusplus
