@@ -1,10 +1,12 @@
 #include "controller_presentation.h"
 #include "controller_config.h"
+#include "ha_volume_client.h"
 #include "ui.h"
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -35,6 +37,9 @@ static int s_picker_scroll_delta;
 static int s_settings_calls;
 static bool s_picker_visible = true;
 static bool s_picker_current = true;
+static const char *s_album;
+static int s_set_volume_range_calls;
+static int s_seek_adjust_calls;
 
 void ui_init(void) {}
 void ui_loop_iter(void) {}
@@ -51,6 +56,37 @@ void ui_update(const char *line1, const char *line2, bool playing,
     s_volume_step = volume_step;
     s_seek_position = seek_position;
     s_length = length;
+}
+void ui_set_album(const char *album) {
+    s_album = album;
+}
+bool ha_volume_client_is_active(void) {
+    // Not currently exercised here - controller_presentation_update()'s
+    // volume/min/max/step assertions below expect the values it was
+    // literally called with, which only holds when this is false (HA
+    // volume substitution skipped). See ha_volume_client_get_display()'s
+    // own stub for why it stays unimplemented.
+    return false;
+}
+void ha_volume_client_get_display(float *volume, float *volume_min,
+                                  float *volume_max, float *volume_step) {
+    // Unreachable while ha_volume_client_is_active() returns false above -
+    // exists only to satisfy the linker.
+    (void)volume;
+    (void)volume_min;
+    (void)volume_max;
+    (void)volume_step;
+}
+void ui_set_volume_with_range(float vol, float vol_min, float vol_max, float vol_step) {
+    (void)vol;
+    (void)vol_min;
+    (void)vol_max;
+    (void)vol_step;
+    ++s_set_volume_range_calls;
+}
+void ui_seek_adjust(int32_t ticks) {
+    (void)ticks;
+    ++s_seek_adjust_calls;
 }
 void ui_set_status(bool online) {
     assert(online);
@@ -164,10 +200,13 @@ int main(void) {
                                                         sizeof(selected_id));
     controller_presentation_hide_zone_picker();
     controller_presentation_show_settings();
+    controller_presentation_set_volume_range(42.0f, 2.0f, 98.0f, 0.5f);
+    controller_presentation_seek_adjust(7);
 
     assert(s_update_calls == 1);
     assert(strcmp(s_line1, "track") == 0);
     assert(strcmp(s_line2, "artist") == 0);
+    assert(strcmp(s_album, "album") == 0);
     assert(s_playing);
     assert(s_volume == 42.0f);
     assert(s_volume_min == 2.0f);
@@ -189,12 +228,15 @@ int main(void) {
     assert(controller_presentation_zone_picker_is_current_selection());
     assert(strcmp(selected_id, "id-two") == 0);
     assert(s_settings_calls == 1);
+    assert(s_set_volume_range_calls == 1);
+    assert(s_seek_adjust_calls == 1);
 
     controller_presentation_update(NULL, NULL, NULL, false, -1.0f, -2.0f,
                                    -3.0f, -4.0f, -5, -6);
     assert(s_update_calls == 2);
     assert(s_line1 == NULL);
     assert(s_line2 == NULL);
+    assert(s_album == NULL);
     assert(!s_playing);
     assert(s_volume == -1.0f);
     assert(s_volume_min == -2.0f);
