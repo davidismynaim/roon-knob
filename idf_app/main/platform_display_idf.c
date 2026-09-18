@@ -403,30 +403,15 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
         bool was_not_normal = (state != DISPLAY_STATE_NORMAL);
 
         // Always track touch for swipe detection (even during wake)
-        static int s_touch_sample_count = 0;
         if (!s_touch_tracking) {
             s_touch_start_x = x;
             s_touch_start_y = y;
             s_touch_start_time = esp_timer_get_time() / 1000;  // Convert to ms
             s_touch_tracking = true;
-            s_touch_sample_count = 0;
         }
-        s_touch_sample_count++;
-        // Diagnostic: every raw sample of a tracked touch, not just first/
-        // last - to see how many real indev-read samples a gesture that
-        // starts in art mode actually gets before release, versus one
-        // starting from the normal screen (which classifies correctly).
-        ESP_LOGI(TAG, "Touch sample #%d: state=%d x=%d y=%d",
-                 s_touch_sample_count, (int)state, (int)x, (int)y);
 
         // Wake display if needed
         if (was_not_normal) {
-            if (s_touch_start_x == x && s_touch_start_y == y) {
-                // Only log on the very first sample of this touch (start
-                // coords still match this one) - diagnostic for the
-                // art-mode-swipe investigation, not a hot-loop log.
-                ESP_LOGI(TAG, "Touch start while state=%d (waking)", (int)state);
-            }
             s_pending_wake_from_touch = true;  // Wake display - deferred, see the flag's own comment
             // Consume this touch - don't pass to LVGL widgets (prevents accidental activation)
             data->point.x = x;
@@ -807,14 +792,7 @@ void platform_display_process_pending(void) {
     // moved out of the touch read callback.
     if (s_pending_wake_from_touch) {
         s_pending_wake_from_touch = false;
-        // Diagnostic: measuring, not guessing, whether display_activity_detected()
-        // (-> display_wake() -> ui_set_controls_visible(true) for ART_MODE) is
-        // itself the multi-hundred-ms block that swallows every touch sample
-        // between an art-mode gesture's first sample and its release.
-        int64_t wake_start_us = esp_timer_get_time();
         display_activity_detected();
-        int64_t wake_us = esp_timer_get_time() - wake_start_us;
-        ESP_LOGI(TAG, "display_activity_detected() took %lldms", wake_us / 1000);
     }
     // Process deferred swipe gesture art mode
     if (s_pending_art_mode) {

@@ -152,12 +152,17 @@ A gesture that happens to get a second sample in before the stall starts
 (purely a timing race) computes real distance and classifies correctly -
 which is why this is intermittent rather than a hard failure every time.
 
-Both diagnostics that pinned this down are still in the code, not
-throwaway: `ui.c`'s per-sample touch log and its `lv_task_handler()`/
-`lv_timer_handler()` duration log (only printed above 20ms), plus
-`platform_display_idf.c`'s `display_activity_detected() took Nms` log. Any
-future investigation in this area starts with those, not new
-instrumentation.
+The instrumentation that pinned this down (a per-sample touch log, a
+`lv_task_handler()`/`lv_timer_handler()` duration log, and a
+`display_activity_detected() took Nms` log) was removed once the mechanism
+above was confirmed - it had done its job and was too noisy to leave
+running permanently. `platform_display_idf.c`'s existing, lower-noise
+`Touch release: elapsed=... dx=... dy=...` log (one line per release, not
+per-sample) is what's left for everyday swipe-classification debugging. A
+future investigation into this specific stall would start by re-adding
+timing around `ui_loop_iter()`'s `lv_task_handler()`/`lv_timer_handler()`
+calls and around `display_activity_detected()` in
+`platform_display_process_pending()`, the same two spots instrumented here.
 
 Deliberately left as-is rather than fixed: the fallback behavior (a swiped
 gesture that gets swallowed still wakes the display and shows controls, so

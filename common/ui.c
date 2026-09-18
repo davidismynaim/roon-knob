@@ -2400,23 +2400,8 @@ bool ui_zone_picker_is_current_selection(void) {
 // ============================================================================
 
 void ui_loop_iter(void) {
-    // Diagnostic (art-mode-swipe investigation): display_activity_detected()
-    // itself measures 6-11ms on hardware (see platform_display_process_pending()'s
-    // own timing), which rules it out as the multi-hundred-ms stall that
-    // swallows touch samples between a gesture's first sample and its
-    // release. This task's next candidate: the very next lv_timer_handler()
-    // call after a wake un-hides a screen's worth of widgets has to flush
-    // all of that newly-invalidated area to the panel before this loop can
-    // get back around to polling touch again - logged only when it actually
-    // takes long enough to matter, not every iteration.
-    uint64_t loop_iter_start_ms = platform_millis();
     lv_task_handler();
     lv_timer_handler();
-    uint64_t loop_iter_ms = platform_millis() - loop_iter_start_ms;
-    if (loop_iter_ms > 20) {
-        ESP_LOGI(UI_TAG, "lv_task_handler()+lv_timer_handler() took %llums",
-                 (unsigned long long)loop_iter_ms);
-    }
 
     platform_task_run_pending();  // Process callbacks from bridge_client thread
 
