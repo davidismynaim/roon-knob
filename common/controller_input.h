@@ -98,6 +98,10 @@ typedef enum {
     CONTROLLER_INTERACTION_CONTEXT_MEDIA = 0,
     CONTROLLER_INTERACTION_CONTEXT_ZONE_PICKER,
     CONTROLLER_INTERACTION_CONTEXT_SETTINGS_RECOVERY,
+    /* Dial's detail screen while it owns the encoder for seek-jog rather
+     * than volume - see common/ui.c's ui_set_detail_mode(). No other
+     * target binds anything to this context. */
+    CONTROLLER_INTERACTION_CONTEXT_SEEK,
 } controller_interaction_context_t;
 
 typedef enum {

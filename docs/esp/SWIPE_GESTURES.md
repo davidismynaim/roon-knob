@@ -135,12 +135,36 @@ Why defer? The touch callback runs from LVGL's internal context. Calling display
 
 | Gesture | Action | Condition |
 |---------|--------|-----------|
-| Swipe Up | Enter art mode | dy < -60px, time < 500ms |
-| Swipe Down | Exit art mode | dy > +60px, time < 500ms |
+| Swipe Up | Exit detail screen, or enter art mode | dy < -60px, time < 500ms |
+| Swipe Down | Exit art mode, or enter detail screen | dy > +60px, time < 500ms |
+| Swipe Left | Next track | dx < -60px, time < 500ms |
+| Swipe Right | Previous track | dx > +60px, time < 500ms |
 | Double-tap | Enter art mode | 2 taps within 400ms, < 40px apart |
 | Any tap | Exit art mode | (when in art mode) |
 
+Swipe left/right dispatch the same previous/next-track command the transport
+buttons use, and are deliberately not gated on display state at all - unlike
+the vertical swipes, they work identically whether controls are showing or
+hidden (art mode).
+
+Both the transport buttons and the swipe path show the same large
+semi-transparent skip-next/skip-previous icon overlay (3s, auto-hides) as
+visual confirmation, matching the existing pause/play confirmation on the
+detail screen - see common/ui.c's `ui_show_track_feedback()`.
+
 Art mode hides the control UI and shows fullscreen album artwork.
+
+Swipe up/down is a three-state cycle, not two independent toggles:
+- From normal (controls showing): swipe up enters art mode, swipe down
+  enters the detail info screen (thumbnail/title/artist/album/progress -
+  see common/ui.c's build_detail_overlay).
+- From art mode: swipe down returns to normal (unchanged from before).
+- From the detail screen: swipe up returns to normal.
+
+Detail mode is tracked independently of `display_state_t` in
+platform_display_idf.c (`s_detail_mode_active`) - it's a pure content-layout
+state, not a power/backlight one, so it doesn't touch display_sleep.c at
+all.
 
 ### Double-tap Detection
 

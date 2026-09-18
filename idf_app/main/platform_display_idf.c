@@ -3,8 +3,11 @@
 #include "display_sleep.h"
 #include "bridge_client.h"
 #include "battery.h"
+#include "controller_input.h"
+#include "haptic_driver.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"
+#include "ui.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -37,8 +40,46 @@ static bool s_touch_tracking = false;
 // see the comment in lvgl_touch_read_cb() below for why the fixed window
 // alone isn't enough.
 static bool s_suppress_until_release = false;
+// Deferred display_activity_detected() call (touch-triggered wake from
+// art mode/dim/sleep). Was called synchronously, inline, from the touch
+// read callback below - the one heavy call left on that path after
+// everything else here was already deferred. display_wake() (which this
+// reaches into ART_MODE) does real work under a mutex plus several
+// esp_timer_stop()/esp_timer_start_once() calls; that was enough to delay
+// this callback's return past the next indev read cycle for a real
+// in-flight swipe, which explains a reproducible symptom: a swipe
+// starting in art mode measured dx=0 dy=0 at release on every attempt,
+// while the identical motion from the normal screen measured correctly.
+// Deferring to platform_display_process_pending() (called once per
+// ui_loop iteration, same as every other pending flag here) keeps this
+// callback's own work down to touch-position bookkeeping only, so the
+// swipe distance computed at release reflects where the finger actually
+// went instead of a stale first-sample position.
+static volatile bool s_pending_wake_from_touch = false;
 static volatile bool s_pending_art_mode = false;   // Deferred art mode activation
 static volatile bool s_pending_exit_art_mode = false;  // Deferred art mode exit
+// Deferred previous/next track dispatch (horizontal swipe) - same
+// defer-to-main-loop pattern as the vertical gestures above, and
+// deliberately gated on nothing but the swipe itself: unlike art mode,
+// these should fire whether controls are currently shown or hidden.
+static volatile bool s_pending_previous_track = false;
+static volatile bool s_pending_next_track = false;
+// Detail info screen (common/ui.c's build_detail_overlay) - a third
+// content state, distinct from ART_MODE's power/backlight handling since
+// this stays fully awake. Tracked locally (not in display_sleep.c's
+// display_state_t) purely so this file's own swipe branching below knows
+// which of "enter detail" / "exit detail" a given up/down swipe means.
+static bool s_detail_mode_active = false;
+static volatile bool s_pending_detail_mode = false;
+static volatile bool s_pending_exit_detail_mode = false;
+// Pause/play via swipe while the detail screen is up - see the swipe-down/
+// up branching below for why these are separate from the plain
+// previous/next-track toggle above (they're conditional on current
+// playback state, decided at swipe time via ui_is_playing() - a plain
+// data read, safe to call straight from this touch callback unlike the
+// LVGL widget changes these flags defer).
+static volatile bool s_pending_detail_pause = false;
+static volatile bool s_pending_detail_play = false;
 static uint16_t s_current_rotation = 0;  // Track rotation for swipe direction transform
 
 // Double-tap detection for art mode toggle
@@ -371,7 +412,7 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 
         // Wake display if needed
         if (was_not_normal) {
-            display_activity_detected();  // Wake display
+            s_pending_wake_from_touch = true;  // Wake display - deferred, see the flag's own comment
             // Consume this touch - don't pass to LVGL widgets (prevents accidental activation)
             data->point.x = x;
             data->point.y = y;
@@ -432,7 +473,23 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
             int64_t elapsed = (esp_timer_get_time() / 1000) - s_touch_start_time;
             int64_t now_ms = esp_timer_get_time() / 1000;
 
-            if (elapsed < SWIPE_MAX_TIME_MS) {
+            // Diagnostic: log every release's raw swipe inputs, not just
+            // successful matches, so a hardware test can show exactly why a
+            // given gesture failed to classify (distance, timing, or wrong
+            // axis) rather than just "nothing happened". Safe to leave in -
+            // one line per touch release, not a hot loop.
+            ESP_LOGI(TAG, "Touch release: elapsed=%lldms dx=%d dy=%d start=(%d,%d) end=(%d,%d)",
+                     elapsed, (int)(data->point.x - s_touch_start_x),
+                     (int)(data->point.y - s_touch_start_y),
+                     s_touch_start_x, s_touch_start_y, data->point.x, data->point.y);
+
+            // Swipe gestures (art mode, detail screen, next/previous track,
+            // double-tap-to-art-mode) are Music-only - owner feedback that
+            // none of them should carry over to the TV/Vinyl hero-volume
+            // screens, including art mode itself: its only visible effect
+            // there would be hiding the battery/status indicators, with no
+            // track/timeline concept for the rest of it to act on anyway.
+            if (elapsed < SWIPE_MAX_TIME_MS && ui_is_music_screen()) {
                 int16_t dx = data->point.x - s_touch_start_x;
                 int16_t dy = data->point.y - s_touch_start_y;
 
@@ -443,25 +500,77 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                     dx = -dx;
                 }
 
-                // Check for swipe up (negative Y direction) - enter art mode
+                // Check for swipe up (negative Y direction). On the detail
+                // screen this means one of two things depending on
+                // playback state: if paused (most likely via the swipe-
+                // down-pause just below), resume playback and stay on the
+                // screen - swipe up "undoes" a swipe-down either way,
+                // whether that means resuming playback or leaving the
+                // screen. If already playing, exit detail mode as before.
+                // Off the detail screen, unchanged: enter art mode.
                 if (dy < -SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
+                    if (s_detail_mode_active && !ui_is_playing()) {
+                        ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing play", s_current_rotation);
+                        s_pending_detail_play = true;
+                    } else if (s_detail_mode_active) {
+                        ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing exit detail mode", s_current_rotation);
+                        s_pending_exit_detail_mode = true;
+                    }
                     // Only allow art mode when WiFi is configured and bridge is responding with zones
-                    if (bridge_client_is_ready_for_art_mode()) {
+                    else if (bridge_client_is_ready_for_art_mode()) {
                         ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing art mode", s_current_rotation);
                         s_pending_art_mode = true;  // Defer to avoid LVGL threading issues
                     } else {
                         ESP_LOGI(TAG, "Swipe up ignored - not ready for art mode (no zones)");
                     }
                 }
-                // Check for swipe down (positive Y direction) - exit art mode
+                // Check for swipe down (positive Y direction). Three
+                // meanings depending on state: exit art mode if that's
+                // active (unchanged); pause playback if the detail screen
+                // is already up and currently playing (new - a no-op if
+                // already paused, nothing more for a second swipe-down to
+                // do); otherwise enter detail mode (new) - previously a
+                // swipe down in plain normal mode was simply a no-op, so
+                // this repurposes otherwise-dead gesture space rather than
+                // adding a new one.
                 else if (dy > SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
-                    ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing exit art mode", s_current_rotation);
-                    s_pending_exit_art_mode = true;  // Defer to avoid LVGL threading issues
+                    if (display_get_state() == DISPLAY_STATE_ART_MODE) {
+                        ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing exit art mode", s_current_rotation);
+                        s_pending_exit_art_mode = true;  // Defer to avoid LVGL threading issues
+                    } else if (s_detail_mode_active) {
+                        if (ui_is_playing()) {
+                            ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing pause", s_current_rotation);
+                            s_pending_detail_pause = true;
+                        }
+                    } else {
+                        ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing detail mode", s_current_rotation);
+                        s_pending_detail_mode = true;
+                    }
+                }
+                // Check for swipe left (negative X direction, i.e. right-
+                // to-left) - next track, matching a physical "flick to the
+                // next page/track" gesture (owner feedback: originally
+                // wired the other way round). Not gated on display/art-mode
+                // state at all - unlike the vertical swipes above, this
+                // should work identically whether controls are showing or
+                // hidden.
+                else if (dx < -SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
+                    ESP_LOGI(TAG, "Swipe left detected (rotation=%d) - queueing next track", s_current_rotation);
+                    s_pending_next_track = true;
+                }
+                // Check for swipe right (positive X direction, i.e. left-
+                // to-right) - previous track.
+                else if (dx > SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
+                    ESP_LOGI(TAG, "Swipe right detected (rotation=%d) - queueing previous track", s_current_rotation);
+                    s_pending_previous_track = true;
                 }
                 // Check for double-tap to enter art mode (#66)
                 // Only if this wasn't a swipe (small movement) and not already in art mode
-                // (any single tap exits art mode, so double-tap is only for entering)
-                else if (display_get_state() != DISPLAY_STATE_ART_MODE &&
+                // (any single tap exits art mode, so double-tap is only for entering).
+                // Also excluded while the detail screen is up - a tap there
+                // should do nothing (only swipe up exits it), not double as
+                // an art-mode shortcut.
+                else if (display_get_state() != DISPLAY_STATE_ART_MODE && !s_detail_mode_active &&
                          abs(dx) < DOUBLE_TAP_MAX_DISTANCE && abs(dy) < DOUBLE_TAP_MAX_DISTANCE) {
                     int64_t tap_interval = now_ms - s_last_tap_time;
                     int16_t tap_dx = abs(data->point.x - s_last_tap_x);
@@ -562,6 +671,9 @@ bool platform_display_init(void) {
     lcd_touch_init();
     ESP_LOGI(TAG, "Touch controller initialized successfully");
 
+    // Shares this same I2C bus with the touch controller above.
+    haptic_driver_init();
+
     s_hardware_ready = true;
     ESP_LOGI(TAG, "Display hardware initialized successfully");
     return true;
@@ -618,6 +730,16 @@ bool platform_display_register_lvgl_driver(void) {
     }
     lv_indev_set_type(s_touch_indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(s_touch_indev, lvgl_touch_read_cb);
+    // LVGL's default is 10px: any more finger movement between press and
+    // release than that and LVGL reclassifies the whole touch as a
+    // scroll/drag, silently dropping the click - no error, no event, the
+    // tap just does nothing. Raised to 20px (owner feedback: prev/play/
+    // next "not the most responsive") to tolerate more real-world finger
+    // jitter/touch-coordinate noise before giving up on a tap. Global to
+    // this indev, so it also loosens the source/zone picker list's own
+    // scroll-vs-tap threshold and the swipe-up-for-art-mode gesture -
+    // watch those too after flashing, not just the transport buttons.
+    lv_indev_set_scroll_limit(s_touch_indev, 20);
 
     // Create LVGL tick timer - CRITICAL for LVGL to know time is passing
     ESP_LOGI(TAG, "Creating LVGL tick timer (%dms period)", LVGL_TICK_PERIOD_MS);
@@ -662,6 +784,16 @@ bool platform_display_is_sleeping(void) {
 }
 
 void platform_display_process_pending(void) {
+    // Process deferred touch-triggered wake first - queued by the very
+    // first touch sample of a gesture that started in art mode/dim/sleep,
+    // so it runs (and any resulting state/UI change settles) before this
+    // same iteration's indev read picks up the next sample of that same
+    // gesture. See s_pending_wake_from_touch's own comment for why this
+    // moved out of the touch read callback.
+    if (s_pending_wake_from_touch) {
+        s_pending_wake_from_touch = false;
+        display_activity_detected();
+    }
     // Process deferred swipe gesture art mode
     if (s_pending_art_mode) {
         s_pending_art_mode = false;
@@ -674,6 +806,61 @@ void platform_display_process_pending(void) {
         if (display_get_state() == DISPLAY_STATE_ART_MODE) {
             display_wake();  // Returns to normal state with controls visible
         }
+    }
+    // Process deferred previous/next track swipes - same dispatch the
+    // transport buttons themselves use (common/ui.c's btn_prev/next_event_cb),
+    // so behavior (including the lack of any is_previous/next_allowed gating
+    // - neither button checks it either) stays identical between the two
+    // input methods. Not adding a haptic_driver_pulse() here to match the
+    // buttons' feel - that driver doesn't exist on this branch yet (still
+    // in the separate, unmerged haptic feature) - worth a one-line follow-up
+    // once it lands.
+    if (s_pending_previous_track) {
+        s_pending_previous_track = false;
+        ui_show_track_feedback(false);
+        controller_action_t action = controller_action_command(
+            controller_command_make(CONTROLLER_COMMAND_PREVIOUS_TRACK));
+        (void)controller_input_dispatch_action(&action);
+    }
+    if (s_pending_next_track) {
+        s_pending_next_track = false;
+        ui_show_track_feedback(true);
+        controller_action_t action = controller_action_command(
+            controller_command_make(CONTROLLER_COMMAND_NEXT_TRACK));
+        (void)controller_input_dispatch_action(&action);
+    }
+    // Process deferred detail-info-screen swipes. Calls ui_set_detail_mode()
+    // directly rather than routing through display_sleep.c the way art mode
+    // does - this isn't a power/backlight state, display_sleep.c has no
+    // reason to know about it.
+    if (s_pending_detail_mode) {
+        s_pending_detail_mode = false;
+        s_detail_mode_active = true;
+        ui_set_detail_mode(true);
+    }
+    if (s_pending_exit_detail_mode) {
+        s_pending_exit_detail_mode = false;
+        s_detail_mode_active = false;
+        ui_set_detail_mode(false);
+    }
+    // Process deferred pause/play from a detail-screen swipe. Both use the
+    // same toggle command the transport button uses - by the time this
+    // runs, ui_is_playing() may have already changed (a poll landed in
+    // between), but that's the same race the button's own toggle already
+    // has, not something new here.
+    if (s_pending_detail_pause) {
+        s_pending_detail_pause = false;
+        ui_show_playback_feedback(false);
+        controller_action_t action = controller_action_command(
+            controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
+        (void)controller_input_dispatch_action(&action);
+    }
+    if (s_pending_detail_play) {
+        s_pending_detail_play = false;
+        ui_show_playback_feedback(true);
+        controller_action_t action = controller_action_command(
+            controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
+        (void)controller_input_dispatch_action(&action);
     }
     // Process deferred timer-triggered state changes
     display_process_pending();

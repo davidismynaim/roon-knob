@@ -97,6 +97,89 @@ Treat the absence of `UI loop task started on core 1` as a boot failure. It is
 not a condition that Wi-Fi provisioning, browser erase, or BLE pairing can
 repair.
 
+#### Potential failure mode: LVGL transform/layer rendering vs. Wi-Fi/BLE heap
+
+Not yet confirmed as a repeat offender - recorded here as a known hazard to
+watch for, not a fixed bug. A 2x `lv_obj_set_style_transform_scale_x/y` on a
+single label (common/ui.c's playback-confirmation icon overlay) crashed
+Wi-Fi and corrupted the display on hardware; reverted rather than chased
+further at the time (no heap trace was captured from the actual crash to
+confirm the mechanism directly). The likely cause: LVGL 9 composites any
+transformed widget (`transform_scale`/`transform_rotation`/`transform_skew`
+away from identity), any container with whole-widget `opa` under 255 that
+also has children, or a widget combining `clip_corner` with children, by
+rendering it into an intermediate layer buffer sized to the *transformed*
+bounding box first - a real, if transient, allocation, not just a style
+flag. That layer buffer competes for the same DMA-capable/internal heap
+region this file already documents as tight once Wi-Fi and an active BLE
+controller are running (see the 36-row-to-24-row draw buffer story above).
+
+As of this writing, none of these three triggers (`transform_*`,
+whole-widget `opa` + children, `clip_corner` + children) are used anywhere
+else in this codebase - checked directly, not assumed - so this isn't
+believed to be live elsewhere today. If a similar crash/corruption pattern
+turns up again, that would be the signal to stop treating this as one-off
+and instead add real protection: an explicit heap-caps check
+(`heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)`) before any
+new transform/shadow/clip-corner/parent-opacity effect ships, or capturing
+the boot-telemetry-style heap snapshot (already used elsewhere in this file)
+around the moment such an effect first renders, to confirm the mechanism
+with real numbers instead of inference.
+
+#### Known limitation: touch is blind during the art-mode wake render
+
+Confirmed, not just suspected - root-caused via two rounds of targeted
+hardware logging rather than static reading. Swiping to skip a track
+immediately as the very first touch after art mode (or any dimmed/non-normal
+display state) is unreliable: the gesture is frequently invisible to the
+code regardless of how far or fast the finger actually moved.
+
+Mechanism: `ui_loop_task` (idf_app/main/main_idf.c) is a single task that
+both polls the touch controller and drives LVGL's render/flush, one after
+the other, every iteration. The first touch sample of a gesture starting
+from a non-normal state triggers `display_activity_detected()` ->
+`ui_set_controls_visible(true)`, un-hiding a full screen's worth of widgets
+(labels, icon halos, arcs). `display_activity_detected()` itself is fast
+(6-11ms, measured directly) - the actual cost is the *next*
+`lv_task_handler()`/`lv_timer_handler()` call in the same loop iteration,
+which now has to render and flush all of that newly-invalidated area before
+the loop can get back around to polling touch again. Measured on hardware
+at 100-250ms for that single call, occasionally sustained across several
+follow-up iterations. During that whole window the touch controller is not
+polled at all, so a swipe made in that window computes `dx=0, dy=0` at
+release (only the first sample was ever recorded) and registers as nothing.
+A gesture that happens to get a second sample in before the stall starts
+(purely a timing race) computes real distance and classifies correctly -
+which is why this is intermittent rather than a hard failure every time.
+
+The instrumentation that pinned this down (a per-sample touch log, a
+`lv_task_handler()`/`lv_timer_handler()` duration log, and a
+`display_activity_detected() took Nms` log) was removed once the mechanism
+above was confirmed - it had done its job and was too noisy to leave
+running permanently. `platform_display_idf.c`'s existing, lower-noise
+`Touch release: elapsed=... dx=... dy=...` log (one line per release, not
+per-sample) is what's left for everyday swipe-classification debugging. A
+future investigation into this specific stall would start by re-adding
+timing around `ui_loop_iter()`'s `lv_task_handler()`/`lv_timer_handler()`
+calls and around `display_activity_detected()` in
+`platform_display_process_pending()`, the same two spots instrumented here.
+
+Deliberately left as-is rather than fixed: the fallback behavior (a swiped
+gesture that gets swallowed still wakes the display and shows controls, so
+the user's next input - a plain tap on the now-visible button - works
+immediately) reads as reasonably intuitive in practice, not broken. The
+real fix - decoupling raw touch sampling onto its own lightweight
+poll/timer so gesture tracking survives an expensive render, independent of
+`ui_loop_task` - was considered and explicitly deferred: it's a genuine
+architectural change (new task, thread-safety on the shared touch-tracking
+state) whose concrete benefit is narrow (only matters when a gesture
+happens to overlap an already-expensive render - today, effectively just
+this wake path) rather than a broad responsiveness win, since ordinary taps
+don't need multi-sample precision the way a swipe's distance/direction
+computation does. Worth revisiting if this pattern shows up somewhere with
+real usability cost, or if profiling ever turns up other gestures/screens
+hitting the same stall.
+
 #### Adaptive UI payloads
 
 Downloaded screen descriptions, parsed component models, inactive-screen

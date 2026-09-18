@@ -76,6 +76,24 @@ bool bridge_command_plan_build(const controller_command_t *command,
         plan->volume_step = context->volume_step;
         plan->failure_feedback = BRIDGE_COMMAND_FEEDBACK_VOLUME_FAILED;
         return true;
+    case CONTROLLER_COMMAND_SEEK_TO_SECONDS:
+        if (!context->operational) {
+            plan->rejection_feedback = BRIDGE_COMMAND_FEEDBACK_CONNECTING;
+            return true;
+        }
+        {
+            int written = snprintf(
+                plan->json, sizeof(plan->json),
+                "{\"zone_id\":\"%s\",\"action\":\"seek\",\"value\":%d}",
+                zone_id, (int)command->seek_seconds);
+            if (written < 0 || (size_t)written >= sizeof(plan->json)) {
+                memset(plan, 0, sizeof(*plan));
+                return false;
+            }
+        }
+        plan->accepted = true;
+        plan->failure_feedback = BRIDGE_COMMAND_FEEDBACK_SEEK_FAILED;
+        return true;
     case CONTROLLER_COMMAND_NONE:
     default:
         return false;

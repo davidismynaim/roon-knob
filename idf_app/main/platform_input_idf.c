@@ -43,6 +43,21 @@ static uint32_t s_last_logged_overflow;
 #define ENCODER_DEBOUNCE_TICKS   2      // Debounce count
 #define ENCODER_BATCH_INTERVAL_MS 30    // Batch encoder ticks over 30ms window for velocity detection
 
+// Depth of the queue platform_input_process_events() drains once per
+// ui_loop_task iteration - at most one delta enqueued per ENCODER_POLL_INTERVAL_MS,
+// so depth*ENCODER_POLL_INTERVAL_MS is how long that consumer can go without
+// running before ticks start getting silently dropped (xQueueSend's own
+// last_count update happens unconditionally either way - a dropped delta
+// is gone, not just delayed). The old depth of 10 (30ms of headroom) was
+// sized for "the loop is basically always fast"; docs/esp/DISPLAY.md's
+// touch-starvation writeup measured this same loop occasionally taking
+// 70-250ms per iteration during a heavy render (confirmation icon,
+// wake-into-controls-shown), which alone exceeds 30ms - a real rapid-spin
+// test hit exactly this ("Encoder queue overflow: 32 event(s) dropped").
+// 128*3ms = ~384ms of headroom comfortably covers the worst render stall
+// measured this session (252ms) with margin, at a cost of 512 bytes.
+#define ENCODER_QUEUE_DEPTH 128
+
 
 // ============================================================================
 // State Variables
@@ -204,8 +219,8 @@ void platform_input_init(void) {
     taskEXIT_CRITICAL(&s_stats_lock);
     s_last_logged_overflow = 0;
 
-    // Create input event queue (holds up to 10 batched tick counts)
-    s_input_queue = xQueueCreate(10, sizeof(int));
+    // Create input event queue - see ENCODER_QUEUE_DEPTH for sizing rationale
+    s_input_queue = xQueueCreate(ENCODER_QUEUE_DEPTH, sizeof(int));
     if (!s_input_queue) {
         ESP_LOGE(TAG, "Failed to create input event queue");
         return;

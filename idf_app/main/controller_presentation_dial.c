@@ -25,7 +25,11 @@ void controller_presentation_update(const char *line1, const char *line2, const 
                                      bool playing, float volume, float volume_min,
                                      float volume_max, float volume_step,
                                      int seek_position, int length) {
-    (void)line3;
+    // Album - previously discarded here. Only consumed by the detail info
+    // screen (common/ui.c's build_detail_overlay), which is otherwise
+    // hidden, so this is a cheap unconditional forward like ui_update()
+    // below already is for everything else.
+    ui_set_album(line3);
     /* Volume/source are controlled directly via Home Assistant when
      * configured (see docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md);
      * substitute the HA-sourced 0-255 position value for whatever Roon/UHC
@@ -100,4 +104,8 @@ void controller_presentation_zone_picker_get_selected_id(char *out, size_t len) 
 
 void controller_presentation_show_settings(void) {
     ui_show_settings();
+}
+
+void controller_presentation_seek_adjust(int32_t ticks) {
+    ui_seek_adjust(ticks);
 }

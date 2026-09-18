@@ -18,18 +18,21 @@ static atomic_uint_least32_t s_control_overflow;
 
 static bool context_is_valid(controller_interaction_context_t context) {
     return context >= CONTROLLER_INTERACTION_CONTEXT_MEDIA &&
-           context <= CONTROLLER_INTERACTION_CONTEXT_SETTINGS_RECOVERY;
+           context <= CONTROLLER_INTERACTION_CONTEXT_SEEK;
 }
 
 static bool command_is_valid(const controller_command_t *command) {
     if (!command || command->kind <= CONTROLLER_COMMAND_NONE ||
-        command->kind > CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS) {
+        command->kind > CONTROLLER_COMMAND_SEEK_TO_SECONDS) {
         return false;
     }
     if (command->kind == CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS) {
-        return command->volume_steps != 0;
+        return command->volume_steps != 0 && command->seek_seconds == 0;
     }
-    return command->volume_steps == 0;
+    if (command->kind == CONTROLLER_COMMAND_SEEK_TO_SECONDS) {
+        return command->seek_seconds >= 0 && command->volume_steps == 0;
+    }
+    return command->volume_steps == 0 && command->seek_seconds == 0;
 }
 
 static bool action_is_valid(const controller_action_t *action) {
@@ -47,6 +50,8 @@ static bool action_is_valid(const controller_action_t *action) {
         return action->value.picker_delta == 0;
     case CONTROLLER_ACTION_SCROLL_ZONE_PICKER:
         return action->value.picker_delta != 0;
+    case CONTROLLER_ACTION_ADJUST_SEEK:
+        return action->value.seek_ticks != 0;
     case CONTROLLER_ACTION_SYSTEM:
         return false;
     case CONTROLLER_ACTION_NONE:
@@ -117,6 +122,20 @@ static bool resolve_volume_ticks(int32_t ticks,
     return true;
 }
 
+static bool resolve_seek_ticks(int32_t ticks, controller_action_t *out_action) {
+    if (ticks == 0 || !out_action) {
+        return false;
+    }
+    /* Same "pass the raw tick count straight through" reasoning as
+     * resolve_volume_ticks() above - the dial's seek preview (common/ui.c's
+     * ui_seek_adjust) turns this into a variable-speed jog itself (bigger
+     * ticks == the user span the knob faster == bigger position jump), and
+     * it accumulates/debounces locally rather than firing a network call
+     * per tick, so there's no rate-limit reason to cap or bucket this. */
+    *out_action = controller_action_adjust_seek(ticks);
+    return true;
+}
+
 static bool binding_matches(const controller_input_binding_t *binding,
                             const controller_physical_event_t *event,
                             controller_interaction_context_t context) {
@@ -184,6 +203,9 @@ static bool resolve_binding(const controller_input_descriptor_t *descriptor,
         return true;
 
     case CONTROLLER_INPUT_TRANSFORM_ROTATION_ACCELERATED:
+        if (binding->action.kind == CONTROLLER_ACTION_ADJUST_SEEK) {
+            return resolve_seek_ticks(event->value, out_action);
+        }
         if (binding->action.kind != CONTROLLER_ACTION_COMMAND ||
             binding->action.value.command.kind !=
                 CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS) {

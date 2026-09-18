@@ -192,13 +192,16 @@ bool controller_action_router_handle(const controller_action_t *action) {
     case CONTROLLER_ACTION_COMMAND:
         if (action->value.command.kind <= CONTROLLER_COMMAND_NONE ||
             action->value.command.kind >
-                CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS ||
+                CONTROLLER_COMMAND_SEEK_TO_SECONDS ||
             (action->value.command.kind ==
                  CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS &&
              action->value.command.volume_steps == 0) ||
             (action->value.command.kind !=
                  CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS &&
-             action->value.command.volume_steps != 0)) {
+             action->value.command.volume_steps != 0) ||
+            (action->value.command.kind ==
+                 CONTROLLER_COMMAND_SEEK_TO_SECONDS &&
+             action->value.command.seek_seconds < 0)) {
             return false;
         }
         if (action->value.command.kind ==
@@ -207,6 +210,15 @@ bool controller_action_router_handle(const controller_action_t *action) {
             return s_volume_override(action->value.command.volume_steps);
         }
         return bridge_client_execute_command(&action->value.command);
+
+    case CONTROLLER_ACTION_ADJUST_SEEK:
+        if (controller_input_get_context() !=
+                CONTROLLER_INTERACTION_CONTEXT_SEEK ||
+            action->value.seek_ticks == 0) {
+            return false;
+        }
+        controller_presentation_seek_adjust(action->value.seek_ticks);
+        return true;
 
     case CONTROLLER_ACTION_OPEN_ZONE_PICKER:
         if (s_source_picker_open) {

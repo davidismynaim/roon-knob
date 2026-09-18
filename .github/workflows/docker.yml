@@ -263,6 +263,21 @@ jobs:
             common/bridge_command_plan.c \
             -o /tmp/test-bridge-command-plan
           /tmp/test-bridge-command-plan
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
+            -Icommon -Iinclude \
+            tests/test_track_title_filter.c \
+            common/track_title_filter.c \
+            -o /tmp/test-track-title-filter
+          /tmp/test-track-title-filter
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -Icommon -Iinclude \
+            tests/test_track_title_filter.c \
+            common/track_title_filter.c \
+            -o /tmp/test-track-title-filter-sanitized
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1 \
+            /tmp/test-track-title-filter-sanitized
           cc -std=c11 -Wall -Wextra -Werror \
             -Icommon tests/test_rk_cfg.c -o /tmp/test-rk-cfg
           /tmp/test-rk-cfg
