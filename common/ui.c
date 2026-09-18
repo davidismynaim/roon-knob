@@ -16,6 +16,7 @@
 #include "ui.h"
 #include "bridge_client.h"
 #include "ha_volume_client.h"
+#include "ha_mute_client.h"
 #include "track_title_filter.h"
 
 #ifdef ESP_PLATFORM
@@ -632,6 +633,15 @@ void ui_seek_adjust(int32_t ticks) {
     if (ticks == 0 || !s_progress_arc || !s_seek_delta_arc) {
         return;
     }
+
+    // Same auto-unmute as ha_volume_client_adjust(): turning the knob is
+    // clearly not an attempt to stay muted. Without this, scrubbing the
+    // seek ring while muted moved the ring but left audio silent, with no
+    // indication why - unlike volume mode, which already un-mutes here.
+    if (ha_volume_client_get_muted()) {
+        (void)ha_mute_client_toggle();
+    }
+
     if (!s_seek_active) {
         if (s_progress_length_ms <= 0 || s_progress_base_ms < 0) {
             return;  // No known track/duration yet - nothing to seek within
