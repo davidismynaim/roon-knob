@@ -102,11 +102,20 @@ static char s_progress_last_line1[128] = "";  // Track identity, to tell a real 
 // single CONTROLLER_COMMAND_SEEK_TO_SECONDS call - keeps a fast spin of the
 // knob from firing a network seek per detent.
 #define SEEK_COMMIT_DEBOUNCE_MS 300
+// How long after a seek commit to distrust a poll's reported seek_position
+// in favor of our own just-committed value - see apply_state()'s use of
+// s_seek_commit_uptime_ms for why. Sized above the bridge's fastest poll
+// interval (2s, see wait_for_poll_interval()) so a poll response that was
+// already in flight when the seek landed - and therefore still reflects
+// Roon's pre-seek zone state - gets one full cycle to be superseded by a
+// poll dispatched after the seek, rather than being trusted as fresh.
+#define SEEK_RESYNC_GRACE_MS 3000
 static bool s_seek_active = false;       // Previewing a seek - polls/interpolation are frozen meanwhile
 static int s_seek_start_seconds = 0;     // Where the preview started - s_progress_arc stays frozen here
 static int s_seek_preview_seconds = 0;   // Position the preview is currently showing
 static int s_seek_step_seconds = 1;      // Seconds per raw encoder tick, sized to the current track's length
 static lv_timer_t *s_seek_commit_timer;  // One-shot SEEK_COMMIT_DEBOUNCE_MS after the last tick - see ui_seek_adjust
+static uint64_t s_seek_commit_uptime_ms; // platform_millis() at the last seek commit (0 = none yet this boot)
 // Amber overlay spanning only the [start, preview] range being scrubbed -
 // s_progress_arc itself stays blue and frozen at s_seek_start_seconds for
 // the whole preview, so only the actual movement highlights, not the
@@ -716,9 +725,18 @@ static void seek_commit(void) {
     // elsewhere in this file: the next poll still reports the pre-seek
     // position for one cycle, and apply_state()'s "same track, still
     // playing" forward-only clamp would otherwise hold the arc at the OLD
-    // position until a later poll catches up.
+    // position until a later poll catches up. Backward seeks need more
+    // than that: the clamp always prefers whichever of {reported, locally
+    // estimated} is LATER, which is correct when a stale poll under-reports
+    // (normal forward drift) but exactly backwards when a stale poll still
+    // shows the pre-seek position after a seek moved us earlier - the clamp
+    // would keep the stale, later value forever. s_seek_commit_uptime_ms
+    // marks a grace window (see SEEK_RESYNC_GRACE_MS) during which
+    // apply_state() trusts this optimistic position outright instead of
+    // running that comparison.
     s_progress_base_ms = s_seek_preview_seconds * 1000;
     s_progress_base_uptime_ms = platform_millis();
+    s_seek_commit_uptime_ms = s_progress_base_uptime_ms;
 }
 
 // ============================================================================
@@ -1690,7 +1708,20 @@ static void apply_state(const struct ui_state *state) {
         s_progress_last_line1[sizeof(s_progress_last_line1) - 1] = '\0';
 
         int effective_ms = reported_ms;
-        if (same_track && s_progress_is_playing && state->playing && s_progress_base_ms >= 0) {
+        bool in_seek_resync_grace = same_track && s_seek_commit_uptime_ms != 0 &&
+                                     (now - s_seek_commit_uptime_ms) < SEEK_RESYNC_GRACE_MS;
+        if (in_seek_resync_grace && s_progress_base_ms >= 0) {
+            // A poll landing in this window may have been dispatched before
+            // the seek reached Roon and still be reporting the old
+            // position - trust our own just-committed value rather than
+            // comparing against it (see seek_commit()'s comment). Only
+            // advance it if actually playing, same as the interpolation
+            // timer, so a seek made while paused doesn't drift forward.
+            effective_ms = s_progress_base_ms;
+            if (state->playing) {
+                effective_ms += (int)(now - s_progress_base_uptime_ms);
+            }
+        } else if (same_track && s_progress_is_playing && state->playing && s_progress_base_ms >= 0) {
             int estimated_now_ms = s_progress_base_ms + (int)(now - s_progress_base_uptime_ms);
             if (estimated_now_ms > effective_ms) {
                 effective_ms = estimated_now_ms;
