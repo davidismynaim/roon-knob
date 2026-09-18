@@ -126,6 +126,55 @@ the boot-telemetry-style heap snapshot (already used elsewhere in this file)
 around the moment such an effect first renders, to confirm the mechanism
 with real numbers instead of inference.
 
+#### Known limitation: touch is blind during the art-mode wake render
+
+Confirmed, not just suspected - root-caused via two rounds of targeted
+hardware logging rather than static reading. Swiping to skip a track
+immediately as the very first touch after art mode (or any dimmed/non-normal
+display state) is unreliable: the gesture is frequently invisible to the
+code regardless of how far or fast the finger actually moved.
+
+Mechanism: `ui_loop_task` (idf_app/main/main_idf.c) is a single task that
+both polls the touch controller and drives LVGL's render/flush, one after
+the other, every iteration. The first touch sample of a gesture starting
+from a non-normal state triggers `display_activity_detected()` ->
+`ui_set_controls_visible(true)`, un-hiding a full screen's worth of widgets
+(labels, icon halos, arcs). `display_activity_detected()` itself is fast
+(6-11ms, measured directly) - the actual cost is the *next*
+`lv_task_handler()`/`lv_timer_handler()` call in the same loop iteration,
+which now has to render and flush all of that newly-invalidated area before
+the loop can get back around to polling touch again. Measured on hardware
+at 100-250ms for that single call, occasionally sustained across several
+follow-up iterations. During that whole window the touch controller is not
+polled at all, so a swipe made in that window computes `dx=0, dy=0` at
+release (only the first sample was ever recorded) and registers as nothing.
+A gesture that happens to get a second sample in before the stall starts
+(purely a timing race) computes real distance and classifies correctly -
+which is why this is intermittent rather than a hard failure every time.
+
+Both diagnostics that pinned this down are still in the code, not
+throwaway: `ui.c`'s per-sample touch log and its `lv_task_handler()`/
+`lv_timer_handler()` duration log (only printed above 20ms), plus
+`platform_display_idf.c`'s `display_activity_detected() took Nms` log. Any
+future investigation in this area starts with those, not new
+instrumentation.
+
+Deliberately left as-is rather than fixed: the fallback behavior (a swiped
+gesture that gets swallowed still wakes the display and shows controls, so
+the user's next input - a plain tap on the now-visible button - works
+immediately) reads as reasonably intuitive in practice, not broken. The
+real fix - decoupling raw touch sampling onto its own lightweight
+poll/timer so gesture tracking survives an expensive render, independent of
+`ui_loop_task` - was considered and explicitly deferred: it's a genuine
+architectural change (new task, thread-safety on the shared touch-tracking
+state) whose concrete benefit is narrow (only matters when a gesture
+happens to overlap an already-expensive render - today, effectively just
+this wake path) rather than a broad responsiveness win, since ordinary taps
+don't need multi-sample precision the way a swipe's distance/direction
+computation does. Worth revisiting if this pattern shows up somewhere with
+real usability cost, or if profiling ever turns up other gestures/screens
+hitting the same stall.
+
 #### Adaptive UI payloads
 
 Downloaded screen descriptions, parsed component models, inactive-screen
