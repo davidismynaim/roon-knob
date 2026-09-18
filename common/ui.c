@@ -553,18 +553,30 @@ static void redraw_volume_ring(float volume, float volume_min, float volume_max)
     dsc.round_end = false;
 
     const float range = volume_max - volume_min;
+    const float live_db = derive_volume_db_equivalent(volume, volume_min, volume_max);
 
     // Unlit ticks aren't drawn at all (owner feedback: the dark tint
     // there was "distracting and adds no value") - only the lit 0..
     // lit_ticks range gets a line.
     for (int tick_idx = 0; tick_idx < lit_ticks; tick_idx++) {
         // Tick's own represented volume (inverse of calculate_volume_lit_ticks'
-        // volume->tick mapping), converted the same way the numeric label is,
-        // so a tick colors amber/red exactly where the label would too -
-        // this is what makes only the *new* high-volume segments change
-        // color as the ring fills, rather than recoloring the whole ring.
-        float tick_volume = volume_min + ((float)tick_idx / (float)VOLUME_RING_TICK_COUNT) * range;
-        float tick_db = derive_volume_db_equivalent(tick_volume, volume_min, volume_max);
+        // volume->tick mapping) is this tick's lower edge, not the actual
+        // live volume - a tick lights up as soon as the real volume passes
+        // its lower edge, so for most of a tick's lit lifetime the true
+        // volume sits somewhere above that edge, up to a full tick-width
+        // higher. Using the tick's own value for color made the topmost
+        // (leading) lit tick color roughly a tick late relative to the
+        // numeric label, which always uses the exact live value (owner
+        // feedback). Only the leading tick has this ambiguity - every tick
+        // below it is already fully behind the live volume - so only that
+        // one uses live_db directly; the rest keep using their own value.
+        float tick_db;
+        if (tick_idx == lit_ticks - 1) {
+            tick_db = live_db;
+        } else {
+            float tick_volume = volume_min + ((float)tick_idx / (float)VOLUME_RING_TICK_COUNT) * range;
+            tick_db = derive_volume_db_equivalent(tick_volume, volume_min, volume_max);
+        }
         dsc.color = volume_hot_color_for_db(tick_db, lv_color_hex(0x4dabff));
 
         // Same angle math as lv_scale's own ROUND_INNER tick placement
@@ -1687,16 +1699,20 @@ static void apply_state(const struct ui_state *state) {
         s_last_vol_text[sizeof(s_last_vol_text) - 1] = '\0';
     }
 
-    // Loud-volume warning color for the big numeric label - see
+    // Loud-volume warning color for the big numeric label(s) - see
     // volume_hot_color_for_db(). Set every poll (not gated on the text
     // change above) since it's a single cheap style call, and applied
     // before emphasize_volume_label() below so a real change's blue flash
-    // still wins temporarily, settling back to this color once it resets.
+    // still wins temporarily on the Music-screen label, settling back to
+    // this color once it resets. The TV/Vinyl hero label has no such
+    // flash, so it just goes straight to whichever color is current.
     s_volume_label_resting_db = derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max);
+    lv_color_t volume_color = volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa));
     if (s_volume_label_large) {
-        lv_obj_set_style_text_color(
-            s_volume_label_large,
-            volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa)), 0);
+        lv_obj_set_style_text_color(s_volume_label_large, volume_color, 0);
+    }
+    if (s_tv_vinyl_volume_label) {
+        lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
     }
     if (should_emphasize) {
         emphasize_volume_label();
@@ -2142,6 +2158,19 @@ static void emphasize_volume_label(void) {
         return;
     }
 
+    // At loud volumes (amber/red territory), the warning color itself is
+    // the signal - a blue "just changed" flash on top of it, however
+    // briefly, reads as "back to normal" and undersells how loud this is
+    // (owner feedback). Skip the flash there entirely; the caller already
+    // set the correct resting color on this label before calling here, so
+    // there's nothing to do. A timer already running from before the
+    // volume entered this zone is left alone - it re-reads
+    // s_volume_label_resting_db fresh when it fires, so it still resolves
+    // to the current color rather than a stale one.
+    if (s_volume_label_resting_db >= VOLUME_HOT_DB_AMBER) {
+        return;
+    }
+
     // Emphasize with bright blue
     lv_obj_set_style_text_color(s_volume_label_large, lv_color_hex(0x7bb9e8), 0);
 
@@ -2471,17 +2500,20 @@ void ui_show_volume_change(float vol, float vol_step) {
 
     // Loud-volume warning color - see volume_hot_color_for_db(). Set before
     // emphasize_volume_label() below so the "just changed" blue flash still
-    // wins temporarily; the flash's own reset timer settles back to this
-    // color via s_volume_label_resting_db rather than always white.
+    // wins temporarily on the Music-screen label (unless already in
+    // warning territory - see that function); the flash's own reset timer
+    // settles back to this color via s_volume_label_resting_db rather than
+    // always white. The TV/Vinyl hero label has no flash to protect, so it
+    // goes straight to whichever color is current.
     s_volume_label_resting_db = derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max);
+    lv_color_t volume_color = volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa));
     if (s_volume_label_large) {
-        lv_obj_set_style_text_color(
-            s_volume_label_large,
-            volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa)), 0);
+        lv_obj_set_style_text_color(s_volume_label_large, volume_color, 0);
         set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
         emphasize_volume_label();
     }
     if (s_tv_vinyl_volume_label) {
+        lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
         lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
     }
 
