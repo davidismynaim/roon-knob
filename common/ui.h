@@ -23,6 +23,17 @@ void ui_zone_picker_scroll(int delta);
 bool ui_zone_picker_is_current_selection(void);  // Returns true if selected zone == current zone
 void ui_set_artwork(const char *image_key);  // Set album artwork (placeholder for now)
 void ui_set_album(const char *album);  // Album name (line3) - previously received and discarded
+
+// Detail screen enrichment - each independent of the others, and of
+// title/artist/album/progress above them: absent/NULL/empty hides just
+// that field's row rather than blocking or blanking anything else. No
+// live source populates these yet (Roon's own API has none of this - no
+// year, no next-track-when-radio, no bit-depth/sample-rate field -
+// confirmed against its actual Transport/Browse API source) - this is the
+// display layer built ahead of whatever eventually calls them.
+void ui_set_album_year(int year);  // 0 = unknown/absent; combined into the album row as "Album (Year)"
+void ui_set_bit_info(const char *text);  // e.g. "16-bit / 44.1kHz"; NULL/empty hides the row
+void ui_set_next_track(const char *title, const char *artist);  // NULL/empty title hides "Coming up..." and both rows below it
 void ui_show_volume_change(float vol, float vol_step);  // Show volume overlay when adjusting
 void ui_test_pattern(void);  // Debug: Show RGB test pattern to verify color format
 
