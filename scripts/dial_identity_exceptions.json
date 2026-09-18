@@ -87,6 +87,19 @@
       "line_regex": "docs/images/roon-knob-photo\\.jpg"
     },
     {
+      "id": "hybrid-ui-design-doc-issue-links",
+      "category": "historical-provenance",
+      "owner": "#1 and #2",
+      "retirement": "Permanent: these issues were filed under the repository's pre-rename name; the links must stay accurate to history.",
+      "path_globs": [
+        "docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md"
+      ],
+      "tokens": [
+        "roon-knob"
+      ],
+      "line_regex": "\\*\\*Issue:\\*\\*.*roon-knob/issues"
+    },
+    {
       "id": "legacy-firmware-aliases",
       "category": "compatibility",
       "owner": "#162 and open-horizon-labs/unified-hifi-control#277",
