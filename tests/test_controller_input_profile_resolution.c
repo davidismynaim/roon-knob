@@ -29,7 +29,10 @@ static void test_actual_dial_profile_resolution(void) {
         &event, CONTROLLER_INTERACTION_CONTEXT_MEDIA, &action));
     assert(action.kind == CONTROLLER_ACTION_COMMAND);
     assert(action.value.command.kind == CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS);
-    assert(action.value.command.volume_steps == -3);
+    // Straight pass-through, uncapped - see resolve_volume_ticks()'s own
+    // comment for why the old bucketed {1,3,5} magnitude scheme was
+    // dropped rather than kept behind a flag.
+    assert(action.value.command.volume_steps == -2);
 
     event.value = 9;
     assert(controller_input_resolve_physical(
