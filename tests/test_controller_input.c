@@ -226,7 +226,10 @@ static controller_physical_event_t frame_long_press(uint16_t control_id) {
 static void test_dial_rotation_resolution(void) {
     const int32_t ticks[] =
         {0, 1, -1, 2, -2, 3, -3, 99, -99, INT_MIN};
-    const int32_t expected[] = {1, -1, 3, -3, 5, -5, 5, -5, -5};
+    // Straight pass-through, uncapped - see resolve_volume_ticks()'s own
+    // comment for why the old bucketed {1,3,5} magnitude scheme was
+    // dropped rather than kept behind a flag.
+    const int32_t expected[] = {1, -1, 2, -2, 3, -3, 99, -99, INT_MIN};
     size_t expected_index = 0;
 
     for (size_t i = 0; i < sizeof(ticks) / sizeof(ticks[0]); ++i) {
@@ -263,7 +266,7 @@ static void test_dial_rotation_resolution(void) {
         &positive, CONTROLLER_INTERACTION_CONTEXT_SETTINGS_RECOVERY,
         &settings_action));
     assert_command(&settings_action, CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS,
-                   5);
+                   99);
 }
 
 static void test_frame_locked_defaults_and_unused_pwr(void) {
@@ -450,7 +453,7 @@ static void test_fail_closed_values_and_copied_context(void) {
     assert(controller_input_set_context(
         CONTROLLER_INTERACTION_CONTEXT_ZONE_PICKER));
     assert(controller_input_resolve_physical(&copied, snapshot, &action));
-    assert_command(&action, CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS, 3);
+    assert_command(&action, CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS, 2);
 }
 
 static void test_dispatch_and_queue_contract(void) {
@@ -460,7 +463,7 @@ static void test_dispatch_and_queue_contract(void) {
     controller_physical_event_t event = dial_rotation(-2);
     assert(controller_input_dispatch_physical(&event));
     assert(s_action_count == 1);
-    assert_command(&s_actions[0], CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS, -3);
+    assert_command(&s_actions[0], CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS, -2);
 
     assert(controller_input_dispatch_control(
         CONTROLLER_CONTROL_INTENT_ACTIVATE));
