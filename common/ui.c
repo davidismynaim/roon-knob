@@ -1367,6 +1367,10 @@ static void build_layout(void) {
 #define DETAIL_TEXT_MIN_WIDTH 60
 #define DETAIL_TEXT_RADIUS \
     (PROGRESS_ARC_SIZE_SEEK / 2 - PROGRESS_ARC_WIDTH_SEEK - DETAIL_TEXT_MARGIN)
+// The "Coming up" title/artist rows ignore the progress arc and use the
+// physical panel edge instead (owner direction: the arc may be overdrawn
+// there, they just must not clip on the glass).
+#define DETAIL_TEXT_RADIUS_FULL (SCREEN_SIZE / 2 - 4)
 
 static int32_t detail_isqrt(int32_t v) {
     int32_t r = 0;
@@ -1380,18 +1384,21 @@ static int32_t detail_isqrt(int32_t v) {
 // of the usable circle at whichever of the row's top/bottom edges is farthest
 // from the panel's centre (the narrowest point the row's ink can reach).
 // Rows below centre are limited by their bottom edge, rows above by their top.
-static int32_t detail_row_width(int32_t row_top, int32_t row_height) {
+static int32_t detail_row_width_r(int32_t row_top, int32_t row_height, int32_t r) {
     const int32_t centre = SCREEN_SIZE / 2;
     int32_t dy_top = row_top - centre;
     int32_t dy_bottom = row_top + row_height - centre;
     if (dy_top < 0) dy_top = -dy_top;
     if (dy_bottom < 0) dy_bottom = -dy_bottom;
     int32_t dy = dy_top > dy_bottom ? dy_top : dy_bottom;
-    int32_t r = DETAIL_TEXT_RADIUS;
     int32_t width = dy >= r ? 0 : 2 * detail_isqrt(r * r - dy * dy);
     if (width > DETAIL_TEXT_MAX_WIDTH) width = DETAIL_TEXT_MAX_WIDTH;
     if (width < DETAIL_TEXT_MIN_WIDTH) width = DETAIL_TEXT_MIN_WIDTH;
     return width;
+}
+
+static int32_t detail_row_width(int32_t row_top, int32_t row_height) {
+    return detail_row_width_r(row_top, row_height, DETAIL_TEXT_RADIUS);
 }
 
 // Detail info screen (see ui_set_detail_mode) - thumbnail in the top third,
@@ -1546,7 +1553,8 @@ static void build_detail_overlay(void) {
     // it sits to the bottom of the round panel, so the marquee's clip
     // region stays inside the circle rather than the arc.
     s_detail_next_title_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_next_title_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    lv_obj_set_width(s_detail_next_title_label, detail_row_width_r(row_y, lv_font_get_line_height(font_small()),
+                                                      DETAIL_TEXT_RADIUS_FULL));
     row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_next_title_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_next_title_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -1557,7 +1565,8 @@ static void build_detail_overlay(void) {
     lv_obj_add_flag(s_detail_next_title_label, LV_OBJ_FLAG_HIDDEN);
 
     s_detail_next_artist_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_next_artist_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    lv_obj_set_width(s_detail_next_artist_label, detail_row_width_r(row_y, lv_font_get_line_height(font_small()),
+                                                      DETAIL_TEXT_RADIUS_FULL));
     row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_next_artist_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_next_artist_label, LV_TEXT_ALIGN_CENTER, 0);
