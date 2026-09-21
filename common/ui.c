@@ -1362,8 +1362,8 @@ static void build_layout(void) {
 // is the arc's inner radius less DETAIL_TEXT_MARGIN.
 #define DETAIL_TEXT_TOP 108          // 3px below the thumbnail (ends y=105)
 #define DETAIL_TEXT_PAD_ROW 1
-#define DETAIL_TEXT_MAX_WIDTH (SCREEN_SIZE - 80)
-#define DETAIL_TEXT_MARGIN 6
+#define DETAIL_TEXT_MAX_WIDTH (SCREEN_SIZE - 20)  // chord width governs; this only bounds it
+#define DETAIL_TEXT_MARGIN 2
 #define DETAIL_TEXT_MIN_WIDTH 60
 #define DETAIL_TEXT_RADIUS \
     (PROGRESS_ARC_SIZE_SEEK / 2 - PROGRESS_ARC_WIDTH_SEEK - DETAIL_TEXT_MARGIN)
