@@ -2688,6 +2688,12 @@ void ui_set_next_track(const char *title, const char *artist) {
     if (title && title[0] != '\0') {
         strncpy(s_pending.next_line1, title, sizeof(s_pending.next_line1) - 1);
         s_pending.next_line1[sizeof(s_pending.next_line1) - 1] = '\0';
+        // Same streaming-service noise cleanup the current title (ui_set_track)
+        // and album (ui_set_album) already get - without it "Coming up" could
+        // still show "(Remastered 2011)" beside an already-cleaned Now Playing.
+        // If the filter strips the whole title, next_line1 ends up empty and
+        // the group hides, which is the existing "no next track" behavior.
+        track_title_filter_apply(s_pending.next_line1, sizeof(s_pending.next_line1));
         if (artist) {
             strncpy(s_pending.next_line2, artist, sizeof(s_pending.next_line2) - 1);
             s_pending.next_line2[sizeof(s_pending.next_line2) - 1] = '\0';
