@@ -138,6 +138,13 @@ static os_mutex_t s_state_lock = OS_MUTEX_INITIALIZER;
 static atomic_bool s_running = ATOMIC_VAR_INIT(false);
 static atomic_uint s_worker_start_attempts = ATOMIC_VAR_INIT(0);
 static bool s_trigger_poll;
+// Extra quick polls still owed after a track/transport command. Without
+// them the dial waits out the whole regular interval (2s charging, 5s on
+// battery) before it even asks what changed, then may get the pre-change
+// answer once more. See bridge_client_execute_command().
+static atomic_int s_command_followup_polls = ATOMIC_VAR_INIT(0);
+#define COMMAND_FOLLOWUP_FIRST_MS 800
+#define COMMAND_FOLLOWUP_SECOND_MS 1500
 static bool s_last_net_ok;
 static atomic_bool s_network_ready = ATOMIC_VAR_INIT(false);
 static device_state_t s_device_state = DEVICE_STATE_BOOT;  // Initial state
@@ -596,6 +603,17 @@ static void wait_for_poll_interval(void) {
         delay_ms = POLL_DELAY_AWAKE_CHARGING_MS;  // Fast polling when plugged in
     } else {
         delay_ms = POLL_DELAY_AWAKE_BATTERY_MS;   // Slower on battery to save power
+    }
+    // Recently sent a track/transport command: poll again quickly, twice,
+    // so the new track shows as soon as UHC has it (only ever shortens).
+    int followups = atomic_load_explicit(&s_command_followup_polls,
+                                         memory_order_acquire);
+    if (followups > 0 && s_bridge_fail_count < BRIDGE_FAIL_THRESHOLD &&
+        delay_ms > COMMAND_FOLLOWUP_SECOND_MS) {
+        atomic_fetch_sub_explicit(&s_command_followup_polls, 1,
+                                  memory_order_acq_rel);
+        delay_ms = followups >= 2 ? COMMAND_FOLLOWUP_FIRST_MS
+                                  : COMMAND_FOLLOWUP_SECOND_MS;
     }
     uint64_t start = platform_millis();
     while (atomic_load_explicit(&s_running, memory_order_acquire)) {
@@ -1281,6 +1299,16 @@ bool bridge_client_execute_command(const controller_command_t *command) {
     }
 
     bool sent = send_control_json(plan.json);
+    if (sent && (command->kind == CONTROLLER_COMMAND_NEXT_TRACK ||
+                 command->kind == CONTROLLER_COMMAND_PREVIOUS_TRACK ||
+                 command->kind == CONTROLLER_COMMAND_TOGGLE_PLAYBACK)) {
+        // Ask again now rather than at the next regular tick, then twice
+        // more shortly after. Not for volume (optimistic UI already) or
+        // seek (has its own resync grace window in the UI).
+        atomic_store_explicit(&s_command_followup_polls, 2,
+                              memory_order_release);
+        s_trigger_poll = true;
+    }
     if (!sent &&
         plan.failure_feedback > BRIDGE_COMMAND_FEEDBACK_NONE &&
         plan.failure_feedback <= BRIDGE_COMMAND_FEEDBACK_SEEK_FAILED) {
