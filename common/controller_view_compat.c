@@ -66,7 +66,8 @@ void controller_view_compat_apply_media_enrichment(
         view->next_track_title,
         view->next_track_artist,
         view->album_year,
-        view->bit_info);
+        view->bit_info,
+        view->next_track_none);
 }
 
 void controller_view_compat_apply_connectivity(

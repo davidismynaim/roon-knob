@@ -33,6 +33,7 @@ void ui_set_album(const char *album);  // Album name (line3) - previously receiv
 // display layer built ahead of whatever eventually calls them.
 void ui_set_album_year(int year);  // 0 = unknown/absent; combined into the album row as "Album (Year)"
 void ui_set_bit_info(const char *text);  // e.g. "16-bit / 44.1kHz"; NULL/empty hides the row
+void ui_set_next_track_none(bool none);  // true = positively known nothing is next: shows "Coming up... Nothing" when no title is set; false = unknown (hides the group)
 void ui_set_next_track(const char *title, const char *artist);  // NULL/empty title hides "Coming up..." and both rows below it
 void ui_show_volume_change(float vol, float vol_step);  // Show volume overlay when adjusting
 void ui_test_pattern(void);  // Debug: Show RGB test pattern to verify color format

@@ -58,6 +58,7 @@ typedef struct {
     char next_track_artist[CONTROLLER_ENRICHMENT_TEXT_CAPACITY];
     int32_t album_year;
     char bit_info[CONTROLLER_ENRICHMENT_BIT_INFO_CAPACITY];
+    bool next_track_none;  /* true = positively known nothing is next; false = unknown */
 } controller_media_enrichment_view_t;
 
 void controller_media_view_init(
@@ -85,7 +86,8 @@ void controller_media_enrichment_view_init(
     const char *next_track_title,
     const char *next_track_artist,
     int32_t album_year,
-    const char *bit_info);
+    const char *bit_info,
+    bool next_track_none);
 
 #if defined(__cplusplus)
 static_assert(sizeof(controller_media_view_t) <= 576,

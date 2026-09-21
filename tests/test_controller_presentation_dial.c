@@ -44,6 +44,7 @@ static const char *s_next_track_title;
 static const char *s_next_track_artist;
 static int s_album_year;
 static const char *s_bit_info;
+static bool s_next_track_none;
 
 void ui_init(void) {}
 void ui_loop_iter(void) {}
@@ -95,6 +96,9 @@ void ui_seek_adjust(int32_t ticks) {
 void ui_set_next_track(const char *title, const char *artist) {
     s_next_track_title = title;
     s_next_track_artist = artist;
+}
+void ui_set_next_track_none(bool none) {
+    s_next_track_none = none;
 }
 void ui_set_album_year(int year) {
     s_album_year = year;
@@ -216,7 +220,7 @@ int main(void) {
     controller_presentation_show_settings();
     controller_presentation_set_volume_range(42.0f, 2.0f, 98.0f, 0.5f);
     controller_presentation_seek_adjust(7);
-    controller_presentation_set_media_enrichment("next title", "next artist", 1974, "16-bit / 44.1kHz");
+    controller_presentation_set_media_enrichment("next title", "next artist", 1974, "16-bit / 44.1kHz", true);
 
     assert(s_update_calls == 1);
     assert(strcmp(s_line1, "track") == 0);
@@ -249,6 +253,7 @@ int main(void) {
     assert(strcmp(s_next_track_artist, "next artist") == 0);
     assert(s_album_year == 1974);
     assert(strcmp(s_bit_info, "16-bit / 44.1kHz") == 0);
+    assert(s_next_track_none);
 
     controller_presentation_update(NULL, NULL, NULL, false, -1.0f, -2.0f,
                                    -3.0f, -4.0f, -5, -6);

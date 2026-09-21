@@ -69,7 +69,8 @@ void controller_media_enrichment_view_init(
     const char *next_track_title,
     const char *next_track_artist,
     int32_t album_year,
-    const char *bit_info) {
+    const char *bit_info,
+    bool next_track_none) {
     if (!view) {
         return;
     }
@@ -78,4 +79,5 @@ void controller_media_enrichment_view_init(
     copy_bounded(view->next_track_artist, sizeof(view->next_track_artist), next_track_artist);
     view->album_year = album_year;
     copy_bounded(view->bit_info, sizeof(view->bit_info), bit_info);
+    view->next_track_none = next_track_none;
 }

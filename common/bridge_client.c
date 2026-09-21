@@ -109,6 +109,7 @@ struct now_playing_state {
     char next_track_artist[128];
     int album_year;      // 0 = unknown/absent
     char bit_info[64];   // e.g. "16-bit / 44.1kHz"; empty = absent
+    bool next_track_none; // "next_track_none":true - UHC positively knows nothing is next
 };
 
 // Device operational state for safe volume control
@@ -464,7 +465,7 @@ static void post_ui_media_enrichment(const struct now_playing_state *state) {
     }
     controller_media_enrichment_view_init(
         view, state->next_track_title, state->next_track_artist,
-        state->album_year, state->bit_info);
+        state->album_year, state->bit_info, state->next_track_none);
     if (!platform_task_post_to_ui(ui_media_enrichment_cb, view)) {
         free(view);
     }
@@ -529,6 +530,7 @@ static void default_now_playing(struct now_playing_state *state) {
     state->next_track_artist[0] = '\0';
     state->album_year = 0;
     state->bit_info[0] = '\0';
+    state->next_track_none = false;
 }
 
 static void post_ui_update(const struct now_playing_state *state) {
@@ -893,6 +895,9 @@ static bool fetch_now_playing(struct now_playing_state *state) {
     } else {
         state->bit_info[0] = '\0';
     }
+
+    // Only ever true, only with positive evidence from UHC; absent = unknown.
+    state->next_track_none = strstr(resp, "\"next_track_none\":true") != NULL;
 
     // Note: Don't parse zones from now_playing response - it doesn't have zone_name
     // Zones are parsed from /zones endpoint in refresh_zone_label()

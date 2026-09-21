@@ -53,11 +53,13 @@ void controller_presentation_seek_adjust(int32_t ticks);
  * extra params on it - see controller_media_enrichment_view_t's own comment
  * for why this is a distinct patch. Each field is independently absent-able:
  * empty next_track_title means no next track (next_track_artist is ignored
- * in that case), album_year 0 means unknown, empty bit_info means absent. A
- * no-op on targets with no detail screen. */
+ * in that case), album_year 0 means unknown, empty bit_info means absent, and
+ * next_track_none true means positively known nothing is next (only honored
+ * when next_track_title is empty; false = unknown). A no-op on targets with no detail screen. */
 void controller_presentation_set_media_enrichment(
     const char *next_track_title, const char *next_track_artist,
-    int32_t album_year, const char *bit_info);
+    int32_t album_year, const char *bit_info,
+    bool next_track_none);
 
 #ifdef __cplusplus
 }

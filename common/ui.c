@@ -73,6 +73,7 @@ struct ui_state {
     char bit_info[64];    // e.g. "16-bit / 44.1kHz"; empty = absent
     char next_line1[128]; // Next track title (radio "up next"); empty = absent
     char next_line2[128]; // Next track artist
+    bool next_track_none; // Positively known: nothing is coming next (shows "Nothing"); false = unknown
 };
 
 // UI widgets - Blue Knob inspired design
@@ -268,6 +269,7 @@ static struct ui_state s_pending = {
     .bit_info = "",
     .next_line1 = "",
     .next_line2 = "",
+    .next_track_none = false,
 };
 static bool s_dirty = true;
 static char s_pending_message[128] = "";
@@ -1823,17 +1825,24 @@ static void apply_state(const struct ui_state *state) {
             lv_obj_add_flag(s_detail_bitinfo_label, LV_OBJ_FLAG_HIDDEN);
         }
     }
+    // Three states: a known next track, a positively-known "Nothing"
+    // (next_track_none - UHC only sends it with positive evidence, never
+    // for merely-unknown), or unknown, which hides the whole group. A
+    // title always wins over the none flag.
     bool has_next_track = state->next_line1[0] != '\0';
+    bool show_next_none = !has_next_track && state->next_track_none;
+    bool show_next_group = has_next_track || show_next_none;
     if (s_detail_next_label) {
-        if (has_next_track) {
+        if (show_next_group) {
             lv_obj_remove_flag(s_detail_next_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_detail_next_label, LV_OBJ_FLAG_HIDDEN);
         }
     }
     if (s_detail_next_title_label) {
-        lv_label_set_text(s_detail_next_title_label, has_next_track ? state->next_line1 : "");
-        if (has_next_track) {
+        lv_label_set_text(s_detail_next_title_label,
+                          has_next_track ? state->next_line1 : (show_next_none ? "Nothing" : ""));
+        if (show_next_group) {
             lv_obj_remove_flag(s_detail_next_title_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_detail_next_title_label, LV_OBJ_FLAG_HIDDEN);
@@ -2692,6 +2701,13 @@ void ui_set_next_track(const char *title, const char *artist) {
         s_pending.next_line1[0] = '\0';
         s_pending.next_line2[0] = '\0';
     }
+    s_dirty = true;
+    os_mutex_unlock(&s_state_lock);
+}
+
+void ui_set_next_track_none(bool none) {
+    os_mutex_lock(&s_state_lock);
+    s_pending.next_track_none = none;
     s_dirty = true;
     os_mutex_unlock(&s_state_lock);
 }
