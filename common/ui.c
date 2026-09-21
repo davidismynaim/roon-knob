@@ -297,6 +297,10 @@ extern const lv_image_dsc_t vinyl_background;
 // Text fonts for music metadata
 static inline const lv_font_t *font_small(void) { return font_manager_get_small(); }
 static inline const lv_font_t *font_normal(void) { return font_manager_get_normal(); }
+// Built-in Montserrat 14 (CONFIG_LV_FONT_MONTSERRAT_14, already compiled in):
+// ASCII only, so reserve it for text we control or that is ASCII by
+// construction (bit info, "Coming up..."), never track/artist names.
+static inline const lv_font_t *font_tiny(void) { return &lv_font_montserrat_14; }
 static inline const lv_font_t *font_large(void) { return font_manager_get_large(); }
 static inline const lv_font_t *font_xlarge(void) { return font_manager_get_xlarge(); }
 static inline const lv_font_t *font_xxlarge(void) { return font_manager_get_xxlarge(); }
@@ -312,6 +316,7 @@ static inline const lv_font_t *font_large_icon(void) { return font_manager_get_l
 // PC fallback - use built-in Montserrat (has LVGL symbols)
 static inline const lv_font_t *font_small(void) { return &lv_font_montserrat_20; }
 static inline const lv_font_t *font_normal(void) { return &lv_font_montserrat_28; }
+static inline const lv_font_t *font_tiny(void) { return &lv_font_montserrat_14; }
 static inline const lv_font_t *font_large(void) { return &lv_font_montserrat_48; }
 static inline const lv_font_t *font_xlarge(void) { return &lv_font_montserrat_48; }  // PC sim has no 56px asset
 static inline const lv_font_t *font_xxlarge(void) { return &lv_font_montserrat_48; }  // PC sim has no 112px asset
@@ -1350,6 +1355,45 @@ static void build_layout(void) {
     build_playback_icon_overlay();
 }
 
+// Detail screen text geometry. The round panel is SCREEN_SIZE across, and in
+// detail mode the progress arc is PROGRESS_ARC_SIZE_SEEK wide with
+// PROGRESS_ARC_WIDTH_SEEK thick, drawn inside its own bounds. Text has to
+// stay inside the arc's inner edge plus a small margin, so the usable radius
+// is the arc's inner radius less DETAIL_TEXT_MARGIN.
+#define DETAIL_TEXT_TOP 108          // 3px below the thumbnail (ends y=105)
+#define DETAIL_TEXT_PAD_ROW 1
+#define DETAIL_TEXT_MAX_WIDTH (SCREEN_SIZE - 80)
+#define DETAIL_TEXT_MARGIN 6
+#define DETAIL_TEXT_MIN_WIDTH 60
+#define DETAIL_TEXT_RADIUS \
+    (PROGRESS_ARC_SIZE_SEEK / 2 - PROGRESS_ARC_WIDTH_SEEK - DETAIL_TEXT_MARGIN)
+
+static int32_t detail_isqrt(int32_t v) {
+    int32_t r = 0;
+    while ((r + 1) * (r + 1) <= v) {
+        r++;
+    }
+    return r;
+}
+
+// Widest a single text row may be, given where it sits vertically: the chord
+// of the usable circle at whichever of the row's top/bottom edges is farthest
+// from the panel's centre (the narrowest point the row's ink can reach).
+// Rows below centre are limited by their bottom edge, rows above by their top.
+static int32_t detail_row_width(int32_t row_top, int32_t row_height) {
+    const int32_t centre = SCREEN_SIZE / 2;
+    int32_t dy_top = row_top - centre;
+    int32_t dy_bottom = row_top + row_height - centre;
+    if (dy_top < 0) dy_top = -dy_top;
+    if (dy_bottom < 0) dy_bottom = -dy_bottom;
+    int32_t dy = dy_top > dy_bottom ? dy_top : dy_bottom;
+    int32_t r = DETAIL_TEXT_RADIUS;
+    int32_t width = dy >= r ? 0 : 2 * detail_isqrt(r * r - dy * dy);
+    if (width > DETAIL_TEXT_MAX_WIDTH) width = DETAIL_TEXT_MAX_WIDTH;
+    if (width < DETAIL_TEXT_MIN_WIDTH) width = DETAIL_TEXT_MIN_WIDTH;
+    return width;
+}
+
 // Detail info screen (see ui_set_detail_mode) - thumbnail in the top third,
 // title/artist/album/progress stacked around center, matching the same
 // "first pass, tune on hardware by eye" spirit as the rest of this layout
@@ -1408,16 +1452,17 @@ static void build_detail_overlay(void) {
     // from the thumbnail, never into it, regardless of how many lines
     // wrap on a given track.
     s_detail_text_group = lv_obj_create(s_detail_overlay);
-    lv_obj_set_size(s_detail_text_group, SCREEN_SIZE - 80, LV_SIZE_CONTENT);
+    lv_obj_set_size(s_detail_text_group, DETAIL_TEXT_MAX_WIDTH, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(s_detail_text_group, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_detail_text_group, 0, 0);
     lv_obj_set_style_pad_all(s_detail_text_group, 0, 0);
-    lv_obj_set_style_pad_row(s_detail_text_group, 4, 0);
+    lv_obj_set_style_pad_row(s_detail_text_group, DETAIL_TEXT_PAD_ROW, 0);
     lv_obj_set_layout(s_detail_text_group, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(s_detail_text_group, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_detail_text_group, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(s_detail_text_group, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_align(s_detail_text_group, LV_ALIGN_TOP_MID, 0, 115);  // 10px below the thumbnail (ends at y=105)
+    lv_obj_align(s_detail_text_group, LV_ALIGN_TOP_MID, 0, DETAIL_TEXT_TOP);
+    int32_t row_y = DETAIL_TEXT_TOP;  // running top of the next row, for detail_row_width()
 
     // LV_LABEL_LONG_SCROLL_CIRCULAR (horizontal marquee for text wider than
     // the label, matching the Music screen's own s_track_label/s_artist_label
@@ -1430,7 +1475,8 @@ static void build_detail_overlay(void) {
     // enrichment together never exceed the screen regardless of text
     // length - nothing on this screen needs to scroll vertically anymore.
     s_detail_title_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_title_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_title_label, detail_row_width(row_y, lv_font_get_line_height(font_normal())));
+    row_y += lv_font_get_line_height(font_normal()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_title_label, font_normal(), 0);
     lv_obj_set_style_text_align(s_detail_title_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_title_label, lv_color_hex(0xfafafa), 0);
@@ -1438,7 +1484,8 @@ static void build_detail_overlay(void) {
     lv_obj_set_style_anim_time(s_detail_title_label, 25000, LV_PART_MAIN);
 
     s_detail_artist_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_artist_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_artist_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_artist_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_artist_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_artist_label, lv_color_hex(0xc0c0c0), 0);
@@ -1449,7 +1496,8 @@ static void build_detail_overlay(void) {
     // the longest-running text on this row (title (year) can be long), so
     // it's the one most likely to actually need its marquee in practice.
     s_detail_album_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_album_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_album_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_album_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_album_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_album_label, lv_color_hex(0x888888), 0);
@@ -1457,7 +1505,8 @@ static void build_detail_overlay(void) {
     lv_obj_set_style_anim_time(s_detail_album_label, 25000, LV_PART_MAIN);
 
     s_detail_progress_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_progress_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_progress_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_progress_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_progress_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_progress_label, lv_color_hex(0x7bb9e8), 0);
@@ -1473,28 +1522,32 @@ static void build_detail_overlay(void) {
     // display layer built ahead of that landing, not wired to anything
     // that populates it yet - see ui_set_bit_info()/ui_set_next_track().
     s_detail_bitinfo_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_bitinfo_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_detail_bitinfo_label, font_small(), 0);
+    lv_obj_set_width(s_detail_bitinfo_label, detail_row_width(row_y, lv_font_get_line_height(font_tiny())));
+    row_y += lv_font_get_line_height(font_tiny()) + DETAIL_TEXT_PAD_ROW;
+    lv_obj_set_style_text_font(s_detail_bitinfo_label, font_tiny(), 0);
     lv_obj_set_style_text_align(s_detail_bitinfo_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_bitinfo_label, lv_color_hex(0x888888), 0);
     lv_label_set_text(s_detail_bitinfo_label, "");
     lv_obj_add_flag(s_detail_bitinfo_label, LV_OBJ_FLAG_HIDDEN);
 
     s_detail_next_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_next_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_detail_next_label, font_small(), 0);
+    lv_obj_set_width(s_detail_next_label, detail_row_width(row_y, lv_font_get_line_height(font_tiny())));
+    row_y += lv_font_get_line_height(font_tiny()) + DETAIL_TEXT_PAD_ROW;
+    lv_obj_set_style_text_font(s_detail_next_label, font_tiny(), 0);
     lv_obj_set_style_text_align(s_detail_next_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_next_label, lv_color_hex(0x888888), 0);
     lv_label_set_text(s_detail_next_label, "Coming up...");
     lv_obj_add_flag(s_detail_next_label, LV_OBJ_FLAG_HIDDEN);
 
-    // Deliberately still font_small(), same tier as the artist/album labels
-    // above - smaller than the now-playing title (font_normal) either way,
-    // which is what keeps emphasis on it. A distinct, even smaller font
-    // would need a new generated font asset (see idf_app/scripts/
-    // generate_fonts.sh) - not done here since nothing populates this yet.
+    // Next-track title/artist stay font_small() (Lato, full Unicode coverage:
+    // names like "Bjork"/"Beyonce" with accents must render) - only the
+    // ASCII-only "Coming up..." caption and bit info drop to font_tiny().
+    // Each row's width comes from detail_row_width(): narrower the closer
+    // it sits to the bottom of the round panel, so the marquee's clip
+    // region stays inside the circle rather than the arc.
     s_detail_next_title_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_next_title_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_next_title_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_next_title_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_next_title_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_next_title_label, lv_color_hex(0xc0c0c0), 0);
@@ -1504,7 +1557,8 @@ static void build_detail_overlay(void) {
     lv_obj_add_flag(s_detail_next_title_label, LV_OBJ_FLAG_HIDDEN);
 
     s_detail_next_artist_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_next_artist_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_next_artist_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_next_artist_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_next_artist_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_next_artist_label, lv_color_hex(0x888888), 0);
