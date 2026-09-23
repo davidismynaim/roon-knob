@@ -1577,6 +1577,7 @@ static void build_detail_overlay(void) {
         int32_t half_span = detail_row_width_r(progress_row_top, progress_row_height,
                                                  DETAIL_TEXT_RADIUS_FULL) / 2;
         int32_t inset = half_span - DETAIL_BADGE_MARGIN - DETAIL_BADGE_WIDTH;
+        inset -= 20;  // 2mm closer to centre (PX_PER_MM=10 elsewhere in this file) - owner hardware feedback
         if (inset < 4) inset = 4;  // defensive floor - see this screen's own "tune by eye" norm
 
         int32_t icon_h = lv_font_get_line_height(font_manager_get_lucide_battery());
@@ -1606,6 +1607,12 @@ static void build_detail_overlay(void) {
         lv_obj_set_style_text_align(s_detail_battery_pct_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(s_detail_battery_pct_label, lv_color_hex(0x888888), 0);
         lv_obj_set_width(s_detail_battery_pct_label, DETAIL_BADGE_WIDTH);
+        // Long mode defaults to WRAP; at this badge width that can wrap to a
+        // second line and grow the label taller than battery_h assumes,
+        // pushing this bottom-aligned label up into the icon above it -
+        // force single-line instead (this file always sets long_mode
+        // explicitly elsewhere; these badge labels were the exception).
+        lv_label_set_long_mode(s_detail_battery_pct_label, LV_LABEL_LONG_CLIP);
         lv_label_set_text(s_detail_battery_pct_label, "");
         lv_obj_align(s_detail_battery_pct_label, LV_ALIGN_BOTTOM_MID, 0, 0);
 
@@ -1627,6 +1634,8 @@ static void build_detail_overlay(void) {
         lv_obj_set_style_text_align(s_detail_volume_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(s_detail_volume_label, lv_color_hex(0xfafafa), 0);
         lv_obj_set_width(s_detail_volume_label, DETAIL_BADGE_WIDTH);
+        // See s_detail_battery_pct_label above - same wrap-causes-overlap fix.
+        lv_label_set_long_mode(s_detail_volume_label, LV_LABEL_LONG_CLIP);
         lv_label_set_text(s_detail_volume_label, "");
         lv_obj_align(s_detail_volume_label, LV_ALIGN_TOP_MID, 0, 0);
 
@@ -1635,6 +1644,7 @@ static void build_detail_overlay(void) {
         lv_obj_set_style_text_align(s_detail_db_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(s_detail_db_label, lv_color_hex(0x888888), 0);
         lv_obj_set_width(s_detail_db_label, DETAIL_BADGE_WIDTH);
+        lv_label_set_long_mode(s_detail_db_label, LV_LABEL_LONG_CLIP);
         lv_label_set_text(s_detail_db_label, "");
         lv_obj_align(s_detail_db_label, LV_ALIGN_BOTTOM_MID, 0, 0);
 #undef DETAIL_BADGE_WIDTH
@@ -3230,9 +3240,9 @@ void ui_set_artwork(const char *image_key) {
     // never stale even though it's usually hidden (ui_set_detail_mode).
     if (s_detail_thumbnail && s_artwork_img.dsc.header.w > 0) {
         lv_image_set_src(s_detail_thumbnail, &s_artwork_img.dsc);
-        lv_image_set_scale(s_detail_thumbnail, (100 * 256) / s_artwork_img.dsc.header.w);
-        lv_obj_set_size(s_detail_thumbnail, 100, 100);
-        lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 5);  // Moved up ~5mm (50px @ PX_PER_MM=10) per owner feedback on hardware
+        lv_image_set_scale(s_detail_thumbnail, (DETAIL_ARTWORK_SIZE * 256) / s_artwork_img.dsc.header.w);
+        lv_obj_set_size(s_detail_thumbnail, DETAIL_ARTWORK_SIZE, DETAIL_ARTWORK_SIZE);
+        lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, DETAIL_ARTWORK_TOP_Y);
         // Nested inside s_detail_overlay, whose own HIDDEN flag already
         // governs whether any of this actually renders - clearing this
         // one unconditionally (like s_artwork_image does) is harmless
