@@ -75,7 +75,7 @@ static int64_t s_encoder_suppress_until_ms = 0;  // Suppress encoder after deep 
 #define DEEP_SLEEP_CRUMB_MAGIC 0xD5EE9C0Du
 static RTC_NOINIT_ATTR uint32_t s_crumb_magic;
 static RTC_NOINIT_ATTR uint32_t s_crumb_step;
-static char s_boot_reason[112] = "unknown";
+static char s_boot_reason[160] = "unknown";
 static void crumb(uint32_t step) {
     s_crumb_magic = DEEP_SLEEP_CRUMB_MAGIC;
     s_crumb_step = step;
@@ -496,6 +496,13 @@ static void enter_deep_sleep_body(void) {
     // Encoder pins are pulled HIGH, going LOW on rotation
     uint64_t wake_gpio_mask = (1ULL << ENCODER_GPIO_A) | (1ULL << ENCODER_GPIO_B);
 
+    // Auto light sleep (CPU frequency scaling) arms a timer wake for its next
+    // scheduled tick and leaves that trigger set; esp_deep_sleep_start() then
+    // honours it, so the chip woke ~1s after "sleeping" (wake cause 4 =
+    // TIMER, seen on serial) and rebooted to the WiFi-connect screen. Clear
+    // every leftover source so the encoder pins are the only way to wake.
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+
     err = esp_sleep_enable_ext1_wakeup(wake_gpio_mask, ESP_EXT1_WAKEUP_ANY_LOW);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to configure wake sources: %s", esp_err_to_name(err));
@@ -612,7 +619,9 @@ void display_sleep_init(esp_lcd_panel_handle_t panel_handle, TaskHandle_t lvgl_t
                      (unsigned long long)esp_sleep_get_ext1_wakeup_status());
         } else {
             snprintf(s_boot_reason, sizeof(s_boot_reason),
-                     "%s (deep-sleep entry reached step %lu of 4)", rr_name,
+                     "%s, wake cause %d, ext1 mask 0x%llx (deep-sleep entry reached step %lu of 4)",
+                     rr_name, (int)wakeup_cause,
+                     (unsigned long long)esp_sleep_get_ext1_wakeup_status(),
                      (unsigned long)step);
         }
         s_crumb_magic = 0;
