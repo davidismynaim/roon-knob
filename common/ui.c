@@ -153,6 +153,7 @@ static lv_obj_t *s_seek_delta_arc;
 static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - primary display
 static lv_obj_t *s_volume_label_halo[8]; // 8-directional legibility halo behind s_volume_label_large
 static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old position
+static lv_obj_t *s_volume_db_label_halo[8]; // Same halo technique as s_volume_label_halo, 1px offset
 static lv_timer_t *s_volume_emphasis_timer;  // Timer to reset volume emphasis after adjustment
 static lv_obj_t *s_status_dot;         // Online/offline indicator
 static lv_obj_t *s_battery_icon;       // Battery icon (Material Symbols)
@@ -204,7 +205,8 @@ static bool s_mute_overlay_visible = false;  // Avoid redundant show/hide calls 
 // earlier this project.
 static lv_obj_t *s_detail_overlay;
 static lv_obj_t *s_detail_text_group;  // Flex column: stacks title/artist/album/progress without overlap
-static lv_obj_t *s_detail_thumbnail;   // Small square album art (shares s_artwork_img's pixel data)
+static lv_obj_t *s_detail_thumbnail_mask;  // Circular clip container - see s_detail_thumbnail comment below
+static lv_obj_t *s_detail_thumbnail;   // Album art (shares s_artwork_img's pixel data), child of the mask above
 static lv_obj_t *s_detail_title_label;
 static lv_obj_t *s_detail_artist_label;
 static lv_obj_t *s_detail_album_label;
@@ -225,6 +227,14 @@ static lv_obj_t *s_detail_bitinfo_label;     // e.g. "16-bit / 44.1kHz"
 static lv_obj_t *s_detail_next_label;        // "Coming up..." - hidden together with the two below
 static lv_obj_t *s_detail_next_title_label;
 static lv_obj_t *s_detail_next_artist_label;
+// Battery (right of the text block) and volume (left), both at the
+// progress row's height - see build_detail_overlay(). No dark tint behind
+// the icon like s_battery_badge has on Music: this screen's background is
+// already plain black, so the tint would add nothing (owner direction).
+static lv_obj_t *s_detail_battery_icon;
+static lv_obj_t *s_detail_battery_pct_label;  // "72%" beneath the icon
+static lv_obj_t *s_detail_volume_label;       // Numeric volume (format_volume_text)
+static lv_obj_t *s_detail_db_label;           // dB-equivalent (derive_volume_db_equivalent)
 
 // Large semi-transparent play/pause confirmation icon - shown briefly
 // (ui_show_playback_feedback) whenever playback is toggled, whether from
@@ -491,16 +501,23 @@ static lv_obj_t *create_number_label(lv_obj_t *parent, const lv_font_t *font,
 // read as a big rectangle, not a shadow either. Surrounding the glyphs
 // symmetrically on all sides, instead of to one side or as a filled box,
 // is what actually reads as a halo.
-#define VOLUME_HALO_OFFSET_PX 2
-static const int32_t VOLUME_HALO_OFFSETS[8][2] = {
-    {-VOLUME_HALO_OFFSET_PX, 0}, {VOLUME_HALO_OFFSET_PX, 0},
-    {0, -VOLUME_HALO_OFFSET_PX}, {0, VOLUME_HALO_OFFSET_PX},
-    {-VOLUME_HALO_OFFSET_PX, -VOLUME_HALO_OFFSET_PX}, {VOLUME_HALO_OFFSET_PX, -VOLUME_HALO_OFFSET_PX},
-    {-VOLUME_HALO_OFFSET_PX, VOLUME_HALO_OFFSET_PX}, {VOLUME_HALO_OFFSET_PX, VOLUME_HALO_OFFSET_PX},
+//
+// Offset is a parameter (rather than a fixed macro) so the same technique
+// can give the big volume number its established 2px halo and the smaller
+// dB label under it a finer 1px halo - a 2px halo on 22px text read too
+// thick (owner feedback), same fix applied to s_volume_db_label after it
+// was found washing out on pale album art the same way the volume number
+// used to.
+static const int32_t VOLUME_HALO_UNIT_OFFSETS[8][2] = {
+    {-1, 0}, {1, 0},
+    {0, -1}, {0, 1},
+    {-1, -1}, {1, -1},
+    {-1, 1}, {1, 1},
 };
 
 static lv_obj_t *create_haloed_number_label(lv_obj_t *parent, const lv_font_t *font,
                                              lv_color_t color, int32_t top_y,
+                                             int32_t halo_offset_px,
                                              lv_obj_t *out_halo[8]) {
     for (int i = 0; i < 8; i++) {
         lv_obj_t *halo = lv_label_create(parent);
@@ -508,7 +525,9 @@ static lv_obj_t *create_haloed_number_label(lv_obj_t *parent, const lv_font_t *f
         lv_obj_set_style_text_color(halo, lv_color_hex(0x000000), 0);
         lv_obj_set_style_text_opa(halo, LV_OPA_60, 0);
         lv_label_set_text(halo, "--");
-        lv_obj_align(halo, LV_ALIGN_TOP_MID, VOLUME_HALO_OFFSETS[i][0], top_y + VOLUME_HALO_OFFSETS[i][1]);
+        lv_obj_align(halo, LV_ALIGN_TOP_MID,
+                     VOLUME_HALO_UNIT_OFFSETS[i][0] * halo_offset_px,
+                     top_y + VOLUME_HALO_UNIT_OFFSETS[i][1] * halo_offset_px);
         out_halo[i] = halo;
     }
 
@@ -1121,16 +1140,25 @@ static void build_layout(void) {
         const int32_t top_y = transport_top_y - gap_px - visual_height + overlap_fix_px;
         s_volume_label_large = create_haloed_number_label(s_ui_container, font_xlarge(),
                                                             lv_color_hex(0xfafafa), top_y,
-                                                            s_volume_label_halo);
+                                                            2, s_volume_label_halo);
     }
 
     // dB-equivalent readout, at the volume number's old position minus a
     // 1.5mm (15px) upward nudge - owner feedback that it was overlapping
     // the (now bigger) volume number below it - in the smaller of the two
     // text fonts this file already uses (font_small(), 22px vs. the
-    // volume number's 56px) so it still reads as secondary.
-    s_volume_db_label = create_number_label(s_ui_container, font_small(),
-                                             lv_color_hex(0xcccccc), 55 - (PX_PER_MM + PX_PER_MM / 2));
+    // volume number's 56px) so it still reads as secondary in size, though
+    // not in color/legibility treatment - see VOLUME_HALO_UNIT_OFFSETS
+    // above: same halo as the volume number (1px rather than 2px, this
+    // text being smaller), same dynamic warning color, both applied at
+    // this label's two update sites (polled-state and live-adjustment)
+    // right alongside s_volume_label_large's own - owner feedback that it
+    // was washing out on pale album art the same way the volume number
+    // used to before it got a halo.
+    s_volume_db_label = create_haloed_number_label(s_ui_container, font_small(),
+                                                     lv_color_hex(0xfafafa),
+                                                     55 - (PX_PER_MM + PX_PER_MM / 2),
+                                                     1, s_volume_db_label_halo);
 #undef PX_PER_MM
 
     // Controls row - middle third, transport buttons (touch remains
@@ -1364,12 +1392,22 @@ static void build_layout(void) {
     build_playback_icon_overlay();
 }
 
+// Detail screen artwork: a circle rather than the old square, per owner
+// request. Top edge at y=0 - the topmost pixel the round display has at its
+// horizontal center (a circle inscribed in a SCREEN_SIZE square touches
+// row 0 only exactly at the center column) - so it starts as high as the
+// glass allows. Bottom edge 5px past the old square's own bottom (100+5=105,
+// then +5=110), so the circle is a little bigger than the square was
+// overall, at the cost of the square's corners (now outside the circle).
+#define DETAIL_ARTWORK_TOP_Y 0
+#define DETAIL_ARTWORK_SIZE 110  // old square was 100; bottom edge = 0 + 110 = 105(old bottom) + 5
+
 // Detail screen text geometry. The round panel is SCREEN_SIZE across, and in
 // detail mode the progress arc is PROGRESS_ARC_SIZE_SEEK wide with
 // PROGRESS_ARC_WIDTH_SEEK thick, drawn inside its own bounds. Text has to
 // stay inside the arc's inner edge plus a small margin, so the usable radius
 // is the arc's inner radius less DETAIL_TEXT_MARGIN.
-#define DETAIL_TEXT_TOP 108          // 3px below the thumbnail (ends y=105)
+#define DETAIL_TEXT_TOP 113  // 3px below the (now circular, larger) thumbnail - ends y=110
 #define DETAIL_TEXT_PAD_ROW 1
 #define DETAIL_TEXT_MAX_WIDTH (SCREEN_SIZE - 20)  // chord width governs; this only bounds it
 #define DETAIL_TEXT_MARGIN 2
@@ -1378,7 +1416,8 @@ static void build_layout(void) {
     (PROGRESS_ARC_SIZE_SEEK / 2 - PROGRESS_ARC_WIDTH_SEEK - DETAIL_TEXT_MARGIN)
 // The "Coming up" title/artist rows ignore the progress arc and use the
 // physical panel edge instead (owner direction: the arc may be overdrawn
-// there, they just must not clip on the glass).
+// there, they just must not clip on the glass). The battery/volume badges
+// (see build_detail_overlay) use this same radius for the same reason.
 #define DETAIL_TEXT_RADIUS_FULL (SCREEN_SIZE / 2 - 4)
 
 static int32_t detail_isqrt(int32_t v) {
@@ -1448,11 +1487,32 @@ static void build_detail_overlay(void) {
     lv_obj_remove_flag(s_detail_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
     // Thumbnail - shares s_artwork_img's pixel buffer via lv_image_set_src,
-    // scaled down (see ui_set_artwork()); not its own decode/copy.
-    s_detail_thumbnail = lv_img_create(s_detail_overlay);
-    lv_obj_set_size(s_detail_thumbnail, 100, 100);
-    lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 5);  // Moved up ~5mm (50px @ PX_PER_MM=10) per owner feedback on hardware
-    lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
+    // scaled down (see ui_set_artwork()); not its own decode/copy. Circular
+    // rather than the old square - see DETAIL_ARTWORK_TOP_Y/SIZE above for
+    // the geometry reasoning.
+    //
+    // Radius+clip_corner set directly on an lv_img/lv_image object does NOT
+    // clip that widget's own image content on real hardware (confirmed:
+    // stayed square even with correct size/position and DRAW_SW_COMPLEX
+    // enabled) - clip_corner reliably clips CHILDREN of a plain container,
+    // not necessarily a specialized widget's own main draw. So the circle
+    // is a separate mask container, and the image is its child, filling it
+    // completely - the well-supported "circular avatar" pattern.
+    s_detail_thumbnail_mask = lv_obj_create(s_detail_overlay);
+    lv_obj_set_size(s_detail_thumbnail_mask, DETAIL_ARTWORK_SIZE, DETAIL_ARTWORK_SIZE);
+    lv_obj_align(s_detail_thumbnail_mask, LV_ALIGN_TOP_MID, 0, DETAIL_ARTWORK_TOP_Y);
+    lv_obj_set_style_radius(s_detail_thumbnail_mask, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_clip_corner(s_detail_thumbnail_mask, true, 0);
+    lv_obj_set_style_bg_opa(s_detail_thumbnail_mask, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_detail_thumbnail_mask, 0, 0);
+    lv_obj_set_style_pad_all(s_detail_thumbnail_mask, 0, 0);
+    lv_obj_remove_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
+
+    s_detail_thumbnail = lv_img_create(s_detail_thumbnail_mask);
+    lv_obj_set_size(s_detail_thumbnail, DETAIL_ARTWORK_SIZE, DETAIL_ARTWORK_SIZE);
+    lv_obj_set_pos(s_detail_thumbnail, 0, 0);
 
     // Title/artist/album/progress stack in a flex column rather than at
     // fixed offsets from each other - a long title or album name wraps to
@@ -1520,6 +1580,13 @@ static void build_detail_overlay(void) {
     lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_anim_time(s_detail_album_label, 25000, LV_PART_MAIN);
 
+    // Captured before s_detail_progress_label's own row_y advances below -
+    // used to place the battery/volume badges (further down) at this exact
+    // row's height, computed from the real font metrics rather than a
+    // guessed constant, same as every other row on this screen.
+    int32_t progress_row_top = row_y;
+    int32_t progress_row_height = lv_font_get_line_height(font_small());
+
     s_detail_progress_label = lv_label_create(s_detail_text_group);
     lv_obj_set_width(s_detail_progress_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
     row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
@@ -1527,6 +1594,119 @@ static void build_detail_overlay(void) {
     lv_obj_set_style_text_align(s_detail_progress_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_progress_label, lv_color_hex(0x7bb9e8), 0);
     lv_label_set_text(s_detail_progress_label, "");
+
+    // Battery (right of the text block) and volume (left), vertically
+    // centered on the progress row - the one row of this block that's
+    // always present once something is playing (bit info/next-track can
+    // both be hidden). Sit in the margin between the (narrower,
+    // arc-constrained) text column and the physical glass edge, using the
+    // same DETAIL_TEXT_RADIUS_FULL "safe to the glass" radius the Coming-up
+    // rows already use (owner direction there: the arc may be overdrawn,
+    // just don't clip on the glass). No dark tint behind the battery icon
+    // like s_battery_badge has on Music - this screen's background is
+    // already plain black, so the tint would add nothing (owner direction).
+#if !TARGET_PC
+    {
+#define DETAIL_BADGE_WIDTH 40
+#define DETAIL_BADGE_MARGIN 4
+// The volume/dB text ("-63.5 dB" etc.) needs more room than the battery
+// badge does ("100%"). Widening just the label and not its parent had no
+// effect - LVGL clips a child to its parent's own box by default, so the
+// container (volume_group) has to be this wide too, not only the label
+// inside it. Generous on purpose (was 64, still clipped "-"/"B" on
+// hardware) rather than re-guessing pixel-tight again.
+#define DETAIL_DB_LABEL_WIDTH 88
+        int32_t row_centre_y = progress_row_top + progress_row_height / 2;
+        row_centre_y += 10;  // 1mm down, away from the scrolling text above - owner hardware feedback
+        int32_t half_span = detail_row_width_r(progress_row_top, progress_row_height,
+                                                 DETAIL_TEXT_RADIUS_FULL) / 2;
+        int32_t inset = half_span - DETAIL_BADGE_MARGIN - DETAIL_BADGE_WIDTH;
+        inset -= 30;  // 3mm closer to centre (PX_PER_MM=10 elsewhere in this file) - owner hardware feedback
+        if (inset < 4) inset = 4;  // defensive floor - see this screen's own "tune by eye" norm
+        // Centre-x of the volume badge, held fixed at what the narrow
+        // DETAIL_BADGE_WIDTH box would have used, so widening it to fit the
+        // dB text grows outward from the same visual centre rather than
+        // shifting the whole thing sideways.
+        int32_t volume_centre_x = SCREEN_SIZE / 2 - inset - DETAIL_BADGE_WIDTH / 2;
+
+        int32_t icon_h = lv_font_get_line_height(font_manager_get_lucide_battery());
+        int32_t tiny_h = lv_font_get_line_height(font_tiny());
+        int32_t battery_h = icon_h + 2 + tiny_h;
+        int32_t volume_h = tiny_h + 2 + tiny_h;
+
+        lv_obj_t *battery_group = lv_obj_create(s_detail_overlay);
+        lv_obj_set_size(battery_group, DETAIL_BADGE_WIDTH, battery_h);
+        lv_obj_set_pos(battery_group, SCREEN_SIZE / 2 + inset, row_centre_y - battery_h / 2);
+        lv_obj_set_style_bg_opa(battery_group, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(battery_group, 0, 0);
+        lv_obj_set_style_pad_all(battery_group, 0, 0);
+        lv_obj_remove_flag(battery_group, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(battery_group, LV_OBJ_FLAG_SCROLLABLE);
+
+        s_detail_battery_icon = lv_label_create(battery_group);
+        lv_label_set_text(s_detail_battery_icon, ICON_BATTERY_FULL);
+        lv_obj_set_style_text_font(s_detail_battery_icon, font_manager_get_lucide_battery(), 0);
+        lv_obj_set_style_text_color(s_detail_battery_icon, lv_color_hex(0xfafafa), 0);
+        lv_obj_set_width(s_detail_battery_icon, DETAIL_BADGE_WIDTH);
+        lv_obj_set_style_text_align(s_detail_battery_icon, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_detail_battery_icon, LV_ALIGN_TOP_MID, 0, 0);
+
+        s_detail_battery_pct_label = lv_label_create(battery_group);
+        lv_obj_set_style_text_font(s_detail_battery_pct_label, font_tiny(), 0);
+        lv_obj_set_style_text_align(s_detail_battery_pct_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_detail_battery_pct_label, lv_color_hex(0x888888), 0);
+        lv_obj_set_width(s_detail_battery_pct_label, DETAIL_BADGE_WIDTH);
+        // Long mode defaults to WRAP; at this badge width that can wrap to a
+        // second line and grow the label taller than battery_h assumes,
+        // pushing this bottom-aligned label up into the icon above it -
+        // force single-line instead (this file always sets long_mode
+        // explicitly elsewhere; these badge labels were the exception).
+        lv_label_set_long_mode(s_detail_battery_pct_label, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(s_detail_battery_pct_label, "");
+        lv_obj_align(s_detail_battery_pct_label, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+        // Volume - left side, mirrored. Numeric on top (primary weight),
+        // dB below (secondary) - same relative roles format_volume_text()/
+        // derive_volume_db_equivalent() already play on the Music screen's
+        // big volume readout (dB is the smaller, dimmer of that pair too).
+        lv_obj_t *volume_group = lv_obj_create(s_detail_overlay);
+        lv_obj_set_size(volume_group, DETAIL_DB_LABEL_WIDTH, volume_h);
+        lv_obj_set_pos(volume_group, volume_centre_x - DETAIL_DB_LABEL_WIDTH / 2, row_centre_y - volume_h / 2);
+        lv_obj_set_style_bg_opa(volume_group, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(volume_group, 0, 0);
+        lv_obj_set_style_pad_all(volume_group, 0, 0);
+        lv_obj_remove_flag(volume_group, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(volume_group, LV_OBJ_FLAG_SCROLLABLE);
+
+        s_detail_volume_label = lv_label_create(volume_group);
+        lv_obj_set_style_text_font(s_detail_volume_label, font_tiny(), 0);
+        lv_obj_set_style_text_align(s_detail_volume_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_detail_volume_label, lv_color_hex(0xfafafa), 0);
+        // Wider than the notional badge column - format_volume_text() can
+        // itself emit a "-XX.X dB"-style string (Roon-relative volume
+        // scale), same width risk as s_detail_db_label below.
+        lv_obj_set_width(s_detail_volume_label, DETAIL_DB_LABEL_WIDTH);
+        // See s_detail_battery_pct_label above - same wrap-causes-overlap fix.
+        lv_label_set_long_mode(s_detail_volume_label, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(s_detail_volume_label, "");
+        lv_obj_align(s_detail_volume_label, LV_ALIGN_TOP_MID, 0, 0);
+
+        s_detail_db_label = lv_label_create(volume_group);
+        lv_obj_set_style_text_font(s_detail_db_label, font_tiny(), 0);
+        lv_obj_set_style_text_align(s_detail_db_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_detail_db_label, lv_color_hex(0x888888), 0);
+        // "-XX.X dB" clipped at the narrower DETAIL_BADGE_WIDTH lost its
+        // leading "-" and trailing "B" (centered text, box too narrow) -
+        // owner hardware feedback.
+        lv_obj_set_width(s_detail_db_label, DETAIL_DB_LABEL_WIDTH);
+        lv_label_set_long_mode(s_detail_db_label, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(s_detail_db_label, "");
+        lv_obj_align(s_detail_db_label, LV_ALIGN_BOTTOM_MID, 0, 0);
+#undef DETAIL_BADGE_WIDTH
+#undef DETAIL_BADGE_MARGIN
+#undef DETAIL_DB_LABEL_WIDTH
+    }
+#endif
 
     // Enrichment rows - bit info / "Coming up" / next track. Plain further
     // children of the same s_detail_text_group flex column above (not a
@@ -1962,6 +2142,7 @@ static void apply_state(const struct ui_state *state) {
     if (strcmp(vol_text, s_last_vol_text) != 0) {
         set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
         if (s_tv_vinyl_volume_label) lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
+        if (s_detail_volume_label) lv_label_set_text(s_detail_volume_label, vol_text);
         strncpy(s_last_vol_text, vol_text, sizeof(s_last_vol_text) - 1);
         s_last_vol_text[sizeof(s_last_vol_text) - 1] = '\0';
     }
@@ -1978,6 +2159,9 @@ static void apply_state(const struct ui_state *state) {
     if (s_volume_label_large) {
         lv_obj_set_style_text_color(s_volume_label_large, volume_color, 0);
     }
+    if (s_volume_db_label) {
+        lv_obj_set_style_text_color(s_volume_db_label, volume_color, 0);
+    }
     if (s_tv_vinyl_volume_label) {
         lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
     }
@@ -1990,8 +2174,9 @@ static void apply_state(const struct ui_state *state) {
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max));
     if (strcmp(db_text, s_last_db_text) != 0) {
-        lv_label_set_text(s_volume_db_label, db_text);
+        set_haloed_label_text(s_volume_db_label, s_volume_db_label_halo, db_text);
         if (s_tv_vinyl_db_label) lv_label_set_text(s_tv_vinyl_db_label, db_text);
+        if (s_detail_db_label) lv_label_set_text(s_detail_db_label, db_text);
         strncpy(s_last_db_text, db_text, sizeof(s_last_db_text) - 1);
         s_last_db_text[sizeof(s_last_db_text) - 1] = '\0';
     }
@@ -2315,17 +2500,24 @@ static void update_battery_display(void) {
         s_last_battery_level = level;
         s_last_battery_charging = charging;
 
-        // Update battery icon based on state (Lucide horizontal icons)
+        // Update battery icon based on state (Lucide horizontal icons) -
+        // mirrored onto the detail screen's own icon (s_detail_battery_icon),
+        // same glyph selection, if that screen's been built.
         lv_obj_clear_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
+        const char *glyph;
         if (charging) {
-            lv_label_set_text(s_battery_icon, ICON_BATTERY_CHARGING);
+            glyph = ICON_BATTERY_CHARGING;
         } else {
             switch (level) {
-                case 0:  lv_label_set_text(s_battery_icon, ICON_BATTERY_WARNING); break;  // Critical
-                case 1:  lv_label_set_text(s_battery_icon, ICON_BATTERY_LOW); break;      // Low
-                case 2:  lv_label_set_text(s_battery_icon, ICON_BATTERY_MEDIUM); break;   // Medium
-                default: lv_label_set_text(s_battery_icon, ICON_BATTERY_FULL); break;     // High
+                case 0:  glyph = ICON_BATTERY_WARNING; break;  // Critical
+                case 1:  glyph = ICON_BATTERY_LOW; break;      // Low
+                case 2:  glyph = ICON_BATTERY_MEDIUM; break;   // Medium
+                default: glyph = ICON_BATTERY_FULL; break;     // High
             }
+        }
+        lv_label_set_text(s_battery_icon, glyph);
+        if (s_detail_battery_icon) {
+            lv_label_set_text(s_detail_battery_icon, glyph);
         }
     }
 
@@ -2343,21 +2535,41 @@ static void update_battery_display(void) {
         battery_color = lv_color_hex(0xfafafa);  // Near-white
     }
     lv_obj_set_style_text_color(s_battery_icon, battery_color, 0);
+    if (s_detail_battery_icon) {
+        lv_obj_set_style_text_color(s_detail_battery_icon, battery_color, 0);
+    }
 
     // Flash (blink) at 5% or less, not charging - a timer only exists
     // while this condition holds, started/stopped here rather than left
     // running (and just skipped) the rest of the time so it isn't
     // silently ticking for the ~99% of battery life it never applies to.
+    // battery_flash_timer_cb toggles both icons' opacity together.
     bool should_flash = percent <= 5 && !charging;
     if (should_flash && !s_battery_flash_timer) {
         s_battery_flash_on = true;
         lv_obj_set_style_text_opa(s_battery_icon, LV_OPA_COVER, 0);
+        if (s_detail_battery_icon) lv_obj_set_style_text_opa(s_detail_battery_icon, LV_OPA_COVER, 0);
         s_battery_flash_timer = lv_timer_create(battery_flash_timer_cb, 500, NULL);
     } else if (!should_flash && s_battery_flash_timer) {
         lv_timer_del(s_battery_flash_timer);
         s_battery_flash_timer = NULL;
         s_battery_flash_on = true;
         lv_obj_set_style_text_opa(s_battery_icon, LV_OPA_COVER, 0);  // Leave it visible, not mid-blink-off
+        if (s_detail_battery_icon) lv_obj_set_style_text_opa(s_detail_battery_icon, LV_OPA_COVER, 0);
+    }
+
+    // Actual percentage, small font below the detail screen's icon (owner
+    // request) - only this screen shows the number; Music's badge stays
+    // icon-only, unchanged. Gated on the percent actually changing, same
+    // flicker-avoidance reasoning as the icon glyph above, but keyed on the
+    // raw percent (not the coarser 4-level bucket) since the number is
+    // exact.
+    static int s_last_battery_percent_shown = -1;
+    if (s_detail_battery_pct_label && percent != s_last_battery_percent_shown) {
+        s_last_battery_percent_shown = percent;
+        char pct_text[8];
+        snprintf(pct_text, sizeof(pct_text), "%d%%", percent);
+        lv_label_set_text(s_detail_battery_pct_label, pct_text);
     }
 #endif
 }
@@ -2366,7 +2578,11 @@ static void battery_flash_timer_cb(lv_timer_t *timer) {
     (void)timer;
     if (!s_battery_icon) return;
     s_battery_flash_on = !s_battery_flash_on;
-    lv_obj_set_style_text_opa(s_battery_icon, s_battery_flash_on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_opa_t opa = s_battery_flash_on ? LV_OPA_COVER : LV_OPA_TRANSP;
+    lv_obj_set_style_text_opa(s_battery_icon, opa, 0);
+    if (s_detail_battery_icon) {
+        lv_obj_set_style_text_opa(s_detail_battery_icon, opa, 0);
+    }
 }
 
 static void battery_poll_timer_cb(lv_timer_t *timer) {
@@ -2847,13 +3063,22 @@ void ui_show_volume_change(float vol, float vol_step) {
         lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
         lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
     }
+    if (s_detail_volume_label) {
+        lv_label_set_text(s_detail_volume_label, vol_text);
+    }
 
     char db_text[16];
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max));
-    lv_label_set_text(s_volume_db_label, db_text);
+    if (s_volume_db_label) {
+        lv_obj_set_style_text_color(s_volume_db_label, volume_color, 0);
+    }
+    set_haloed_label_text(s_volume_db_label, s_volume_db_label_halo, db_text);
     if (s_tv_vinyl_db_label) {
         lv_label_set_text(s_tv_vinyl_db_label, db_text);
+    }
+    if (s_detail_db_label) {
+        lv_label_set_text(s_detail_db_label, db_text);
     }
 }
 
@@ -2993,7 +3218,7 @@ void ui_set_artwork(const char *image_key) {
         // No artwork - hide image
         if (s_last_image_key[0]) {
             lv_obj_add_flag(s_artwork_image, LV_OBJ_FLAG_HIDDEN);
-            if (s_detail_thumbnail) lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);
+            if (s_detail_thumbnail_mask) lv_obj_add_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
             s_last_image_key[0] = '\0';
         }
         return;
@@ -3077,15 +3302,16 @@ void ui_set_artwork(const char *image_key) {
     // never stale even though it's usually hidden (ui_set_detail_mode).
     if (s_detail_thumbnail && s_artwork_img.dsc.header.w > 0) {
         lv_image_set_src(s_detail_thumbnail, &s_artwork_img.dsc);
-        lv_image_set_scale(s_detail_thumbnail, (100 * 256) / s_artwork_img.dsc.header.w);
-        lv_obj_set_size(s_detail_thumbnail, 100, 100);
-        lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 5);  // Moved up ~5mm (50px @ PX_PER_MM=10) per owner feedback on hardware
+        lv_image_set_scale(s_detail_thumbnail, (DETAIL_ARTWORK_SIZE * 256) / s_artwork_img.dsc.header.w);
+        // Size/position are fixed at creation (filling s_detail_thumbnail_mask,
+        // which is what's actually positioned/sized against s_detail_overlay
+        // and does the circular clipping) - nothing to redo here per-track.
         // Nested inside s_detail_overlay, whose own HIDDEN flag already
         // governs whether any of this actually renders - clearing this
         // one unconditionally (like s_artwork_image does) is harmless
         // either way, not gated on whether detail mode happens to be
         // active right now.
-        lv_obj_clear_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
         lv_obj_invalidate(s_detail_thumbnail);
     }
 
@@ -3265,6 +3491,9 @@ void ui_set_controls_visible(bool visible) {
             if (s_volume_label_halo[i]) lv_obj_clear_flag(s_volume_label_halo[i], LV_OBJ_FLAG_HIDDEN);
         }
         if (s_volume_db_label) lv_obj_clear_flag(s_volume_db_label, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 8; i++) {
+            if (s_volume_db_label_halo[i]) lv_obj_clear_flag(s_volume_db_label_halo[i], LV_OBJ_FLAG_HIDDEN);
+        }
         // Badge, not the icon directly - hiding/showing the parent already
         // covers the icon (its child), and the badge is what needs to
         // disappear too rather than leaving an empty dark tint floating
@@ -3293,12 +3522,67 @@ void ui_set_controls_visible(bool visible) {
             if (s_volume_label_halo[i]) lv_obj_add_flag(s_volume_label_halo[i], LV_OBJ_FLAG_HIDDEN);
         }
         if (s_volume_db_label) lv_obj_add_flag(s_volume_db_label, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 8; i++) {
+            if (s_volume_db_label_halo[i]) lv_obj_add_flag(s_volume_db_label_halo[i], LV_OBJ_FLAG_HIDDEN);
+        }
         if (s_battery_badge) lv_obj_add_flag(s_battery_badge, LV_OBJ_FLAG_HIDDEN);
         if (s_status_dot) lv_obj_add_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
         if (s_status_bar) lv_obj_add_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
         // Make artwork fully visible in art mode
         if (s_artwork_image) lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
         ESP_LOGI(UI_TAG, "Controls hidden (art mode)");
+    }
+}
+
+// Battery/perf: the progress-arc interpolation timer and every marquee
+// label keep doing per-frame work even with the panel powered off and
+// nothing visible - undercuts whatever power display_sleep.c saves
+// elsewhere. Marquee labels can't be "paused" through LVGL's public API
+// (the scroll animation is internal to LV_LABEL_LONG_SCROLL_CIRCULAR, not
+// a separate lv_anim_t callers can touch) - dropping to LV_LABEL_LONG_CLIP
+// for the duration is the safe, public-API way to stop the animation
+// without disturbing anything else about the label; restoring
+// SCROLL_CIRCULAR on wake just restarts the marquee from the beginning,
+// which is unnoticeable since the screen was off anyway.
+void ui_set_background_animation_paused(bool paused) {
+    if (s_progress_interp_timer) {
+        if (paused) {
+            lv_timer_pause(s_progress_interp_timer);
+        } else {
+            // Freeze the interpolation baseline at "now" rather than letting
+            // the next tick compute elapsed time across the whole sleep
+            // duration (which would show progress jumping far ahead for one
+            // frame) - the next real poll corrects s_progress_base_ms/
+            // s_progress_base_uptime_ms properly, same self-correcting
+            // pattern this file already uses elsewhere for seek/skip/pause
+            // gaps between poll cycles.
+            s_progress_base_uptime_ms = platform_millis();
+            lv_timer_resume(s_progress_interp_timer);
+        }
+    }
+
+    lv_label_long_mode_t mode = paused ? LV_LABEL_LONG_CLIP : LV_LABEL_LONG_SCROLL_CIRCULAR;
+    if (s_track_label) lv_label_set_long_mode(s_track_label, mode);
+    if (s_artist_label) lv_label_set_long_mode(s_artist_label, mode);
+    if (s_detail_title_label) lv_label_set_long_mode(s_detail_title_label, mode);
+    if (s_detail_artist_label) lv_label_set_long_mode(s_detail_artist_label, mode);
+    if (s_detail_album_label) lv_label_set_long_mode(s_detail_album_label, mode);
+    if (s_detail_next_title_label) lv_label_set_long_mode(s_detail_next_title_label, mode);
+    if (s_detail_next_artist_label) lv_label_set_long_mode(s_detail_next_artist_label, mode);
+
+    if (!paused) {
+        // lvgl_flush_cb() now skips pushing pixels to the panel entirely
+        // while display_is_sleeping() (separate fix, same battery
+        // motivation) - LVGL's widgets still got every real content
+        // update that happened during sleep (track/artist/artwork/etc.,
+        // never gated on sleep state - apply_state() has to keep them
+        // correct regardless), but none of those flushed to the actual
+        // panel. Without this, the panel would show whatever was last
+        // physically flushed before sleep began until something else
+        // happened to trigger a redraw after waking. Force one now so
+        // what's on screen matches LVGL's actual state the moment the
+        // panel comes back on.
+        lv_obj_invalidate(lv_screen_active());
     }
 }
 

@@ -77,17 +77,25 @@ static bool s_cpu_freq_scaling_enabled = false;
 
 #if CONFIG_PM_ENABLE
 static esp_pm_lock_handle_t s_pm_cpu_lock = NULL;
+static esp_pm_lock_handle_t s_pm_no_light_sleep_lock = NULL;
 static bool s_pm_initialized = false;
 
 // Initialize power management (call once during init)
 static void pm_init(void) {
     if (s_pm_initialized) return;
 
-    // Configure PM: allow scaling between 80MHz (min) and 240MHz (max)
+    // Configure PM: allow scaling between 80MHz (min) and 240MHz (max).
+    // light_sleep_enable is now true, but light sleep only actually happens
+    // when s_pm_no_light_sleep_lock (below) isn't held - held by default (at
+    // boot and during NORMAL/ART_MODE/DIM), released only during
+    // DISPLAY_STATE_SLEEP alongside the CPU freq lock. The original
+    // "we control display separately" latency-safety intent is preserved:
+    // light sleep is only ever possible once the panel is already off and
+    // nothing is waiting on immediate touch response.
     esp_pm_config_t pm_config = {
         .max_freq_mhz = 240,
         .min_freq_mhz = 80,
-        .light_sleep_enable = false,  // Don't auto-sleep, we control display separately
+        .light_sleep_enable = true,
     };
 
     esp_err_t err = esp_pm_configure(&pm_config);
@@ -103,11 +111,22 @@ static void pm_init(void) {
         return;
     }
 
-    // Start with lock held (display is awake at boot)
+    // Create a light-sleep-prevention lock - when held, blocks light sleep
+    // entirely (independent of the CPU freq lock above, since a released
+    // CPU freq lock alone doesn't imply light sleep is wanted yet in every
+    // future caller of this pattern).
+    err = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "display_nols", &s_pm_no_light_sleep_lock);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to create no-light-sleep PM lock: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Start with both locks held (display is awake at boot)
     esp_pm_lock_acquire(s_pm_cpu_lock);
+    esp_pm_lock_acquire(s_pm_no_light_sleep_lock);
 
     s_pm_initialized = true;
-    ESP_LOGI(TAG, "Power management initialized (80-240MHz scaling)");
+    ESP_LOGI(TAG, "Power management initialized (80-240MHz scaling, light sleep gated to display-sleep)");
 }
 #endif
 
@@ -193,6 +212,13 @@ void display_sleep(void) {
         // Turn off display panel
         esp_lcd_panel_disp_on_off(s_panel_handle, false);
 
+        // Stop the progress-arc timer and marquee scroll animations - both
+        // otherwise keep doing per-frame work for a screen nobody can see.
+        // Unconditional (not gated on wifi_power_save/cpu_freq_scaling
+        // below): this saves CPU cycles on its own regardless of whether
+        // those other settings are enabled.
+        ui_set_background_animation_paused(true);
+
         // Lower LVGL task priority to save CPU cycles
         if (s_lvgl_task_handle != NULL) {
             vTaskPrioritySet(s_lvgl_task_handle, LVGL_TASK_PRIORITY_LOW);
@@ -204,11 +230,19 @@ void display_sleep(void) {
             wifi_mgr_set_power_save(true);
         }
 
-        // Release CPU frequency lock to allow scaling down
+        // Release CPU frequency lock to allow scaling down, and the
+        // no-light-sleep lock so the CPU can actually drop into light sleep
+        // between ticks rather than just idling at a lower frequency - only
+        // reachable here, with the panel already off, never during
+        // NORMAL/ART_MODE/DIM.
 #if CONFIG_PM_ENABLE
         if (s_cpu_freq_scaling_enabled && s_pm_initialized && s_pm_cpu_lock) {
             esp_pm_lock_release(s_pm_cpu_lock);
             ESP_LOGI(TAG, "CPU frequency lock released (scaling enabled)");
+        }
+        if (s_cpu_freq_scaling_enabled && s_pm_initialized && s_pm_no_light_sleep_lock) {
+            esp_pm_lock_release(s_pm_no_light_sleep_lock);
+            ESP_LOGI(TAG, "Light sleep enabled for the duration of display sleep");
         }
 #endif
 
@@ -241,8 +275,13 @@ void display_wake(void) {
     sleep_timeout = s_sleep_timeout_ms;
 
     if (s_display_state == DISPLAY_STATE_SLEEP && s_panel_handle != NULL) {
-        // Acquire CPU frequency lock first (need full performance)
+        // Acquire CPU frequency and no-light-sleep locks first (need full
+        // performance and no sleep-induced latency before the panel/touch
+        // are live again)
 #if CONFIG_PM_ENABLE
+        if (s_cpu_freq_scaling_enabled && s_pm_initialized && s_pm_no_light_sleep_lock) {
+            esp_pm_lock_acquire(s_pm_no_light_sleep_lock);
+        }
         if (s_cpu_freq_scaling_enabled && s_pm_initialized && s_pm_cpu_lock) {
             esp_pm_lock_acquire(s_pm_cpu_lock);
             ESP_LOGI(TAG, "CPU frequency lock acquired (max freq)");
@@ -265,6 +304,11 @@ void display_wake(void) {
             vTaskPrioritySet(s_lvgl_task_handle, LVGL_TASK_PRIORITY_NORMAL);
             ESP_LOGI(TAG, "LVGL task priority restored");
         }
+
+        // Resume the progress-arc timer and marquee scroll animations
+        // paused in display_sleep() - only reachable here (from actual
+        // sleep), not from ART_MODE/DIM which never paused them.
+        ui_set_background_animation_paused(false);
     }
 
     if (s_display_state != DISPLAY_STATE_NORMAL) {
@@ -662,10 +706,16 @@ void display_update_power_settings(const rk_cfg_t *cfg) {
     // Initialize PM when CPU scaling is first enabled
     if (cpu_changed && s_cpu_freq_scaling_enabled) {
         pm_init();
-        // If currently sleeping, release the lock to enable scaling
-        if (s_display_state == DISPLAY_STATE_SLEEP && s_pm_initialized && s_pm_cpu_lock) {
-            esp_pm_lock_release(s_pm_cpu_lock);
-            ESP_LOGI(TAG, "CPU scaling enabled while sleeping - lock released");
+        // If currently sleeping, release the locks to enable scaling/light sleep
+        if (s_display_state == DISPLAY_STATE_SLEEP && s_pm_initialized) {
+            if (s_pm_cpu_lock) {
+                esp_pm_lock_release(s_pm_cpu_lock);
+                ESP_LOGI(TAG, "CPU scaling enabled while sleeping - lock released");
+            }
+            if (s_pm_no_light_sleep_lock) {
+                esp_pm_lock_release(s_pm_no_light_sleep_lock);
+                ESP_LOGI(TAG, "Light sleep enabled while sleeping - lock released");
+            }
         }
     }
 #endif
