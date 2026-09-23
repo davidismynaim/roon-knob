@@ -153,6 +153,7 @@ static lv_obj_t *s_seek_delta_arc;
 static lv_obj_t *s_volume_label_large; // Volume display (large, prominent) - primary display
 static lv_obj_t *s_volume_label_halo[8]; // 8-directional legibility halo behind s_volume_label_large
 static lv_obj_t *s_volume_db_label;    // dB-equivalent readout, at volume's old position
+static lv_obj_t *s_volume_db_label_halo[8]; // Same halo technique as s_volume_label_halo, 1px offset
 static lv_timer_t *s_volume_emphasis_timer;  // Timer to reset volume emphasis after adjustment
 static lv_obj_t *s_status_dot;         // Online/offline indicator
 static lv_obj_t *s_battery_icon;       // Battery icon (Material Symbols)
@@ -500,16 +501,23 @@ static lv_obj_t *create_number_label(lv_obj_t *parent, const lv_font_t *font,
 // read as a big rectangle, not a shadow either. Surrounding the glyphs
 // symmetrically on all sides, instead of to one side or as a filled box,
 // is what actually reads as a halo.
-#define VOLUME_HALO_OFFSET_PX 2
-static const int32_t VOLUME_HALO_OFFSETS[8][2] = {
-    {-VOLUME_HALO_OFFSET_PX, 0}, {VOLUME_HALO_OFFSET_PX, 0},
-    {0, -VOLUME_HALO_OFFSET_PX}, {0, VOLUME_HALO_OFFSET_PX},
-    {-VOLUME_HALO_OFFSET_PX, -VOLUME_HALO_OFFSET_PX}, {VOLUME_HALO_OFFSET_PX, -VOLUME_HALO_OFFSET_PX},
-    {-VOLUME_HALO_OFFSET_PX, VOLUME_HALO_OFFSET_PX}, {VOLUME_HALO_OFFSET_PX, VOLUME_HALO_OFFSET_PX},
+//
+// Offset is a parameter (rather than a fixed macro) so the same technique
+// can give the big volume number its established 2px halo and the smaller
+// dB label under it a finer 1px halo - a 2px halo on 22px text read too
+// thick (owner feedback), same fix applied to s_volume_db_label after it
+// was found washing out on pale album art the same way the volume number
+// used to.
+static const int32_t VOLUME_HALO_UNIT_OFFSETS[8][2] = {
+    {-1, 0}, {1, 0},
+    {0, -1}, {0, 1},
+    {-1, -1}, {1, -1},
+    {-1, 1}, {1, 1},
 };
 
 static lv_obj_t *create_haloed_number_label(lv_obj_t *parent, const lv_font_t *font,
                                              lv_color_t color, int32_t top_y,
+                                             int32_t halo_offset_px,
                                              lv_obj_t *out_halo[8]) {
     for (int i = 0; i < 8; i++) {
         lv_obj_t *halo = lv_label_create(parent);
@@ -517,7 +525,9 @@ static lv_obj_t *create_haloed_number_label(lv_obj_t *parent, const lv_font_t *f
         lv_obj_set_style_text_color(halo, lv_color_hex(0x000000), 0);
         lv_obj_set_style_text_opa(halo, LV_OPA_60, 0);
         lv_label_set_text(halo, "--");
-        lv_obj_align(halo, LV_ALIGN_TOP_MID, VOLUME_HALO_OFFSETS[i][0], top_y + VOLUME_HALO_OFFSETS[i][1]);
+        lv_obj_align(halo, LV_ALIGN_TOP_MID,
+                     VOLUME_HALO_UNIT_OFFSETS[i][0] * halo_offset_px,
+                     top_y + VOLUME_HALO_UNIT_OFFSETS[i][1] * halo_offset_px);
         out_halo[i] = halo;
     }
 
@@ -1130,16 +1140,25 @@ static void build_layout(void) {
         const int32_t top_y = transport_top_y - gap_px - visual_height + overlap_fix_px;
         s_volume_label_large = create_haloed_number_label(s_ui_container, font_xlarge(),
                                                             lv_color_hex(0xfafafa), top_y,
-                                                            s_volume_label_halo);
+                                                            2, s_volume_label_halo);
     }
 
     // dB-equivalent readout, at the volume number's old position minus a
     // 1.5mm (15px) upward nudge - owner feedback that it was overlapping
     // the (now bigger) volume number below it - in the smaller of the two
     // text fonts this file already uses (font_small(), 22px vs. the
-    // volume number's 56px) so it still reads as secondary.
-    s_volume_db_label = create_number_label(s_ui_container, font_small(),
-                                             lv_color_hex(0xcccccc), 55 - (PX_PER_MM + PX_PER_MM / 2));
+    // volume number's 56px) so it still reads as secondary in size, though
+    // not in color/legibility treatment - see VOLUME_HALO_UNIT_OFFSETS
+    // above: same halo as the volume number (1px rather than 2px, this
+    // text being smaller), same dynamic warning color, both applied at
+    // this label's two update sites (polled-state and live-adjustment)
+    // right alongside s_volume_label_large's own - owner feedback that it
+    // was washing out on pale album art the same way the volume number
+    // used to before it got a halo.
+    s_volume_db_label = create_haloed_number_label(s_ui_container, font_small(),
+                                                     lv_color_hex(0xfafafa),
+                                                     55 - (PX_PER_MM + PX_PER_MM / 2),
+                                                     1, s_volume_db_label_halo);
 #undef PX_PER_MM
 
     // Controls row - middle third, transport buttons (touch remains
@@ -2140,6 +2159,9 @@ static void apply_state(const struct ui_state *state) {
     if (s_volume_label_large) {
         lv_obj_set_style_text_color(s_volume_label_large, volume_color, 0);
     }
+    if (s_volume_db_label) {
+        lv_obj_set_style_text_color(s_volume_db_label, volume_color, 0);
+    }
     if (s_tv_vinyl_volume_label) {
         lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
     }
@@ -2152,7 +2174,7 @@ static void apply_state(const struct ui_state *state) {
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max));
     if (strcmp(db_text, s_last_db_text) != 0) {
-        lv_label_set_text(s_volume_db_label, db_text);
+        set_haloed_label_text(s_volume_db_label, s_volume_db_label_halo, db_text);
         if (s_tv_vinyl_db_label) lv_label_set_text(s_tv_vinyl_db_label, db_text);
         if (s_detail_db_label) lv_label_set_text(s_detail_db_label, db_text);
         strncpy(s_last_db_text, db_text, sizeof(s_last_db_text) - 1);
@@ -3048,7 +3070,10 @@ void ui_show_volume_change(float vol, float vol_step) {
     char db_text[16];
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max));
-    lv_label_set_text(s_volume_db_label, db_text);
+    if (s_volume_db_label) {
+        lv_obj_set_style_text_color(s_volume_db_label, volume_color, 0);
+    }
+    set_haloed_label_text(s_volume_db_label, s_volume_db_label_halo, db_text);
     if (s_tv_vinyl_db_label) {
         lv_label_set_text(s_tv_vinyl_db_label, db_text);
     }
@@ -3466,6 +3491,9 @@ void ui_set_controls_visible(bool visible) {
             if (s_volume_label_halo[i]) lv_obj_clear_flag(s_volume_label_halo[i], LV_OBJ_FLAG_HIDDEN);
         }
         if (s_volume_db_label) lv_obj_clear_flag(s_volume_db_label, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 8; i++) {
+            if (s_volume_db_label_halo[i]) lv_obj_clear_flag(s_volume_db_label_halo[i], LV_OBJ_FLAG_HIDDEN);
+        }
         // Badge, not the icon directly - hiding/showing the parent already
         // covers the icon (its child), and the badge is what needs to
         // disappear too rather than leaving an empty dark tint floating
@@ -3494,6 +3522,9 @@ void ui_set_controls_visible(bool visible) {
             if (s_volume_label_halo[i]) lv_obj_add_flag(s_volume_label_halo[i], LV_OBJ_FLAG_HIDDEN);
         }
         if (s_volume_db_label) lv_obj_add_flag(s_volume_db_label, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 8; i++) {
+            if (s_volume_db_label_halo[i]) lv_obj_add_flag(s_volume_db_label_halo[i], LV_OBJ_FLAG_HIDDEN);
+        }
         if (s_battery_badge) lv_obj_add_flag(s_battery_badge, LV_OBJ_FLAG_HIDDEN);
         if (s_status_dot) lv_obj_add_flag(s_status_dot, LV_OBJ_FLAG_HIDDEN);
         if (s_status_bar) lv_obj_add_flag(s_status_bar, LV_OBJ_FLAG_HIDDEN);
