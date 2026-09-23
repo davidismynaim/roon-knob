@@ -91,7 +91,7 @@ CONFIG_LV_USE_ARABIC_PERSIAN_CHARS=y
 CONFIG_RK_DISPLAY_DIM_TIMEOUT_SEC=30
 CONFIG_RK_DISPLAY_SLEEP_TIMEOUT_SEC=60
 CONFIG_RK_BACKLIGHT_NORMAL=100
-CONFIG_RK_BACKLIGHT_DIM=8
+CONFIG_RK_BACKLIGHT_DIM=3
 
 # Fixed Roon zone for this personal single-zone-locked fork (the Lounge
 # zone). Used only when NVS has no zone_id yet (fresh device, or a reset) -
