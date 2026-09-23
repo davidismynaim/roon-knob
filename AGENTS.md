@@ -108,3 +108,13 @@ the scoped issue is implemented, review/dissent output contracts are posted,
 automated checks pass, and any required exact-artifact hardware validation is
 recorded. Program completion additionally requires beta artifacts for Dial and
 Frame.
+
+### Home Hi-Fi System Reference
+
+For background on the home hi-fi system this dial integrates with, check
+`~/HIFI_SYSTEM_WIKI.md` (maintainer's home directory) if present. That file
+lives outside this repo entirely and must never be copied into this public
+repo, committed, or quoted verbatim (code, docs, commit messages, or PR
+text) — treat anything read from it as background context only, and
+summarize facts in your own words if you need to reference something from
+it in something that will be committed.
