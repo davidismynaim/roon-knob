@@ -9,6 +9,7 @@
 #include "platform/platform_storage.h"
 #include "platform/platform_task.h"
 #include "platform/platform_time.h"
+#include "room_cfg.h"
 
 #include <cJSON.h>
 #include <math.h>
@@ -102,19 +103,28 @@ static uint64_t s_last_tick_ms;    // when a tick last landed in the burst
 
 static void flush_task(void *arg);
 
-static float clamp_position(float value) {
+static float clamp_position(float value, float max) {
     if (value < 0.0f) {
         return 0.0f;
     }
-    if (value > 255.0f) {
-        return 255.0f;
+    if (value > max) {
+        return max;
     }
     return value;
 }
 
 static int db_to_position(float db) {
     float position = roundf((db + 127.5f) * 2.0f);
-    return (int)clamp_position(position);
+    return (int)clamp_position(position, 255.0f);
+}
+
+// Lounge's number.hifi_volume is a dB value converted to a 0-255 position
+// (db_to_position above). Dining's sensor.venu360_main_gain_dial_2 is
+// already the position itself, 0-120 (121 discrete 0.5dB steps over
+// -60..0dB - see script.venu360_gain_controller server-side; the firmware
+// doesn't need to know that mapping, only the position range it reports).
+static float room_volume_max(void) {
+    return room_cfg_get_current() == RK_ROOM_DINING ? 120.0f : 255.0f;
 }
 
 static bool snapshot_cfg(rk_ha_cfg_t *out) {
@@ -188,9 +198,10 @@ void ha_volume_client_set_muted_optimistic(bool muted) {
 }
 
 static bool poll_once(const rk_ha_cfg_t *cfg) {
+    bool dining = room_cfg_get_current() == RK_ROOM_DINING;
     char url[128];
-    snprintf(url, sizeof(url), "http://%s/api/states/number.hifi_volume",
-             cfg->host);
+    snprintf(url, sizeof(url), "http://%s/api/states/%s", cfg->host,
+             dining ? "sensor.venu360_main_gain_dial_2" : "number.hifi_volume");
 
     char *resp = NULL;
     size_t resp_len = 0;
@@ -210,12 +221,14 @@ static bool poll_once(const rk_ha_cfg_t *cfg) {
     bool ok = false;
     if (cJSON_IsString(state) && state->valuestring) {
         char *end = NULL;
-        float db = strtof(state->valuestring, &end);
+        float raw = strtof(state->valuestring, &end);
         if (end != state->valuestring) {
-            int position = db_to_position(db);
+            float max = room_volume_max();
+            int position = dining ? (int)clamp_position(roundf(raw), max)
+                                   : db_to_position(raw);
             set_cached_position(position);
             controller_presentation_set_volume_range((float)position, 0.0f,
-                                                      255.0f, 1.0f);
+                                                      max, 1.0f);
             ok = true;
         }
     }
@@ -224,9 +237,10 @@ static bool poll_once(const rk_ha_cfg_t *cfg) {
 }
 
 static bool poll_source_once(const rk_ha_cfg_t *cfg) {
+    bool dining = room_cfg_get_current() == RK_ROOM_DINING;
     char url[128];
-    snprintf(url, sizeof(url),
-             "http://%s/api/states/input_select.audio_input", cfg->host);
+    snprintf(url, sizeof(url), "http://%s/api/states/%s", cfg->host,
+             dining ? "sensor.venu360_inputs" : "input_select.audio_input");
 
     char *resp = NULL;
     size_t resp_len = 0;
@@ -253,9 +267,10 @@ static bool poll_source_once(const rk_ha_cfg_t *cfg) {
 }
 
 static bool poll_mute_once(const rk_ha_cfg_t *cfg) {
+    bool dining = room_cfg_get_current() == RK_ROOM_DINING;
     char url[128];
-    snprintf(url, sizeof(url),
-             "http://%s/api/states/input_boolean.audio_mute", cfg->host);
+    snprintf(url, sizeof(url), "http://%s/api/states/%s", cfg->host,
+             dining ? "switch.venu360_main_mute" : "input_boolean.audio_mute");
 
     char *resp = NULL;
     size_t resp_len = 0;
@@ -369,6 +384,42 @@ static bool send_clicks(const rk_ha_cfg_t *cfg, int32_t clicks) {
     return true;
 }
 
+// script.venu360_gain_controller has no "batch of N clicks" call shape like
+// audio_voice_volume - it only accepts one {"event":"step","delta":±1} per
+// invocation (real hardware step sequence, not a value write). So a burst
+// of N clicks means N individual HTTP round trips here, not one - this
+// only runs from flush_task's background task, so the extra latency isn't
+// on the input path.
+static bool send_steps(const rk_ha_cfg_t *cfg, int32_t clicks) {
+    if (clicks == 0) {
+        return true;
+    }
+    int32_t magnitude = clicks < 0 ? -clicks : clicks;
+    int delta = clicks > 0 ? 1 : -1;
+
+    char url[128];
+    snprintf(url, sizeof(url),
+             "http://%s/api/services/script/venu360_gain_controller",
+             cfg->host);
+    char body[48];
+    snprintf(body, sizeof(body), "{\"event\":\"step\",\"delta\":%d}", delta);
+
+    bool ok = true;
+    for (int32_t i = 0; i < magnitude; i++) {
+        char *resp = NULL;
+        size_t resp_len = 0;
+        int ret =
+            platform_http_post_auth(url, cfg->token, body, &resp, &resp_len);
+        platform_http_free(resp);
+        if (ret != 0) {
+            LOGW("HA volume adjust: venu360_gain_controller step call "
+                 "failed");
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 static void flush_pending(void) {
     rk_ha_cfg_t cfg;
     os_mutex_lock(&s_lock);
@@ -388,7 +439,11 @@ static void flush_pending(void) {
     }
     int32_t clicks = ticks / HA_VOLUME_TICKS_PER_CLICK;
     if (clicks != 0) {
-        (void)send_clicks(&cfg, clicks);
+        if (room_cfg_get_current() == RK_ROOM_DINING) {
+            (void)send_steps(&cfg, clicks);
+        } else {
+            (void)send_clicks(&cfg, clicks);
+        }
     }
 }
 
@@ -432,10 +487,11 @@ bool ha_volume_client_adjust(int32_t ticks) {
      * debounced, so the dial still feels instantly responsive even
      * though the network write lags slightly behind a fast spin. */
     int new_position = get_cached_position() + ticks / HA_VOLUME_TICKS_PER_CLICK;
+    int max_position = (int)room_volume_max();
     if (new_position < 0) {
         new_position = 0;
-    } else if (new_position > 255) {
-        new_position = 255;
+    } else if (new_position > max_position) {
+        new_position = max_position;
     }
     set_cached_position(new_position);
     controller_presentation_show_volume_change((float)new_position, 1.0f);
@@ -457,7 +513,7 @@ void ha_volume_client_get_display(float *volume, float *volume_min,
         *volume_min = 0.0f;
     }
     if (volume_max) {
-        *volume_max = 255.0f;
+        *volume_max = room_volume_max();
     }
     if (volume_step) {
         *volume_step = 1.0f;

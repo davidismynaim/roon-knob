@@ -9,6 +9,7 @@
 #include "platform/platform_storage.h"
 #include "bridge_client.h"
 #include "rk_ble_hid_host.h"
+#include "room_cfg.h"
 #include "wifi_manager.h"
 
 #include <stdlib.h>
@@ -51,7 +52,8 @@ static esp_err_t send_conflict(httpd_req_t *req, const char *message) {
 // HTML page for config
 // Format args: current_bridge, status_class, status_text, wifi_html,
 // bridge_value, ha_host, ha_token_placeholder, zone_options,
-// escaped_title_patterns, haptic_checked, haptic_effect_options
+// escaped_title_patterns, haptic_checked, haptic_effect_options,
+// haptic_cal_status, room_lounge_selected, room_dining_selected
 static const char *HTML_CONFIG =
     "<!DOCTYPE html>"
     "<html><head>"
@@ -141,6 +143,16 @@ static const char *HTML_CONFIG =
     "<select name='effect_id'>%s</select>"
     "<p class='hint'>Vibrates briefly on play/pause/skip taps, the mute/source-picker long-press gestures, and picking an input from the source list. Not applied to volume changes &mdash; the encoder's own mechanical detents already give a good feel there. Effect names are the DRV2605 chip's own built-in library names, not ours &mdash; try a few and keep whichever feels best.</p>"
     "<p class='hint'>%s</p>"
+    "<input type='submit' value='Save'>"
+    "</form>"
+    "<form method='POST' action='/room-config'>"
+    "<h2>Installation</h2>"
+    "<label>Room</label>"
+    "<select name='room'>"
+    "<option value='lounge'%s>Lounge</option>"
+    "<option value='dining'%s>Dining Room</option>"
+    "</select>"
+    "<p class='hint'>Which installation this dial talks to &mdash; Lounge (Roon-driven volume/source/mute) or Dining Room (dbx DriveRack VENU360). Changes which Home Assistant entities the dial's volume knob, mute, and source picker use, and hides the TV source in Dining. Saving reboots the device.</p>"
     "<input type='submit' value='Save'>"
     "</form></body></html>";
 
@@ -540,10 +552,14 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
+    bool dining = room_cfg_get_current() == RK_ROOM_DINING;
+    const char *room_lounge_selected = dining ? "" : " selected";
+    const char *room_dining_selected = dining ? " selected" : "";
+
     snprintf(html, 16384, HTML_CONFIG, current, status_class, status_text,
              wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
              zone_options, escaped_patterns, haptic_checked, haptic_effect_options,
-             haptic_cal_status);
+             haptic_cal_status, room_lounge_selected, room_dining_selected);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
@@ -861,6 +877,48 @@ static esp_err_t haptic_config_post_handler(httpd_req_t *req) {
     free(html);
 
     ESP_LOGI(TAG, "Haptic config saved, rebooting in 1 second...");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
+// Handler for POST /room-config - save which installation this dial talks
+// to (see common/rk_room_cfg.h). Reboots on save like haptic-config above,
+// rather than trying to hot-swap every already-running poll/flush task's
+// notion of which entities to hit.
+static esp_err_t room_config_post_handler(httpd_req_t *req) {
+    char buf[64] = {0};
+    int received = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (received <= 0) {
+        ESP_LOGE(TAG, "Failed to receive POST data");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
+        return ESP_FAIL;
+    }
+    buf[received] = '\0';
+
+    char room_text[16] = {0};
+    get_form_field(buf, "room", room_text, sizeof(room_text));
+    rk_room_t room = (strcmp(room_text, "dining") == 0) ? RK_ROOM_DINING
+                                                         : RK_ROOM_LOUNGE;
+    if (!room_cfg_set_current(room)) {
+        ESP_LOGE(TAG, "Failed to save room config");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+
+    char *html = heap_caps_malloc(1024,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!html) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+    snprintf(html, 1024, HTML_SUCCESS, "Room setting saved!");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_send(req, html, strlen(html));
+    free(html);
+
+    ESP_LOGI(TAG, "Room config saved, rebooting in 1 second...");
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
 
@@ -1299,7 +1357,7 @@ void config_server_start(void) {
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 14;  // root, config, ha-config, zone-config, title-filter-config, haptic-config, 2 wifi, 5 ble
+    config.max_uri_handlers = 15;  // root, config, ha-config, zone-config, title-filter-config, haptic-config, room-config, 2 wifi, 5 ble
     config.stack_size = 8192;  // Increased for mDNS resolution during config save
     // Note: max_req_hdr_len set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig
 
@@ -1354,6 +1412,13 @@ void config_server_start(void) {
         .handler = haptic_config_post_handler,
     };
     httpd_register_uri_handler(s_server, &haptic_config_post);
+
+    httpd_uri_t room_config_post = {
+        .uri = "/room-config",
+        .method = HTTP_POST,
+        .handler = room_config_post_handler,
+    };
+    httpd_register_uri_handler(s_server, &room_config_post);
 
     httpd_uri_t wifi_add = {
         .uri = "/wifi-add",

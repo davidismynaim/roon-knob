@@ -3,6 +3,7 @@
 #include "rk_cfg.h"
 #include "rk_ha_cfg.h"
 #include "rk_haptic_cfg.h"
+#include "rk_room_cfg.h"
 #include "rk_title_filter_cfg.h"
 
 #include <stdbool.h>
@@ -68,3 +69,10 @@ bool platform_storage_write_title_filters(const rk_title_filter_cfg_t *in);
  */
 bool platform_storage_read_haptic(rk_haptic_cfg_t *out);
 bool platform_storage_write_haptic(const rk_haptic_cfg_t *in);
+
+/*
+ * Installation/room selector (Lounge vs Dining Room - see rk_room_cfg.h).
+ * Independent blob, same no-migration contract as the configs above.
+ */
+bool platform_storage_read_room(rk_room_cfg_t *out);
+bool platform_storage_write_room(const rk_room_cfg_t *in);

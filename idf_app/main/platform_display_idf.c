@@ -7,6 +7,7 @@
 #include "haptic_driver.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"
+#include "room_cfg.h"
 #include "ui.h"
 
 #include <stdint.h>
@@ -689,6 +690,8 @@ bool platform_display_init(void) {
 
     // Shares this same I2C bus with the touch controller above.
     haptic_driver_init();
+
+    room_cfg_init();
 
     s_hardware_ready = true;
     ESP_LOGI(TAG, "Display hardware initialized successfully");
