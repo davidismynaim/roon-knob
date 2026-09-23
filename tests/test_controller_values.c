@@ -31,6 +31,17 @@ static char s_artwork_trace[ARTWORK_TRACE_CAPACITY]
                            [CONTROLLER_ARTWORK_REF_CAPACITY];
 static int s_artwork_count;
 
+typedef struct {
+    int count;
+    char next_track_title[CONTROLLER_ENRICHMENT_TEXT_CAPACITY];
+    char next_track_artist[CONTROLLER_ENRICHMENT_TEXT_CAPACITY];
+    int32_t album_year;
+    char bit_info[CONTROLLER_ENRICHMENT_BIT_INFO_CAPACITY];
+    bool next_track_none;
+} enrichment_trace_t;
+
+static enrichment_trace_t s_enrichment;
+
 static void copy_trace(char *destination, size_t capacity,
                        const char *source) {
     snprintf(destination, capacity, "%s", source ? source : "");
@@ -67,10 +78,25 @@ void controller_presentation_set_artwork(const char *image_key) {
     ++s_artwork_count;
 }
 
+void controller_presentation_set_media_enrichment(
+    const char *next_track_title, const char *next_track_artist,
+    int32_t album_year, const char *bit_info,
+    bool next_track_none) {
+    ++s_enrichment.count;
+    copy_trace(s_enrichment.next_track_title,
+               sizeof(s_enrichment.next_track_title), next_track_title);
+    copy_trace(s_enrichment.next_track_artist,
+               sizeof(s_enrichment.next_track_artist), next_track_artist);
+    s_enrichment.album_year = album_year;
+    copy_trace(s_enrichment.bit_info, sizeof(s_enrichment.bit_info), bit_info);
+    s_enrichment.next_track_none = next_track_none;
+}
+
 static void reset_trace(void) {
     memset(&s_presentation, 0, sizeof(s_presentation));
     memset(s_artwork_trace, 0, sizeof(s_artwork_trace));
     s_artwork_count = 0;
+    memset(&s_enrichment, 0, sizeof(s_enrichment));
 }
 
 static void fill_long_text(char *text, size_t length, char value) {
@@ -121,8 +147,26 @@ static void test_owned_bounded_values(void) {
         0.0f, 0.0f, 0.0f, 0.0f, 0, 0, NULL, 0);
     controller_connectivity_view_init(NULL, NULL, NULL);
 
+    char next_track_title[192];
+    fill_long_text(next_track_title, sizeof(next_track_title), 'n');
+    controller_media_enrichment_view_t enrichment;
+    controller_media_enrichment_view_init(
+        &enrichment, next_track_title, NULL, INT32_MIN, "24-bit / 192kHz", true);
+    next_track_title[0] = 'x';
+    assert(enrichment.next_track_title[0] == 'n');
+    assert(strlen(enrichment.next_track_title) ==
+           CONTROLLER_ENRICHMENT_TEXT_CAPACITY - 1);
+    assert(enrichment.next_track_title[
+               CONTROLLER_ENRICHMENT_TEXT_CAPACITY - 1] == '\0');
+    assert(enrichment.next_track_artist[0] == '\0');
+    assert(enrichment.album_year == INT32_MIN);
+    assert(strcmp(enrichment.bit_info, "24-bit / 192kHz") == 0);
+    assert(enrichment.next_track_none);
+    controller_media_enrichment_view_init(NULL, NULL, NULL, 0, NULL, false);
+
     assert(sizeof(controller_media_view_t) <= 576);
     assert(sizeof(controller_connectivity_view_t) <= 192);
+    assert(sizeof(controller_media_enrichment_view_t) <= 384);
     assert(sizeof(controller_command_t) <= 12);
 }
 
@@ -215,6 +259,36 @@ static void test_connectivity_mapping(void) {
     assert(s_presentation.count == 1);
 }
 
+static void test_media_enrichment_mapping(void) {
+    reset_trace();
+
+    controller_media_enrichment_view_t enrichment;
+    controller_media_enrichment_view_init(
+        &enrichment, "next title", "next artist", 1974, "16-bit / 44.1kHz", false);
+    controller_view_compat_apply_media_enrichment(&enrichment);
+    assert(s_enrichment.count == 1);
+    assert(strcmp(s_enrichment.next_track_title, "next title") == 0);
+    assert(strcmp(s_enrichment.next_track_artist, "next artist") == 0);
+    assert(s_enrichment.album_year == 1974);
+    assert(strcmp(s_enrichment.bit_info, "16-bit / 44.1kHz") == 0);
+    assert(!s_enrichment.next_track_none);
+
+    // Absent fields pass through as empty/0, not fabricated - the seam
+    // itself decides what "absent" means (see ui_set_next_track()'s own
+    // comment); this layer just forwards whatever it was given.
+    controller_media_enrichment_view_init(&enrichment, "", "", 0, "", true);
+    controller_view_compat_apply_media_enrichment(&enrichment);
+    assert(s_enrichment.count == 2);
+    assert(strcmp(s_enrichment.next_track_title, "") == 0);
+    assert(s_enrichment.album_year == 0);
+    assert(strcmp(s_enrichment.bit_info, "") == 0);
+    assert(s_enrichment.next_track_none);  // "Nothing" is forwarded with no title
+
+    int enrichment_count = s_enrichment.count;
+    controller_view_compat_apply_media_enrichment(NULL);
+    assert(s_enrichment.count == enrichment_count);
+}
+
 static void test_command_values(void) {
     controller_command_t empty = {0};
     controller_command_t toggle =
@@ -251,6 +325,7 @@ int main(void) {
     test_owned_bounded_values();
     test_media_forwarding_and_artwork();
     test_connectivity_mapping();
+    test_media_enrichment_mapping();
     test_command_values();
     puts("controller value contracts passed");
     return 0;

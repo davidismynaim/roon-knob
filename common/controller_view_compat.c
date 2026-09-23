@@ -56,6 +56,20 @@ void controller_view_compat_apply_media(const controller_media_view_t *view) {
     apply_artwork(view);
 }
 
+void controller_view_compat_apply_media_enrichment(
+    const controller_media_enrichment_view_t *view) {
+    if (!view) {
+        return;
+    }
+
+    controller_presentation_set_media_enrichment(
+        view->next_track_title,
+        view->next_track_artist,
+        view->album_year,
+        view->bit_info,
+        view->next_track_none);
+}
+
 void controller_view_compat_apply_connectivity(
     const controller_connectivity_view_t *view) {
     if (!view) {

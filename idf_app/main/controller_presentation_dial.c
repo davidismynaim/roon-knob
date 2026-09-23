@@ -109,3 +109,13 @@ void controller_presentation_show_settings(void) {
 void controller_presentation_seek_adjust(int32_t ticks) {
     ui_seek_adjust(ticks);
 }
+
+void controller_presentation_set_media_enrichment(
+    const char *next_track_title, const char *next_track_artist,
+    int32_t album_year, const char *bit_info,
+    bool next_track_none) {
+    ui_set_next_track(next_track_title, next_track_artist);
+    ui_set_next_track_none(next_track_none);
+    ui_set_album_year(album_year);
+    ui_set_bit_info(bit_info);
+}

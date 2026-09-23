@@ -12,6 +12,8 @@ extern "C" {
  * the supplied value synchronously.
  */
 void controller_view_compat_apply_media(const controller_media_view_t *view);
+void controller_view_compat_apply_media_enrichment(
+    const controller_media_enrichment_view_t *view);
 void controller_view_compat_apply_connectivity(
     const controller_connectivity_view_t *view);
 

@@ -60,6 +60,20 @@ struct ui_state {
 
     int seek_position;
     int length;
+
+    // Detail screen enrichment, sourced independently of the rest of this
+    // struct (a separate, "fragile" HA-wired service, not Roon/the bridge -
+    // Roon's own API has no structured field for any of these, confirmed
+    // against the actual Transport/Browse API source rather than assumed).
+    // Each one is absent-by-default and shown only when actually set, never
+    // blocking or blanking the always-visible title/artist/album/progress
+    // group above it if the source is down or a given track has no data -
+    // see ui_set_album_year()/ui_set_bit_info()/ui_set_next_track().
+    int album_year;       // 0 = unknown/absent
+    char bit_info[64];    // e.g. "16-bit / 44.1kHz"; empty = absent
+    char next_line1[128]; // Next track title (radio "up next"); empty = absent
+    char next_line2[128]; // Next track artist
+    bool next_track_none; // Positively known: nothing is coming next (shows "Nothing"); false = unknown
 };
 
 // UI widgets - Blue Knob inspired design
@@ -196,6 +210,21 @@ static lv_obj_t *s_detail_artist_label;
 static lv_obj_t *s_detail_album_label;
 static lv_obj_t *s_detail_progress_label;  // "2:12 / 4:15" - shares the progress interpolation timer
 static bool s_detail_mode_visible = false;
+static char s_detail_album_raw[128] = "";  // Album text alone, before any (year) suffix - see apply_detail_album_label()
+static int s_detail_album_year = 0;        // 0 = unknown/absent
+
+// Enrichment fields - bit info / "Coming up" / next track. Plain additional
+// rows in s_detail_text_group's flex column, same as title/artist/album/
+// progress above them: single-line, horizontal marquee-scroll for long
+// text (LV_LABEL_LONG_SCROLL_CIRCULAR, matching the Music screen's own
+// track/artist labels) rather than wrapping, so every row has a fixed,
+// predictable height and nothing here can push the group tall enough to
+// need any vertical scrolling. Each hidden when absent - see
+// ui_set_bit_info()/ui_set_next_track()'s own comments for why.
+static lv_obj_t *s_detail_bitinfo_label;     // e.g. "16-bit / 44.1kHz"
+static lv_obj_t *s_detail_next_label;        // "Coming up..." - hidden together with the two below
+static lv_obj_t *s_detail_next_title_label;
+static lv_obj_t *s_detail_next_artist_label;
 
 // Large semi-transparent play/pause confirmation icon - shown briefly
 // (ui_show_playback_feedback) whenever playback is toggled, whether from
@@ -245,6 +274,11 @@ static struct ui_state s_pending = {
     .online = false,
     .seek_position = 0,
     .length = 0,
+    .album_year = 0,
+    .bit_info = "",
+    .next_line1 = "",
+    .next_line2 = "",
+    .next_track_none = false,
 };
 static bool s_dirty = true;
 static char s_pending_message[128] = "";
@@ -272,6 +306,10 @@ extern const lv_image_dsc_t vinyl_background;
 // Text fonts for music metadata
 static inline const lv_font_t *font_small(void) { return font_manager_get_small(); }
 static inline const lv_font_t *font_normal(void) { return font_manager_get_normal(); }
+// Built-in Montserrat 14 (CONFIG_LV_FONT_MONTSERRAT_14, already compiled in):
+// ASCII only, so reserve it for text we control or that is ASCII by
+// construction (bit info, "Coming up..."), never track/artist names.
+static inline const lv_font_t *font_tiny(void) { return &lv_font_montserrat_14; }
 static inline const lv_font_t *font_large(void) { return font_manager_get_large(); }
 static inline const lv_font_t *font_xlarge(void) { return font_manager_get_xlarge(); }
 static inline const lv_font_t *font_xxlarge(void) { return font_manager_get_xxlarge(); }
@@ -287,6 +325,7 @@ static inline const lv_font_t *font_large_icon(void) { return font_manager_get_l
 // PC fallback - use built-in Montserrat (has LVGL symbols)
 static inline const lv_font_t *font_small(void) { return &lv_font_montserrat_20; }
 static inline const lv_font_t *font_normal(void) { return &lv_font_montserrat_28; }
+static inline const lv_font_t *font_tiny(void) { return &lv_font_montserrat_14; }
 static inline const lv_font_t *font_large(void) { return &lv_font_montserrat_48; }
 static inline const lv_font_t *font_xlarge(void) { return &lv_font_montserrat_48; }  // PC sim has no 56px asset
 static inline const lv_font_t *font_xxlarge(void) { return &lv_font_montserrat_48; }  // PC sim has no 112px asset
@@ -1325,6 +1364,52 @@ static void build_layout(void) {
     build_playback_icon_overlay();
 }
 
+// Detail screen text geometry. The round panel is SCREEN_SIZE across, and in
+// detail mode the progress arc is PROGRESS_ARC_SIZE_SEEK wide with
+// PROGRESS_ARC_WIDTH_SEEK thick, drawn inside its own bounds. Text has to
+// stay inside the arc's inner edge plus a small margin, so the usable radius
+// is the arc's inner radius less DETAIL_TEXT_MARGIN.
+#define DETAIL_TEXT_TOP 108          // 3px below the thumbnail (ends y=105)
+#define DETAIL_TEXT_PAD_ROW 1
+#define DETAIL_TEXT_MAX_WIDTH (SCREEN_SIZE - 20)  // chord width governs; this only bounds it
+#define DETAIL_TEXT_MARGIN 2
+#define DETAIL_TEXT_MIN_WIDTH 60
+#define DETAIL_TEXT_RADIUS \
+    (PROGRESS_ARC_SIZE_SEEK / 2 - PROGRESS_ARC_WIDTH_SEEK - DETAIL_TEXT_MARGIN)
+// The "Coming up" title/artist rows ignore the progress arc and use the
+// physical panel edge instead (owner direction: the arc may be overdrawn
+// there, they just must not clip on the glass).
+#define DETAIL_TEXT_RADIUS_FULL (SCREEN_SIZE / 2 - 4)
+
+static int32_t detail_isqrt(int32_t v) {
+    int32_t r = 0;
+    while ((r + 1) * (r + 1) <= v) {
+        r++;
+    }
+    return r;
+}
+
+// Widest a single text row may be, given where it sits vertically: the chord
+// of the usable circle at whichever of the row's top/bottom edges is farthest
+// from the panel's centre (the narrowest point the row's ink can reach).
+// Rows below centre are limited by their bottom edge, rows above by their top.
+static int32_t detail_row_width_r(int32_t row_top, int32_t row_height, int32_t r) {
+    const int32_t centre = SCREEN_SIZE / 2;
+    int32_t dy_top = row_top - centre;
+    int32_t dy_bottom = row_top + row_height - centre;
+    if (dy_top < 0) dy_top = -dy_top;
+    if (dy_bottom < 0) dy_bottom = -dy_bottom;
+    int32_t dy = dy_top > dy_bottom ? dy_top : dy_bottom;
+    int32_t width = dy >= r ? 0 : 2 * detail_isqrt(r * r - dy * dy);
+    if (width > DETAIL_TEXT_MAX_WIDTH) width = DETAIL_TEXT_MAX_WIDTH;
+    if (width < DETAIL_TEXT_MIN_WIDTH) width = DETAIL_TEXT_MIN_WIDTH;
+    return width;
+}
+
+static int32_t detail_row_width(int32_t row_top, int32_t row_height) {
+    return detail_row_width_r(row_top, row_height, DETAIL_TEXT_RADIUS);
+}
+
 // Detail info screen (see ui_set_detail_mode) - thumbnail in the top third,
 // title/artist/album/progress stacked around center, matching the same
 // "first pass, tune on hardware by eye" spirit as the rest of this layout
@@ -1353,6 +1438,14 @@ static void build_detail_overlay(void) {
     lv_obj_add_event_cb(s_detail_overlay, mute_region_long_press_cb,
                         LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_add_flag(s_detail_overlay, LV_OBJ_FLAG_HIDDEN);
+    // Never scrollable - this used to be implicitly scrollable (default
+    // LVGL object behavior when children overflow it), which is what let a
+    // long wrapped title push the thumbnail out of view in the first
+    // place. Now moot in practice too: every text row below switched from
+    // wrapping to single-line marquee scroll (LV_LABEL_LONG_SCROLL_CIRCULAR),
+    // so nothing here grows tall enough to overflow regardless of text
+    // length - kept as a defensive belt-and-suspenders, not load-bearing.
+    lv_obj_remove_flag(s_detail_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
     // Thumbnail - shares s_artwork_img's pixel buffer via lv_image_set_src,
     // scaled down (see ui_set_artwork()); not its own decode/copy.
@@ -1375,44 +1468,142 @@ static void build_detail_overlay(void) {
     // from the thumbnail, never into it, regardless of how many lines
     // wrap on a given track.
     s_detail_text_group = lv_obj_create(s_detail_overlay);
-    lv_obj_set_size(s_detail_text_group, SCREEN_SIZE - 80, LV_SIZE_CONTENT);
+    lv_obj_set_size(s_detail_text_group, DETAIL_TEXT_MAX_WIDTH, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(s_detail_text_group, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_detail_text_group, 0, 0);
     lv_obj_set_style_pad_all(s_detail_text_group, 0, 0);
-    lv_obj_set_style_pad_row(s_detail_text_group, 4, 0);
+    lv_obj_set_style_pad_row(s_detail_text_group, DETAIL_TEXT_PAD_ROW, 0);
     lv_obj_set_layout(s_detail_text_group, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(s_detail_text_group, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_detail_text_group, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(s_detail_text_group, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_align(s_detail_text_group, LV_ALIGN_TOP_MID, 0, 115);  // 10px below the thumbnail (ends at y=105)
+    lv_obj_align(s_detail_text_group, LV_ALIGN_TOP_MID, 0, DETAIL_TEXT_TOP);
+    int32_t row_y = DETAIL_TEXT_TOP;  // running top of the next row, for detail_row_width()
 
+    // LV_LABEL_LONG_SCROLL_CIRCULAR (horizontal marquee for text wider than
+    // the label, matching the Music screen's own s_track_label/s_artist_label
+    // - see their own comments) rather than LV_LABEL_LONG_WRAP, which is
+    // what let a long title/artist/album grow past one line each and push
+    // this whole group tall enough to need scrolling in the first place
+    // (owner example: a long YES title left the next track's view scrolled
+    // down with the thumbnail out of view). Single-line + marquee keeps
+    // every row here a fixed height, so title/artist/album/progress/
+    // enrichment together never exceed the screen regardless of text
+    // length - nothing on this screen needs to scroll vertically anymore.
     s_detail_title_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_title_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_title_label, detail_row_width(row_y, lv_font_get_line_height(font_normal())));
+    row_y += lv_font_get_line_height(font_normal()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_title_label, font_normal(), 0);
     lv_obj_set_style_text_align(s_detail_title_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_title_label, lv_color_hex(0xfafafa), 0);
-    lv_label_set_long_mode(s_detail_title_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(s_detail_title_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_detail_title_label, 25000, LV_PART_MAIN);
 
     s_detail_artist_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_artist_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_artist_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_artist_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_artist_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_artist_label, lv_color_hex(0xc0c0c0), 0);
-    lv_label_set_long_mode(s_detail_artist_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(s_detail_artist_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_detail_artist_label, 25000, LV_PART_MAIN);
 
+    // Album (+ year, once available - see apply_detail_album_label()) is
+    // the longest-running text on this row (title (year) can be long), so
+    // it's the one most likely to actually need its marquee in practice.
     s_detail_album_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_album_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_album_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_album_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_album_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_album_label, lv_color_hex(0x888888), 0);
-    lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_detail_album_label, 25000, LV_PART_MAIN);
 
     s_detail_progress_label = lv_label_create(s_detail_text_group);
-    lv_obj_set_width(s_detail_progress_label, LV_PCT(100));
+    lv_obj_set_width(s_detail_progress_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
     lv_obj_set_style_text_font(s_detail_progress_label, font_small(), 0);
     lv_obj_set_style_text_align(s_detail_progress_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_progress_label, lv_color_hex(0x7bb9e8), 0);
     lv_label_set_text(s_detail_progress_label, "");
+
+    // Enrichment rows - bit info / "Coming up" / next track. Plain further
+    // children of the same s_detail_text_group flex column above (not a
+    // separate container) - now that every row is single-line, they just
+    // stack after progress with no special positioning needed. Every label
+    // here starts hidden: there's no live data source for any of them yet
+    // (Roon's own API has no year/next-track/bit-depth field, confirmed
+    // directly against its source rather than assumed), so this is the
+    // display layer built ahead of that landing, not wired to anything
+    // that populates it yet - see ui_set_bit_info()/ui_set_next_track().
+    s_detail_bitinfo_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_bitinfo_label, detail_row_width(row_y, lv_font_get_line_height(font_tiny())));
+    row_y += lv_font_get_line_height(font_tiny()) + DETAIL_TEXT_PAD_ROW;
+    lv_obj_set_style_text_font(s_detail_bitinfo_label, font_tiny(), 0);
+    lv_obj_set_style_text_align(s_detail_bitinfo_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_bitinfo_label, lv_color_hex(0x888888), 0);
+    lv_label_set_text(s_detail_bitinfo_label, "");
+    lv_obj_add_flag(s_detail_bitinfo_label, LV_OBJ_FLAG_HIDDEN);
+
+    s_detail_next_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_next_label, detail_row_width(row_y, lv_font_get_line_height(font_tiny())));
+    row_y += lv_font_get_line_height(font_tiny()) + DETAIL_TEXT_PAD_ROW;
+    lv_obj_set_style_text_font(s_detail_next_label, font_tiny(), 0);
+    lv_obj_set_style_text_align(s_detail_next_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_next_label, lv_color_hex(0x888888), 0);
+    lv_label_set_text(s_detail_next_label, "Coming up...");
+    lv_obj_add_flag(s_detail_next_label, LV_OBJ_FLAG_HIDDEN);
+
+    // Next-track title/artist stay font_small() (Lato, full Unicode coverage:
+    // names like "Bjork"/"Beyonce" with accents must render) - only the
+    // ASCII-only "Coming up..." caption and bit info drop to font_tiny().
+    // Each row's width comes from detail_row_width(): narrower the closer
+    // it sits to the bottom of the round panel, so the marquee's clip
+    // region stays inside the circle rather than the arc.
+    s_detail_next_title_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_next_title_label, detail_row_width_r(row_y, lv_font_get_line_height(font_small()),
+                                                      DETAIL_TEXT_RADIUS_FULL));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
+    lv_obj_set_style_text_font(s_detail_next_title_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_detail_next_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_next_title_label, lv_color_hex(0xc0c0c0), 0);
+    lv_label_set_long_mode(s_detail_next_title_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_detail_next_title_label, 25000, LV_PART_MAIN);
+    lv_label_set_text(s_detail_next_title_label, "");
+    lv_obj_add_flag(s_detail_next_title_label, LV_OBJ_FLAG_HIDDEN);
+
+    s_detail_next_artist_label = lv_label_create(s_detail_text_group);
+    lv_obj_set_width(s_detail_next_artist_label, detail_row_width_r(row_y, lv_font_get_line_height(font_small()),
+                                                      DETAIL_TEXT_RADIUS_FULL));
+    row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
+    lv_obj_set_style_text_font(s_detail_next_artist_label, font_small(), 0);
+    lv_obj_set_style_text_align(s_detail_next_artist_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_detail_next_artist_label, lv_color_hex(0x888888), 0);
+    lv_label_set_long_mode(s_detail_next_artist_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_time(s_detail_next_artist_label, 25000, LV_PART_MAIN);
+    lv_label_set_text(s_detail_next_artist_label, "");
+    lv_obj_add_flag(s_detail_next_artist_label, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Combines s_detail_album_raw with s_detail_album_year (if known) into
+// s_detail_album_label - "Crime of the Century (1974)" - or just the plain
+// album text if the year is unknown, gracefully dropping the parentheses
+// entirely rather than showing them empty. Called both when the album text
+// itself changes (apply_state(), on a poll) and when the year arrives
+// separately (ui_set_album_year(), from whatever eventually calls it), so
+// either arriving first still ends up correct without waiting on the other.
+static void apply_detail_album_label(void) {
+    if (!s_detail_album_label) {
+        return;
+    }
+    if (s_detail_album_year > 0 && s_detail_album_raw[0] != '\0') {
+        char combined[160];
+        snprintf(combined, sizeof(combined), "%s (%d)", s_detail_album_raw, s_detail_album_year);
+        lv_label_set_text(s_detail_album_label, combined);
+    } else {
+        lv_label_set_text(s_detail_album_label, s_detail_album_raw);
+    }
 }
 
 // Large semi-transparent play/pause confirmation icon (see
@@ -1663,20 +1854,6 @@ static void apply_state(const struct ui_state *state) {
             lv_obj_invalidate(s_track_label);
             strncpy(s_last_line1, state->line1, sizeof(s_last_line1) - 1);
             s_last_line1[sizeof(s_last_line1) - 1] = '\0';
-
-            // A new track resets the detail screen's scroll position too -
-            // otherwise a track with enough wrapped title/artist/album text
-            // to need scrolling (owner example: a long YES title) leaves
-            // the next track's detail view scrolled down, thumbnail no
-            // longer visible at the top, with no easy way back (a tap or
-            // swipe up there is already claimed by exit-detail/mute, not
-            // scroll-to-top). s_detail_overlay is the scrollable object -
-            // its children overflow the fixed-size screen by default LVGL
-            // behavior, not an explicit scrollable flag set elsewhere in
-            // this file.
-            if (s_detail_overlay) {
-                lv_obj_scroll_to_y(s_detail_overlay, 0, LV_ANIM_OFF);
-            }
         }
         if (strcmp(state->line2, s_last_line2) != 0) {
             lv_label_set_text(s_artist_label, state->line2);
@@ -1700,9 +1877,59 @@ static void apply_state(const struct ui_state *state) {
     if (s_detail_artist_label) {
         lv_label_set_text(s_detail_artist_label, state->line2);
     }
-    if (s_detail_album_label) {
-        lv_label_set_text(s_detail_album_label, state->line3);
+    strncpy(s_detail_album_raw, state->line3, sizeof(s_detail_album_raw) - 1);
+    s_detail_album_raw[sizeof(s_detail_album_raw) - 1] = '\0';
+    s_detail_album_year = state->album_year;
+    apply_detail_album_label();
+
+    // Enrichment region - hide-if-absent per field, independent of each
+    // other and of title/artist/album above (see ui_set_bit_info()/
+    // ui_set_next_track()'s own comments for why). Cheap enough to run
+    // unconditionally every poll rather than change-guard like the
+    // track/artist labels above - a handful of short label/flag calls, not
+    // the 9-widget halo update volume/track text has to guard against.
+    if (s_detail_bitinfo_label) {
+        bool has_bit_info = state->bit_info[0] != '\0';
+        lv_label_set_text(s_detail_bitinfo_label, has_bit_info ? state->bit_info : "");
+        if (has_bit_info) {
+            lv_obj_remove_flag(s_detail_bitinfo_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_detail_bitinfo_label, LV_OBJ_FLAG_HIDDEN);
+        }
     }
+    // Three states: a known next track, a positively-known "Nothing"
+    // (next_track_none - UHC only sends it with positive evidence, never
+    // for merely-unknown), or unknown, which hides the whole group. A
+    // title always wins over the none flag.
+    bool has_next_track = state->next_line1[0] != '\0';
+    bool show_next_none = !has_next_track && state->next_track_none;
+    bool show_next_group = has_next_track || show_next_none;
+    if (s_detail_next_label) {
+        if (show_next_group) {
+            lv_obj_remove_flag(s_detail_next_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_detail_next_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_detail_next_title_label) {
+        lv_label_set_text(s_detail_next_title_label,
+                          has_next_track ? state->next_line1 : (show_next_none ? "Nothing" : ""));
+        if (show_next_group) {
+            lv_obj_remove_flag(s_detail_next_title_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_detail_next_title_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_detail_next_artist_label) {
+        bool has_next_artist = has_next_track && state->next_line2[0] != '\0';
+        lv_label_set_text(s_detail_next_artist_label, has_next_artist ? state->next_line2 : "");
+        if (has_next_artist) {
+            lv_obj_remove_flag(s_detail_next_artist_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_detail_next_artist_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
 
     // Update volume arc and label, emphasize if volume changed
     // Volume is in dB with zone-specific min/max range
@@ -2515,6 +2742,60 @@ void ui_set_album(const char *album) {
     } else {
         s_pending.line3[0] = '\0';
     }
+    s_dirty = true;
+    os_mutex_unlock(&s_state_lock);
+}
+
+void ui_set_album_year(int year) {
+    os_mutex_lock(&s_state_lock);
+    s_pending.album_year = year;
+    s_dirty = true;
+    os_mutex_unlock(&s_state_lock);
+}
+
+void ui_set_bit_info(const char *text) {
+    os_mutex_lock(&s_state_lock);
+    if (text) {
+        strncpy(s_pending.bit_info, text, sizeof(s_pending.bit_info) - 1);
+        s_pending.bit_info[sizeof(s_pending.bit_info) - 1] = '\0';
+    } else {
+        s_pending.bit_info[0] = '\0';
+    }
+    s_dirty = true;
+    os_mutex_unlock(&s_state_lock);
+}
+
+void ui_set_next_track(const char *title, const char *artist) {
+    os_mutex_lock(&s_state_lock);
+    if (title && title[0] != '\0') {
+        strncpy(s_pending.next_line1, title, sizeof(s_pending.next_line1) - 1);
+        s_pending.next_line1[sizeof(s_pending.next_line1) - 1] = '\0';
+        // Same streaming-service noise cleanup the current title (ui_set_track)
+        // and album (ui_set_album) already get - without it "Coming up" could
+        // still show "(Remastered 2011)" beside an already-cleaned Now Playing.
+        // If the filter strips the whole title, next_line1 ends up empty and
+        // the group hides, which is the existing "no next track" behavior.
+        track_title_filter_apply(s_pending.next_line1, sizeof(s_pending.next_line1));
+        if (artist) {
+            strncpy(s_pending.next_line2, artist, sizeof(s_pending.next_line2) - 1);
+            s_pending.next_line2[sizeof(s_pending.next_line2) - 1] = '\0';
+        } else {
+            s_pending.next_line2[0] = '\0';
+        }
+    } else {
+        // Empty title hides the whole "Coming up" group (see apply_state()) -
+        // clear the artist too so a later title-only call can't show a
+        // stale artist left over from a previous, unrelated next-track.
+        s_pending.next_line1[0] = '\0';
+        s_pending.next_line2[0] = '\0';
+    }
+    s_dirty = true;
+    os_mutex_unlock(&s_state_lock);
+}
+
+void ui_set_next_track_none(bool none) {
+    os_mutex_lock(&s_state_lock);
+    s_pending.next_track_none = none;
     s_dirty = true;
     os_mutex_unlock(&s_state_lock);
 }

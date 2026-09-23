@@ -51,3 +51,15 @@ void controller_presentation_seek_adjust(int32_t ticks) {
     // CONTROLLER_INTERACTION_CONTEXT_SEEK here, so this should never fire.
     (void)ticks;
 }
+
+void controller_presentation_set_media_enrichment(
+    const char *next_track_title, const char *next_track_artist,
+    int32_t album_year, const char *bit_info,
+    bool next_track_none) {
+    // No detail screen on this target to show any of this on.
+    (void)next_track_title;
+    (void)next_track_artist;
+    (void)album_year;
+    (void)bit_info;
+    (void)next_track_none;
+}

@@ -96,6 +96,20 @@ struct now_playing_state {
     char image_key[128];  // For tracking album artwork changes
     char config_sha[9];   // Config SHA for change detection
     char zones_sha[9];    // Zones SHA for zone list change detection
+
+    // Detail-screen enrichment - sourced from UHC's own sidecar (a separate
+    // reverse-engineered Roon private-protocol client, not the public
+    // Extension API this bridge otherwise talks to), which can go silent or
+    // stop being deployed at any time without warning. All four are simply
+    // absent from a given /now_playing response (not null/empty) whenever
+    // unavailable, same convention as image_key/config_sha/zones_sha above -
+    // cleared to their own "absent" value here when that happens, never left
+    // holding a stale value from an earlier poll.
+    char next_track_title[128];
+    char next_track_artist[128];
+    int album_year;      // 0 = unknown/absent
+    char bit_info[64];   // e.g. "16-bit / 44.1kHz"; empty = absent
+    bool next_track_none; // "next_track_none":true - UHC positively knows nothing is next
 };
 
 // Device operational state for safe volume control
@@ -201,6 +215,7 @@ static atomic_bool s_discovered_endpoint_commit_pending = ATOMIC_VAR_INIT(false)
 static void strip_trailing_slashes(char *url);
 static void bridge_poll_thread(void *arg);
 static void post_ui_connectivity_update(const char *line1, const char *line2);
+static void post_ui_media_enrichment(const struct now_playing_state *state);
 static void post_ui_network_status(const char *status);
 
 static bool start_bridge_poll_task(void) {
@@ -435,6 +450,34 @@ static void commit_discovered_endpoint_on_ui(void *arg) {
     controller_presentation_set_message("Hi-Fi Control: Found");
 }
 
+static void ui_media_enrichment_cb(void *arg) {
+    controller_media_enrichment_view_t *view = arg;
+    if (!view) {
+        return;
+    }
+    controller_view_compat_apply_media_enrichment(view);
+    free(view);
+}
+
+// Separate patch/post from post_ui_update()'s controller_media_view_t, same
+// reasoning as connectivity above it - see controller_media_enrichment_view_t's
+// own comment for why this doesn't ride along on the main media view.
+static void post_ui_media_enrichment(const struct now_playing_state *state) {
+    if (!state) {
+        return;
+    }
+    controller_media_enrichment_view_t *view = bridge_external_alloc(sizeof(*view));
+    if (!view) {
+        return;
+    }
+    controller_media_enrichment_view_init(
+        view, state->next_track_title, state->next_track_artist,
+        state->album_year, state->bit_info, state->next_track_none);
+    if (!platform_task_post_to_ui(ui_media_enrichment_cb, view)) {
+        free(view);
+    }
+}
+
 static void ui_connectivity_update_cb(void *arg) {
     controller_connectivity_view_t *view = arg;
     if (!view) {
@@ -490,6 +533,11 @@ static void default_now_playing(struct now_playing_state *state) {
     state->image_key[0] = '\0';
     state->config_sha[0] = '\0';
     state->zones_sha[0] = '\0';
+    state->next_track_title[0] = '\0';
+    state->next_track_artist[0] = '\0';
+    state->album_year = 0;
+    state->bit_info[0] = '\0';
+    state->next_track_none = false;
 }
 
 static void post_ui_update(const struct now_playing_state *state) {
@@ -833,6 +881,42 @@ static bool fetch_now_playing(struct now_playing_state *state) {
         state->zones_sha[0] = '\0';
     }
 
+    // Detail-screen enrichment - see the struct fields' own comment. Each
+    // one simply absent from the response (not the key present with a null
+    // or empty value) is UHC's sidecar-down/unknown signal; clear to this
+    // struct's own "absent" value in that case rather than holding a stale
+    // value from an earlier poll when the sidecar was still running.
+    const char *next_track_title_key = strstr(resp, "\"next_track_title\"");
+    if (next_track_title_key) {
+        extract_json_string(next_track_title_key, "\"next_track_title\"",
+                             state->next_track_title, sizeof(state->next_track_title));
+    } else {
+        state->next_track_title[0] = '\0';
+    }
+    const char *next_track_artist_key = strstr(resp, "\"next_track_artist\"");
+    if (next_track_artist_key) {
+        extract_json_string(next_track_artist_key, "\"next_track_artist\"",
+                             state->next_track_artist, sizeof(state->next_track_artist));
+    } else {
+        state->next_track_artist[0] = '\0';
+    }
+    const char *album_year_key = strstr(resp, "\"album_year\"");
+    if (album_year_key) {
+        const char *colon = strchr(album_year_key, ':');
+        state->album_year = colon ? atoi(colon + 1) : 0;
+    } else {
+        state->album_year = 0;
+    }
+    const char *bit_info_key = strstr(resp, "\"bit_info\"");
+    if (bit_info_key) {
+        extract_json_string(bit_info_key, "\"bit_info\"", state->bit_info, sizeof(state->bit_info));
+    } else {
+        state->bit_info[0] = '\0';
+    }
+
+    // Only ever true, only with positive evidence from UHC; absent = unknown.
+    state->next_track_none = strstr(resp, "\"next_track_none\":true") != NULL;
+
     // Note: Don't parse zones from now_playing response - it doesn't have zone_name
     // Zones are parsed from /zones endpoint in refresh_zone_label()
     platform_http_free(resp);
@@ -1113,6 +1197,7 @@ static void bridge_poll_thread(void *arg) {
         if (ok) {
             // Bridge connected - show now playing data
             post_ui_update(&state);
+            post_ui_media_enrichment(&state);
             if (!s_last_net_ok) {
                 // Just connected - clear status, restore zone name, mark verified
                 reset_bridge_fail_count();
