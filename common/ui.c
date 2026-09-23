@@ -3534,6 +3534,43 @@ void ui_set_controls_visible(bool visible) {
     }
 }
 
+// Battery/perf: the progress-arc interpolation timer and every marquee
+// label keep doing per-frame work even with the panel powered off and
+// nothing visible - undercuts whatever power display_sleep.c saves
+// elsewhere. Marquee labels can't be "paused" through LVGL's public API
+// (the scroll animation is internal to LV_LABEL_LONG_SCROLL_CIRCULAR, not
+// a separate lv_anim_t callers can touch) - dropping to LV_LABEL_LONG_CLIP
+// for the duration is the safe, public-API way to stop the animation
+// without disturbing anything else about the label; restoring
+// SCROLL_CIRCULAR on wake just restarts the marquee from the beginning,
+// which is unnoticeable since the screen was off anyway.
+void ui_set_background_animation_paused(bool paused) {
+    if (s_progress_interp_timer) {
+        if (paused) {
+            lv_timer_pause(s_progress_interp_timer);
+        } else {
+            // Freeze the interpolation baseline at "now" rather than letting
+            // the next tick compute elapsed time across the whole sleep
+            // duration (which would show progress jumping far ahead for one
+            // frame) - the next real poll corrects s_progress_base_ms/
+            // s_progress_base_uptime_ms properly, same self-correcting
+            // pattern this file already uses elsewhere for seek/skip/pause
+            // gaps between poll cycles.
+            s_progress_base_uptime_ms = platform_millis();
+            lv_timer_resume(s_progress_interp_timer);
+        }
+    }
+
+    lv_label_long_mode_t mode = paused ? LV_LABEL_LONG_CLIP : LV_LABEL_LONG_SCROLL_CIRCULAR;
+    if (s_track_label) lv_label_set_long_mode(s_track_label, mode);
+    if (s_artist_label) lv_label_set_long_mode(s_artist_label, mode);
+    if (s_detail_title_label) lv_label_set_long_mode(s_detail_title_label, mode);
+    if (s_detail_artist_label) lv_label_set_long_mode(s_detail_artist_label, mode);
+    if (s_detail_album_label) lv_label_set_long_mode(s_detail_album_label, mode);
+    if (s_detail_next_title_label) lv_label_set_long_mode(s_detail_next_title_label, mode);
+    if (s_detail_next_artist_label) lv_label_set_long_mode(s_detail_next_artist_label, mode);
+}
+
 // ============================================================================
 // Display State Control - Detail Info Screen
 // ============================================================================

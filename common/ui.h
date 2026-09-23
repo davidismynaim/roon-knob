@@ -51,6 +51,14 @@ void ui_trigger_update(void);  // Called when user taps update notification
 // Display state control
 void ui_set_controls_visible(bool visible);  // Show/hide UI controls for art mode
 
+// Called from display_sleep.c on entering/leaving DISPLAY_STATE_SLEEP (panel
+// and backlight already off/on either side of this call). Stops per-frame
+// work that would otherwise keep running for a screen nobody can see:
+// pauses the 250ms progress-arc interpolation timer, and drops every
+// LV_LABEL_LONG_SCROLL_CIRCULAR marquee label to a static (non-animating)
+// long_mode for the duration, restoring both on wake.
+void ui_set_background_animation_paused(bool paused);
+
 // Detail info screen - a third content state (distinct from art mode's
 // power/backlight handling in display_sleep.c) showing a thumbnail, title,
 // artist, album, and live progress numerics. Entered/exited by
