@@ -3,6 +3,7 @@
 
 #include "config_server.h"
 #include "controller_config.h"
+#include "display_sleep.h"
 #include "haptic_driver.h"
 #include "http_server_lifecycle.h"
 #include "platform/platform_mdns.h"
@@ -53,7 +54,7 @@ static esp_err_t send_conflict(httpd_req_t *req, const char *message) {
 // Format args: current_bridge, status_class, status_text, wifi_html,
 // bridge_value, ha_host, ha_token_placeholder, zone_options,
 // escaped_title_patterns, haptic_checked, haptic_effect_options,
-// haptic_cal_status, room_lounge_selected, room_dining_selected
+// haptic_cal_status, room_lounge_selected, room_dining_selected, boot_reason
 static const char *HTML_CONFIG =
     "<!DOCTYPE html>"
     "<html><head>"
@@ -154,7 +155,9 @@ static const char *HTML_CONFIG =
     "</select>"
     "<p class='hint'>Which installation this dial talks to &mdash; Lounge (Roon-driven volume/source/mute) or Dining Room (dbx DriveRack VENU360). Changes which Home Assistant entities the dial's volume knob, mute, and source picker use, and hides the TV source in Dining. Saving reboots the device.</p>"
     "<input type='submit' value='Save'>"
-    "</form></body></html>";
+    "</form>"
+    "<p class='hint'>Last boot: %s</p>"
+    "</body></html>";
 
 static const char *HTML_SUCCESS =
     "<!DOCTYPE html>"
@@ -559,7 +562,8 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     snprintf(html, 16384, HTML_CONFIG, current, status_class, status_text,
              wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
              zone_options, escaped_patterns, haptic_checked, haptic_effect_options,
-             haptic_cal_status, room_lounge_selected, room_dining_selected);
+             haptic_cal_status, room_lounge_selected, room_dining_selected,
+             display_boot_reason());
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));
