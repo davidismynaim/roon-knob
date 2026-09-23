@@ -390,8 +390,36 @@ static void deep_sleep_timer_callback(void *arg) {
     s_pending_deep_sleep = true;  // Defer to UI loop
 }
 
-// Enter deep sleep - device will reset on wake
+static void enter_deep_sleep_body(void);
+
+// Enter deep sleep - device will reset on wake.
+// With CPU frequency scaling on, display-sleep runs with auto light sleep and
+// a scaled-down CPU. Tearing down WiFi/the panel and configuring RTC wake pins
+// in that state (and letting the idle task light-sleep during the pre-sleep
+// delay) made the chip reset instead of reaching deep sleep - it always
+// slept fine with scaling off. So hold both PM locks (full speed, no light
+// sleep) for the whole shutdown, and give them back only if we return
+// without sleeping, so the wake path's acquire/release counts stay balanced.
 static void enter_deep_sleep(void) {
+    bool held = false;
+#if CONFIG_PM_ENABLE
+    held = s_cpu_freq_scaling_enabled && s_pm_initialized &&
+           s_pm_cpu_lock && s_pm_no_light_sleep_lock;
+    if (held) {
+        esp_pm_lock_acquire(s_pm_no_light_sleep_lock);
+        esp_pm_lock_acquire(s_pm_cpu_lock);
+    }
+#endif
+    enter_deep_sleep_body();
+#if CONFIG_PM_ENABLE
+    if (held) {
+        esp_pm_lock_release(s_pm_cpu_lock);
+        esp_pm_lock_release(s_pm_no_light_sleep_lock);
+    }
+#endif
+}
+
+static void enter_deep_sleep_body(void) {
     ESP_LOGI(TAG, "Preparing for deep sleep...");
     crumb(1);
 
