@@ -992,11 +992,18 @@ static const char *extract_json_string(const char *start, const char *key, char 
     if (!colon) {
         return NULL;
     }
-    const char *quote_start = strchr(colon, '"');
-    if (!quote_start) {
+    // The value must start with a quote (after optional whitespace). Without
+    // this a JSON `null` (e.g. "line3":null for an idle zone) made the search
+    // run on to the NEXT key's opening quote and return that key's name -
+    // the dial showed "is_playing" as the album line.
+    const char *value = colon + 1;
+    while (*value == ' ' || *value == '\t') {
+        value++;
+    }
+    if (*value != '"') {
         return NULL;
     }
-    quote_start++;
+    const char *quote_start = value + 1;
     const char *quote_end = strchr(quote_start, '"');
     if (!quote_end) {
         return NULL;
