@@ -3569,6 +3569,21 @@ void ui_set_background_animation_paused(bool paused) {
     if (s_detail_album_label) lv_label_set_long_mode(s_detail_album_label, mode);
     if (s_detail_next_title_label) lv_label_set_long_mode(s_detail_next_title_label, mode);
     if (s_detail_next_artist_label) lv_label_set_long_mode(s_detail_next_artist_label, mode);
+
+    if (!paused) {
+        // lvgl_flush_cb() now skips pushing pixels to the panel entirely
+        // while display_is_sleeping() (separate fix, same battery
+        // motivation) - LVGL's widgets still got every real content
+        // update that happened during sleep (track/artist/artwork/etc.,
+        // never gated on sleep state - apply_state() has to keep them
+        // correct regardless), but none of those flushed to the actual
+        // panel. Without this, the panel would show whatever was last
+        // physically flushed before sleep began until something else
+        // happened to trigger a redraw after waking. Force one now so
+        // what's on screen matches LVGL's actual state the moment the
+        // panel comes back on.
+        lv_obj_invalidate(lv_screen_active());
+    }
 }
 
 // ============================================================================

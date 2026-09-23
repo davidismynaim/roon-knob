@@ -335,6 +335,22 @@ static void rotate180_rgb565_simple(const uint16_t *src, uint16_t *dst, int pixe
 
 // LVGL flush callback with software rotation support
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+    // Content updates (track/artist text, artwork, progress) are never
+    // gated on display-sleep state upstream - apply_state() has to keep
+    // LVGL's widgets correct even while asleep, so whatever's showing is
+    // right the instant the user wakes it. That means this callback still
+    // fires for a genuine track change while DISPLAY_STATE_SLEEP is
+    // active, and esp_lcd_panel_draw_bitmap() below pushes real pixels
+    // over QSPI to the panel regardless of its own disp_on_off(false)
+    // state - whether that's visible depends on how fully this exact
+    // panel gates output after DISPOFF, but there's no reason to push the
+    // bytes at all for a screen nobody should be seeing. flush_ready()
+    // still has to run either way, or LVGL stalls waiting for it.
+    if (display_is_sleeping()) {
+        lv_display_flush_ready(disp);
+        return;
+    }
+
     esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t)lv_display_get_user_data(disp);
 
     lv_display_rotation_t rotation = lv_display_get_rotation(disp);

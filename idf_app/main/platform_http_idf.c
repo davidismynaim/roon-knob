@@ -31,24 +31,6 @@ static const char* get_knob_version(void) {
     return app_desc->version;
 }
 
-// Reused across calls so the polling path (every 2-5s while awake, hundreds
-// of times/hour) can keep its TCP connection to the bridge alive instead of
-// a fresh handshake every time. esp_http_client_set_url()/set_method() are
-// the documented ESP-IDF reuse path (esp_http_client_open() reuses the
-// existing socket when the host/port match and the previous response was
-// fully read). Any failure releases the handle so the next call starts
-// clean rather than risk getting stuck in a bad state - reuse is an
-// optimization on the success path only, never load-bearing for
-// correctness.
-static esp_http_client_handle_t s_shared_client = NULL;
-
-static void release_shared_client(void) {
-    if (s_shared_client) {
-        esp_http_client_cleanup(s_shared_client);
-        s_shared_client = NULL;
-    }
-}
-
 static int http_perform(const char *url, const char *body,
                         const char *content_type, size_t max_response_bytes,
                         const char *bearer_token,
@@ -63,34 +45,23 @@ static int http_perform(const char *url, const char *body,
     }
     ESP_LOGD(TAG, "HTTP %s: %s", body ? "POST" : "GET", url);
 
-    esp_http_client_handle_t client;
-    if (s_shared_client) {
-        client = s_shared_client;
-        esp_http_client_set_url(client, url);
-    } else {
-        // Use native request pattern (more reliable than perform() with event handler)
-        esp_http_client_config_t config = {
-            .url = url,
-            .timeout_ms = 3000,
-        };
-        client = esp_http_client_init(&config);
-        if (!client) {
-            ESP_LOGE(TAG, "Failed to init HTTP client");
-            return -1;
-        }
-        s_shared_client = client;
+    // Use native request pattern (more reliable than perform() with event handler)
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = body ? HTTP_METHOD_POST : HTTP_METHOD_GET,
+        .timeout_ms = 3000,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Failed to init HTTP client");
+        return -1;
     }
-    esp_http_client_set_method(client, body ? HTTP_METHOD_POST : HTTP_METHOD_GET);
 
     // Set headers
     esp_http_client_set_header(client, "Accept", "application/json");
     if (body) {
         esp_http_client_set_header(client, "Content-Type", content_type ? content_type : "application/json");
-    } else {
-        // Clear a stale Content-Type left over from a previous POST reuse
-        // of this handle (NULL value deletes the header - see
-        // esp_http_client_set_header's documented semantics).
-        esp_http_client_set_header(client, "Content-Type", NULL);
     }
 
     // Set knob identification headers
@@ -103,18 +74,13 @@ static int http_perform(const char *url, const char *body,
     if (bearer_token && bearer_token[0]) {
         snprintf(auth_header, sizeof(auth_header), "Bearer %s", bearer_token);
         esp_http_client_set_header(client, "Authorization", auth_header);
-    } else {
-        // Clear a stale Authorization header from a previous authenticated
-        // reuse of this handle - must never leak a token into an
-        // unauthenticated request.
-        esp_http_client_set_header(client, "Authorization", NULL);
     }
 
     // Open connection
     esp_err_t err = esp_http_client_open(client, body ? strlen(body) : 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to open connection: %s", esp_err_to_name(err));
-        release_shared_client();
+        esp_http_client_cleanup(client);
         return -1;
     }
 
@@ -123,7 +89,8 @@ static int http_perform(const char *url, const char *body,
         int wlen = esp_http_client_write(client, body, strlen(body));
         if (wlen < 0) {
             ESP_LOGE(TAG, "Write failed");
-            release_shared_client();
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
             return -1;
         }
     }
@@ -132,7 +99,8 @@ static int http_perform(const char *url, const char *body,
     int content_length = esp_http_client_fetch_headers(client);
     if (content_length < 0) {
         ESP_LOGE(TAG, "HTTP fetch headers failed");
-        release_shared_client();
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
         return -1;
     }
 
@@ -142,7 +110,8 @@ static int http_perform(const char *url, const char *body,
     if ((size_t)content_length > max_response_bytes) {
         ESP_LOGE(TAG, "Response too large: %d bytes (limit %zu)",
                  content_length, max_response_bytes);
-        release_shared_client();
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
         return -1;
     }
 
@@ -155,7 +124,8 @@ static int http_perform(const char *url, const char *body,
     if (!buffer) {
         ESP_LOGE(TAG, "Failed to allocate %zu-byte PSRAM response buffer",
                  buffer_size);
-        release_shared_client();
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
         return -1;
     }
 
@@ -173,7 +143,8 @@ static int http_perform(const char *url, const char *body,
             ESP_LOGE(TAG, "Response exceeded %zu-byte limit",
                      max_response_bytes);
             free(buffer);
-            release_shared_client();
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
             return -1;
         }
         if (total_read + 1 >= buffer_size) {
@@ -187,7 +158,8 @@ static int http_perform(const char *url, const char *body,
                 ESP_LOGE(TAG, "Failed to grow PSRAM response buffer to %zu",
                          new_size);
                 free(buffer);
-                release_shared_client();
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
                 return -1;
             }
             buffer = grown;
@@ -198,7 +170,8 @@ static int http_perform(const char *url, const char *body,
         if (data_read < 0) {
             ESP_LOGE(TAG, "Failed to read response");
             free(buffer);
-            release_shared_client();
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
             return -1;
         }
         if (data_read == 0) {
@@ -213,9 +186,8 @@ static int http_perform(const char *url, const char *body,
         *out_len = total_read;
     }
 
-    // Close (ends this transaction) but don't cleanup - keeps the handle
-    // and its TCP connection alive for the next call to reuse.
     esp_http_client_close(client);
+    esp_http_client_cleanup(client);
     return 0;
 }
 
