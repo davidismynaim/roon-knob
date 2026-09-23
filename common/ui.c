@@ -225,6 +225,14 @@ static lv_obj_t *s_detail_bitinfo_label;     // e.g. "16-bit / 44.1kHz"
 static lv_obj_t *s_detail_next_label;        // "Coming up..." - hidden together with the two below
 static lv_obj_t *s_detail_next_title_label;
 static lv_obj_t *s_detail_next_artist_label;
+// Battery (right of the text block) and volume (left), both at the
+// progress row's height - see build_detail_overlay(). No dark tint behind
+// the icon like s_battery_badge has on Music: this screen's background is
+// already plain black, so the tint would add nothing (owner direction).
+static lv_obj_t *s_detail_battery_icon;
+static lv_obj_t *s_detail_battery_pct_label;  // "72%" beneath the icon
+static lv_obj_t *s_detail_volume_label;       // Numeric volume (format_volume_text)
+static lv_obj_t *s_detail_db_label;           // dB-equivalent (derive_volume_db_equivalent)
 
 // Large semi-transparent play/pause confirmation icon - shown briefly
 // (ui_show_playback_feedback) whenever playback is toggled, whether from
@@ -1364,12 +1372,22 @@ static void build_layout(void) {
     build_playback_icon_overlay();
 }
 
+// Detail screen artwork: a circle rather than the old square, per owner
+// request. Top edge at y=0 - the topmost pixel the round display has at its
+// horizontal center (a circle inscribed in a SCREEN_SIZE square touches
+// row 0 only exactly at the center column) - so it starts as high as the
+// glass allows. Bottom edge 5px past the old square's own bottom (100+5=105,
+// then +5=110), so the circle is a little bigger than the square was
+// overall, at the cost of the square's corners (now outside the circle).
+#define DETAIL_ARTWORK_TOP_Y 0
+#define DETAIL_ARTWORK_SIZE 110  // old square was 100; bottom edge = 0 + 110 = 105(old bottom) + 5
+
 // Detail screen text geometry. The round panel is SCREEN_SIZE across, and in
 // detail mode the progress arc is PROGRESS_ARC_SIZE_SEEK wide with
 // PROGRESS_ARC_WIDTH_SEEK thick, drawn inside its own bounds. Text has to
 // stay inside the arc's inner edge plus a small margin, so the usable radius
 // is the arc's inner radius less DETAIL_TEXT_MARGIN.
-#define DETAIL_TEXT_TOP 108          // 3px below the thumbnail (ends y=105)
+#define DETAIL_TEXT_TOP 113  // 3px below the (now circular, larger) thumbnail - ends y=110
 #define DETAIL_TEXT_PAD_ROW 1
 #define DETAIL_TEXT_MAX_WIDTH (SCREEN_SIZE - 20)  // chord width governs; this only bounds it
 #define DETAIL_TEXT_MARGIN 2
@@ -1378,7 +1396,8 @@ static void build_layout(void) {
     (PROGRESS_ARC_SIZE_SEEK / 2 - PROGRESS_ARC_WIDTH_SEEK - DETAIL_TEXT_MARGIN)
 // The "Coming up" title/artist rows ignore the progress arc and use the
 // physical panel edge instead (owner direction: the arc may be overdrawn
-// there, they just must not clip on the glass).
+// there, they just must not clip on the glass). The battery/volume badges
+// (see build_detail_overlay) use this same radius for the same reason.
 #define DETAIL_TEXT_RADIUS_FULL (SCREEN_SIZE / 2 - 4)
 
 static int32_t detail_isqrt(int32_t v) {
@@ -1448,10 +1467,15 @@ static void build_detail_overlay(void) {
     lv_obj_remove_flag(s_detail_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
     // Thumbnail - shares s_artwork_img's pixel buffer via lv_image_set_src,
-    // scaled down (see ui_set_artwork()); not its own decode/copy.
+    // scaled down (see ui_set_artwork()); not its own decode/copy. Circular
+    // (LV_RADIUS_CIRCLE + clip_corner, which clips the image content itself,
+    // not just background/border) rather than the old square - see
+    // DETAIL_ARTWORK_TOP_Y/SIZE above for the geometry reasoning.
     s_detail_thumbnail = lv_img_create(s_detail_overlay);
-    lv_obj_set_size(s_detail_thumbnail, 100, 100);
-    lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, 5);  // Moved up ~5mm (50px @ PX_PER_MM=10) per owner feedback on hardware
+    lv_obj_set_size(s_detail_thumbnail, DETAIL_ARTWORK_SIZE, DETAIL_ARTWORK_SIZE);
+    lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, DETAIL_ARTWORK_TOP_Y);
+    lv_obj_set_style_radius(s_detail_thumbnail, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_clip_corner(s_detail_thumbnail, true, 0);
     lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
 
     // Title/artist/album/progress stack in a flex column rather than at
@@ -1520,6 +1544,13 @@ static void build_detail_overlay(void) {
     lv_label_set_long_mode(s_detail_album_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_anim_time(s_detail_album_label, 25000, LV_PART_MAIN);
 
+    // Captured before s_detail_progress_label's own row_y advances below -
+    // used to place the battery/volume badges (further down) at this exact
+    // row's height, computed from the real font metrics rather than a
+    // guessed constant, same as every other row on this screen.
+    int32_t progress_row_top = row_y;
+    int32_t progress_row_height = lv_font_get_line_height(font_small());
+
     s_detail_progress_label = lv_label_create(s_detail_text_group);
     lv_obj_set_width(s_detail_progress_label, detail_row_width(row_y, lv_font_get_line_height(font_small())));
     row_y += lv_font_get_line_height(font_small()) + DETAIL_TEXT_PAD_ROW;
@@ -1527,6 +1558,89 @@ static void build_detail_overlay(void) {
     lv_obj_set_style_text_align(s_detail_progress_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_detail_progress_label, lv_color_hex(0x7bb9e8), 0);
     lv_label_set_text(s_detail_progress_label, "");
+
+    // Battery (right of the text block) and volume (left), vertically
+    // centered on the progress row - the one row of this block that's
+    // always present once something is playing (bit info/next-track can
+    // both be hidden). Sit in the margin between the (narrower,
+    // arc-constrained) text column and the physical glass edge, using the
+    // same DETAIL_TEXT_RADIUS_FULL "safe to the glass" radius the Coming-up
+    // rows already use (owner direction there: the arc may be overdrawn,
+    // just don't clip on the glass). No dark tint behind the battery icon
+    // like s_battery_badge has on Music - this screen's background is
+    // already plain black, so the tint would add nothing (owner direction).
+#if !TARGET_PC
+    {
+#define DETAIL_BADGE_WIDTH 40
+#define DETAIL_BADGE_MARGIN 4
+        int32_t row_centre_y = progress_row_top + progress_row_height / 2;
+        int32_t half_span = detail_row_width_r(progress_row_top, progress_row_height,
+                                                 DETAIL_TEXT_RADIUS_FULL) / 2;
+        int32_t inset = half_span - DETAIL_BADGE_MARGIN - DETAIL_BADGE_WIDTH;
+        if (inset < 4) inset = 4;  // defensive floor - see this screen's own "tune by eye" norm
+
+        int32_t icon_h = lv_font_get_line_height(font_manager_get_lucide_battery());
+        int32_t tiny_h = lv_font_get_line_height(font_tiny());
+        int32_t battery_h = icon_h + 2 + tiny_h;
+        int32_t volume_h = tiny_h + 2 + tiny_h;
+
+        lv_obj_t *battery_group = lv_obj_create(s_detail_overlay);
+        lv_obj_set_size(battery_group, DETAIL_BADGE_WIDTH, battery_h);
+        lv_obj_set_pos(battery_group, SCREEN_SIZE / 2 + inset, row_centre_y - battery_h / 2);
+        lv_obj_set_style_bg_opa(battery_group, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(battery_group, 0, 0);
+        lv_obj_set_style_pad_all(battery_group, 0, 0);
+        lv_obj_remove_flag(battery_group, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(battery_group, LV_OBJ_FLAG_SCROLLABLE);
+
+        s_detail_battery_icon = lv_label_create(battery_group);
+        lv_label_set_text(s_detail_battery_icon, ICON_BATTERY_FULL);
+        lv_obj_set_style_text_font(s_detail_battery_icon, font_manager_get_lucide_battery(), 0);
+        lv_obj_set_style_text_color(s_detail_battery_icon, lv_color_hex(0xfafafa), 0);
+        lv_obj_set_width(s_detail_battery_icon, DETAIL_BADGE_WIDTH);
+        lv_obj_set_style_text_align(s_detail_battery_icon, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(s_detail_battery_icon, LV_ALIGN_TOP_MID, 0, 0);
+
+        s_detail_battery_pct_label = lv_label_create(battery_group);
+        lv_obj_set_style_text_font(s_detail_battery_pct_label, font_tiny(), 0);
+        lv_obj_set_style_text_align(s_detail_battery_pct_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_detail_battery_pct_label, lv_color_hex(0x888888), 0);
+        lv_obj_set_width(s_detail_battery_pct_label, DETAIL_BADGE_WIDTH);
+        lv_label_set_text(s_detail_battery_pct_label, "");
+        lv_obj_align(s_detail_battery_pct_label, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+        // Volume - left side, mirrored. Numeric on top (primary weight),
+        // dB below (secondary) - same relative roles format_volume_text()/
+        // derive_volume_db_equivalent() already play on the Music screen's
+        // big volume readout (dB is the smaller, dimmer of that pair too).
+        lv_obj_t *volume_group = lv_obj_create(s_detail_overlay);
+        lv_obj_set_size(volume_group, DETAIL_BADGE_WIDTH, volume_h);
+        lv_obj_set_pos(volume_group, SCREEN_SIZE / 2 - inset - DETAIL_BADGE_WIDTH, row_centre_y - volume_h / 2);
+        lv_obj_set_style_bg_opa(volume_group, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(volume_group, 0, 0);
+        lv_obj_set_style_pad_all(volume_group, 0, 0);
+        lv_obj_remove_flag(volume_group, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(volume_group, LV_OBJ_FLAG_SCROLLABLE);
+
+        s_detail_volume_label = lv_label_create(volume_group);
+        lv_obj_set_style_text_font(s_detail_volume_label, font_tiny(), 0);
+        lv_obj_set_style_text_align(s_detail_volume_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_detail_volume_label, lv_color_hex(0xfafafa), 0);
+        lv_obj_set_width(s_detail_volume_label, DETAIL_BADGE_WIDTH);
+        lv_label_set_text(s_detail_volume_label, "");
+        lv_obj_align(s_detail_volume_label, LV_ALIGN_TOP_MID, 0, 0);
+
+        s_detail_db_label = lv_label_create(volume_group);
+        lv_obj_set_style_text_font(s_detail_db_label, font_tiny(), 0);
+        lv_obj_set_style_text_align(s_detail_db_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_detail_db_label, lv_color_hex(0x888888), 0);
+        lv_obj_set_width(s_detail_db_label, DETAIL_BADGE_WIDTH);
+        lv_label_set_text(s_detail_db_label, "");
+        lv_obj_align(s_detail_db_label, LV_ALIGN_BOTTOM_MID, 0, 0);
+#undef DETAIL_BADGE_WIDTH
+#undef DETAIL_BADGE_MARGIN
+    }
+#endif
 
     // Enrichment rows - bit info / "Coming up" / next track. Plain further
     // children of the same s_detail_text_group flex column above (not a
@@ -1962,6 +2076,7 @@ static void apply_state(const struct ui_state *state) {
     if (strcmp(vol_text, s_last_vol_text) != 0) {
         set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
         if (s_tv_vinyl_volume_label) lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
+        if (s_detail_volume_label) lv_label_set_text(s_detail_volume_label, vol_text);
         strncpy(s_last_vol_text, vol_text, sizeof(s_last_vol_text) - 1);
         s_last_vol_text[sizeof(s_last_vol_text) - 1] = '\0';
     }
@@ -1992,6 +2107,7 @@ static void apply_state(const struct ui_state *state) {
     if (strcmp(db_text, s_last_db_text) != 0) {
         lv_label_set_text(s_volume_db_label, db_text);
         if (s_tv_vinyl_db_label) lv_label_set_text(s_tv_vinyl_db_label, db_text);
+        if (s_detail_db_label) lv_label_set_text(s_detail_db_label, db_text);
         strncpy(s_last_db_text, db_text, sizeof(s_last_db_text) - 1);
         s_last_db_text[sizeof(s_last_db_text) - 1] = '\0';
     }
@@ -2315,17 +2431,24 @@ static void update_battery_display(void) {
         s_last_battery_level = level;
         s_last_battery_charging = charging;
 
-        // Update battery icon based on state (Lucide horizontal icons)
+        // Update battery icon based on state (Lucide horizontal icons) -
+        // mirrored onto the detail screen's own icon (s_detail_battery_icon),
+        // same glyph selection, if that screen's been built.
         lv_obj_clear_flag(s_battery_icon, LV_OBJ_FLAG_HIDDEN);
+        const char *glyph;
         if (charging) {
-            lv_label_set_text(s_battery_icon, ICON_BATTERY_CHARGING);
+            glyph = ICON_BATTERY_CHARGING;
         } else {
             switch (level) {
-                case 0:  lv_label_set_text(s_battery_icon, ICON_BATTERY_WARNING); break;  // Critical
-                case 1:  lv_label_set_text(s_battery_icon, ICON_BATTERY_LOW); break;      // Low
-                case 2:  lv_label_set_text(s_battery_icon, ICON_BATTERY_MEDIUM); break;   // Medium
-                default: lv_label_set_text(s_battery_icon, ICON_BATTERY_FULL); break;     // High
+                case 0:  glyph = ICON_BATTERY_WARNING; break;  // Critical
+                case 1:  glyph = ICON_BATTERY_LOW; break;      // Low
+                case 2:  glyph = ICON_BATTERY_MEDIUM; break;   // Medium
+                default: glyph = ICON_BATTERY_FULL; break;     // High
             }
+        }
+        lv_label_set_text(s_battery_icon, glyph);
+        if (s_detail_battery_icon) {
+            lv_label_set_text(s_detail_battery_icon, glyph);
         }
     }
 
@@ -2343,21 +2466,41 @@ static void update_battery_display(void) {
         battery_color = lv_color_hex(0xfafafa);  // Near-white
     }
     lv_obj_set_style_text_color(s_battery_icon, battery_color, 0);
+    if (s_detail_battery_icon) {
+        lv_obj_set_style_text_color(s_detail_battery_icon, battery_color, 0);
+    }
 
     // Flash (blink) at 5% or less, not charging - a timer only exists
     // while this condition holds, started/stopped here rather than left
     // running (and just skipped) the rest of the time so it isn't
     // silently ticking for the ~99% of battery life it never applies to.
+    // battery_flash_timer_cb toggles both icons' opacity together.
     bool should_flash = percent <= 5 && !charging;
     if (should_flash && !s_battery_flash_timer) {
         s_battery_flash_on = true;
         lv_obj_set_style_text_opa(s_battery_icon, LV_OPA_COVER, 0);
+        if (s_detail_battery_icon) lv_obj_set_style_text_opa(s_detail_battery_icon, LV_OPA_COVER, 0);
         s_battery_flash_timer = lv_timer_create(battery_flash_timer_cb, 500, NULL);
     } else if (!should_flash && s_battery_flash_timer) {
         lv_timer_del(s_battery_flash_timer);
         s_battery_flash_timer = NULL;
         s_battery_flash_on = true;
         lv_obj_set_style_text_opa(s_battery_icon, LV_OPA_COVER, 0);  // Leave it visible, not mid-blink-off
+        if (s_detail_battery_icon) lv_obj_set_style_text_opa(s_detail_battery_icon, LV_OPA_COVER, 0);
+    }
+
+    // Actual percentage, small font below the detail screen's icon (owner
+    // request) - only this screen shows the number; Music's badge stays
+    // icon-only, unchanged. Gated on the percent actually changing, same
+    // flicker-avoidance reasoning as the icon glyph above, but keyed on the
+    // raw percent (not the coarser 4-level bucket) since the number is
+    // exact.
+    static int s_last_battery_percent_shown = -1;
+    if (s_detail_battery_pct_label && percent != s_last_battery_percent_shown) {
+        s_last_battery_percent_shown = percent;
+        char pct_text[8];
+        snprintf(pct_text, sizeof(pct_text), "%d%%", percent);
+        lv_label_set_text(s_detail_battery_pct_label, pct_text);
     }
 #endif
 }
@@ -2366,7 +2509,11 @@ static void battery_flash_timer_cb(lv_timer_t *timer) {
     (void)timer;
     if (!s_battery_icon) return;
     s_battery_flash_on = !s_battery_flash_on;
-    lv_obj_set_style_text_opa(s_battery_icon, s_battery_flash_on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_opa_t opa = s_battery_flash_on ? LV_OPA_COVER : LV_OPA_TRANSP;
+    lv_obj_set_style_text_opa(s_battery_icon, opa, 0);
+    if (s_detail_battery_icon) {
+        lv_obj_set_style_text_opa(s_detail_battery_icon, opa, 0);
+    }
 }
 
 static void battery_poll_timer_cb(lv_timer_t *timer) {
@@ -2847,6 +2994,9 @@ void ui_show_volume_change(float vol, float vol_step) {
         lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
         lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
     }
+    if (s_detail_volume_label) {
+        lv_label_set_text(s_detail_volume_label, vol_text);
+    }
 
     char db_text[16];
     snprintf(db_text, sizeof(db_text), "%.1f dB",
@@ -2854,6 +3004,9 @@ void ui_show_volume_change(float vol, float vol_step) {
     lv_label_set_text(s_volume_db_label, db_text);
     if (s_tv_vinyl_db_label) {
         lv_label_set_text(s_tv_vinyl_db_label, db_text);
+    }
+    if (s_detail_db_label) {
+        lv_label_set_text(s_detail_db_label, db_text);
     }
 }
 
