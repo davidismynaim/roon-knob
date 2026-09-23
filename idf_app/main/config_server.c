@@ -3,6 +3,7 @@
 
 #include "config_server.h"
 #include "controller_config.h"
+#include "display_sleep.h"
 #include "haptic_driver.h"
 #include "http_server_lifecycle.h"
 #include "platform/platform_mdns.h"
@@ -142,7 +143,9 @@ static const char *HTML_CONFIG =
     "<p class='hint'>Vibrates briefly on play/pause/skip taps, the mute/source-picker long-press gestures, and picking an input from the source list. Not applied to volume changes &mdash; the encoder's own mechanical detents already give a good feel there. Effect names are the DRV2605 chip's own built-in library names, not ours &mdash; try a few and keep whichever feels best.</p>"
     "<p class='hint'>%s</p>"
     "<input type='submit' value='Save'>"
-    "</form></body></html>";
+    "</form>"
+    "<p class='hint'>Last boot: %s</p>"
+    "</body></html>";
 
 static const char *HTML_SUCCESS =
     "<!DOCTYPE html>"
@@ -543,7 +546,7 @@ static esp_err_t config_get_handler(httpd_req_t *req) {
     snprintf(html, 16384, HTML_CONFIG, current, status_class, status_text,
              wifi_html, cfg->bridge_base, ha_cfg.host, ha_token_placeholder,
              zone_options, escaped_patterns, haptic_checked, haptic_effect_options,
-             haptic_cal_status);
+             haptic_cal_status, display_boot_reason());
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, html, strlen(html));

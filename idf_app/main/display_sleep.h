@@ -91,6 +91,10 @@ bool display_is_encoder_suppressed(void);
  */
 bool display_woke_from_deep_sleep(void);
 
+// Human-readable reason for the last reset (reset cause, plus how far the
+// deep-sleep entry path got or which encoder pin woke us). For diagnostics.
+const char *display_boot_reason(void);
+
 /**
  * @brief Process pending display state changes
  * Call this from the UI loop to safely handle timer-triggered state changes
