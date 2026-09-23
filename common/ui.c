@@ -1591,16 +1591,24 @@ static void build_detail_overlay(void) {
 #define DETAIL_BADGE_WIDTH 40
 #define DETAIL_BADGE_MARGIN 4
 // The volume/dB text ("-63.5 dB" etc.) needs more room than the battery
-// badge does ("100%") - widen just the label boxes, not the positional
-// DETAIL_BADGE_WIDTH math above, and let them overhang the notional
-// 40px column symmetrically (centered, nothing else sits this close).
-#define DETAIL_DB_LABEL_WIDTH 64
+// badge does ("100%"). Widening just the label and not its parent had no
+// effect - LVGL clips a child to its parent's own box by default, so the
+// container (volume_group) has to be this wide too, not only the label
+// inside it. Generous on purpose (was 64, still clipped "-"/"B" on
+// hardware) rather than re-guessing pixel-tight again.
+#define DETAIL_DB_LABEL_WIDTH 88
         int32_t row_centre_y = progress_row_top + progress_row_height / 2;
+        row_centre_y += 10;  // 1mm down, away from the scrolling text above - owner hardware feedback
         int32_t half_span = detail_row_width_r(progress_row_top, progress_row_height,
                                                  DETAIL_TEXT_RADIUS_FULL) / 2;
         int32_t inset = half_span - DETAIL_BADGE_MARGIN - DETAIL_BADGE_WIDTH;
         inset -= 30;  // 3mm closer to centre (PX_PER_MM=10 elsewhere in this file) - owner hardware feedback
         if (inset < 4) inset = 4;  // defensive floor - see this screen's own "tune by eye" norm
+        // Centre-x of the volume badge, held fixed at what the narrow
+        // DETAIL_BADGE_WIDTH box would have used, so widening it to fit the
+        // dB text grows outward from the same visual centre rather than
+        // shifting the whole thing sideways.
+        int32_t volume_centre_x = SCREEN_SIZE / 2 - inset - DETAIL_BADGE_WIDTH / 2;
 
         int32_t icon_h = lv_font_get_line_height(font_manager_get_lucide_battery());
         int32_t tiny_h = lv_font_get_line_height(font_tiny());
@@ -1643,8 +1651,8 @@ static void build_detail_overlay(void) {
         // derive_volume_db_equivalent() already play on the Music screen's
         // big volume readout (dB is the smaller, dimmer of that pair too).
         lv_obj_t *volume_group = lv_obj_create(s_detail_overlay);
-        lv_obj_set_size(volume_group, DETAIL_BADGE_WIDTH, volume_h);
-        lv_obj_set_pos(volume_group, SCREEN_SIZE / 2 - inset - DETAIL_BADGE_WIDTH, row_centre_y - volume_h / 2);
+        lv_obj_set_size(volume_group, DETAIL_DB_LABEL_WIDTH, volume_h);
+        lv_obj_set_pos(volume_group, volume_centre_x - DETAIL_DB_LABEL_WIDTH / 2, row_centre_y - volume_h / 2);
         lv_obj_set_style_bg_opa(volume_group, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(volume_group, 0, 0);
         lv_obj_set_style_pad_all(volume_group, 0, 0);
