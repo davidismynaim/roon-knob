@@ -84,6 +84,15 @@ static int s_progress_base_ms = -1;    // Last known real seek position (-1 = no
 static int s_progress_length_ms;       // Track length at the time s_progress_base_ms was recorded
 static uint64_t s_progress_base_uptime_ms;  // platform_millis() at the moment s_progress_base_ms arrived
 static bool s_progress_is_playing;     // Whether to keep advancing the local estimate
+static int s_progress_last_reported_ms = -1;  // Previous poll's raw reported position (-1 = none) - see EXTERNAL_BACKWARD_SEEK_MIN_MS
+// A same-track poll reporting a position at least this far BEHIND the
+// previous poll's own reported position is a real backward move (restart via
+// "previous track", or a seek from another controller), not poll lag: Roon's
+// raw seek_position never goes backward during normal playback, so this
+// compares raw reports with raw reports rather than with the local estimate
+// (which is what the forward-only clamp guards, and is legitimately ahead of
+// a lagging poll). Positions are whole seconds, so 2s clears any rounding.
+#define EXTERNAL_BACKWARD_SEEK_MIN_MS 2000
 static char s_progress_last_line1[128] = "";  // Track identity, to tell a real track change
                                                // apart from ordinary same-track poll noise
 
@@ -1810,6 +1819,10 @@ static void apply_state(const struct ui_state *state) {
         s_progress_last_line1[sizeof(s_progress_last_line1) - 1] = '\0';
 
         int effective_ms = reported_ms;
+        bool reported_went_backward =
+            same_track && s_progress_last_reported_ms >= 0 &&
+            reported_ms + EXTERNAL_BACKWARD_SEEK_MIN_MS <= s_progress_last_reported_ms;
+        s_progress_last_reported_ms = reported_ms;
         bool in_seek_resync_grace = same_track && s_seek_commit_uptime_ms != 0 &&
                                      (now - s_seek_commit_uptime_ms) < SEEK_RESYNC_GRACE_MS;
         if (in_seek_resync_grace && s_progress_base_ms >= 0) {
@@ -1823,7 +1836,12 @@ static void apply_state(const struct ui_state *state) {
             if (state->playing) {
                 effective_ms += (int)(now - s_progress_base_uptime_ms);
             }
-        } else if (same_track && s_progress_is_playing && state->playing && s_progress_base_ms >= 0) {
+        } else if (same_track && s_progress_is_playing && state->playing && s_progress_base_ms >= 0 &&
+                   !reported_went_backward) {
+            // (A genuine external backward move - e.g. Harmony's "previous"
+            // restarting the same track - skips this and takes the reported
+            // position as-is; without it the forward-only rule below kept
+            // the dial at the pre-restart position.)
             int estimated_now_ms = s_progress_base_ms + (int)(now - s_progress_base_uptime_ms);
             if (estimated_now_ms > effective_ms) {
                 effective_ms = estimated_now_ms;
@@ -1850,6 +1868,7 @@ static void apply_state(const struct ui_state *state) {
     } else if (s_progress_arc && !s_seek_active) {
         lv_arc_set_value(s_progress_arc, 0);
         s_progress_base_ms = -1;  // No track/length - nothing to interpolate
+        s_progress_last_reported_ms = -1;
         s_progress_last_line1[0] = '\0';  // Force "different track" on whatever plays next
         if (s_detail_progress_label) {
             lv_label_set_text(s_detail_progress_label, "");
