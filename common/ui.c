@@ -204,7 +204,8 @@ static bool s_mute_overlay_visible = false;  // Avoid redundant show/hide calls 
 // earlier this project.
 static lv_obj_t *s_detail_overlay;
 static lv_obj_t *s_detail_text_group;  // Flex column: stacks title/artist/album/progress without overlap
-static lv_obj_t *s_detail_thumbnail;   // Small square album art (shares s_artwork_img's pixel data)
+static lv_obj_t *s_detail_thumbnail_mask;  // Circular clip container - see s_detail_thumbnail comment below
+static lv_obj_t *s_detail_thumbnail;   // Album art (shares s_artwork_img's pixel data), child of the mask above
 static lv_obj_t *s_detail_title_label;
 static lv_obj_t *s_detail_artist_label;
 static lv_obj_t *s_detail_album_label;
@@ -1468,15 +1469,31 @@ static void build_detail_overlay(void) {
 
     // Thumbnail - shares s_artwork_img's pixel buffer via lv_image_set_src,
     // scaled down (see ui_set_artwork()); not its own decode/copy. Circular
-    // (LV_RADIUS_CIRCLE + clip_corner, which clips the image content itself,
-    // not just background/border) rather than the old square - see
-    // DETAIL_ARTWORK_TOP_Y/SIZE above for the geometry reasoning.
-    s_detail_thumbnail = lv_img_create(s_detail_overlay);
+    // rather than the old square - see DETAIL_ARTWORK_TOP_Y/SIZE above for
+    // the geometry reasoning.
+    //
+    // Radius+clip_corner set directly on an lv_img/lv_image object does NOT
+    // clip that widget's own image content on real hardware (confirmed:
+    // stayed square even with correct size/position and DRAW_SW_COMPLEX
+    // enabled) - clip_corner reliably clips CHILDREN of a plain container,
+    // not necessarily a specialized widget's own main draw. So the circle
+    // is a separate mask container, and the image is its child, filling it
+    // completely - the well-supported "circular avatar" pattern.
+    s_detail_thumbnail_mask = lv_obj_create(s_detail_overlay);
+    lv_obj_set_size(s_detail_thumbnail_mask, DETAIL_ARTWORK_SIZE, DETAIL_ARTWORK_SIZE);
+    lv_obj_align(s_detail_thumbnail_mask, LV_ALIGN_TOP_MID, 0, DETAIL_ARTWORK_TOP_Y);
+    lv_obj_set_style_radius(s_detail_thumbnail_mask, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_clip_corner(s_detail_thumbnail_mask, true, 0);
+    lv_obj_set_style_bg_opa(s_detail_thumbnail_mask, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_detail_thumbnail_mask, 0, 0);
+    lv_obj_set_style_pad_all(s_detail_thumbnail_mask, 0, 0);
+    lv_obj_remove_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
+
+    s_detail_thumbnail = lv_img_create(s_detail_thumbnail_mask);
     lv_obj_set_size(s_detail_thumbnail, DETAIL_ARTWORK_SIZE, DETAIL_ARTWORK_SIZE);
-    lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, DETAIL_ARTWORK_TOP_Y);
-    lv_obj_set_style_radius(s_detail_thumbnail, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_clip_corner(s_detail_thumbnail, true, 0);
-    lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);  // Hidden until artwork loads, same as s_artwork_image
+    lv_obj_set_pos(s_detail_thumbnail, 0, 0);
 
     // Title/artist/album/progress stack in a flex column rather than at
     // fixed offsets from each other - a long title or album name wraps to
@@ -1573,11 +1590,16 @@ static void build_detail_overlay(void) {
     {
 #define DETAIL_BADGE_WIDTH 40
 #define DETAIL_BADGE_MARGIN 4
+// The volume/dB text ("-63.5 dB" etc.) needs more room than the battery
+// badge does ("100%") - widen just the label boxes, not the positional
+// DETAIL_BADGE_WIDTH math above, and let them overhang the notional
+// 40px column symmetrically (centered, nothing else sits this close).
+#define DETAIL_DB_LABEL_WIDTH 64
         int32_t row_centre_y = progress_row_top + progress_row_height / 2;
         int32_t half_span = detail_row_width_r(progress_row_top, progress_row_height,
                                                  DETAIL_TEXT_RADIUS_FULL) / 2;
         int32_t inset = half_span - DETAIL_BADGE_MARGIN - DETAIL_BADGE_WIDTH;
-        inset -= 20;  // 2mm closer to centre (PX_PER_MM=10 elsewhere in this file) - owner hardware feedback
+        inset -= 30;  // 3mm closer to centre (PX_PER_MM=10 elsewhere in this file) - owner hardware feedback
         if (inset < 4) inset = 4;  // defensive floor - see this screen's own "tune by eye" norm
 
         int32_t icon_h = lv_font_get_line_height(font_manager_get_lucide_battery());
@@ -1633,7 +1655,10 @@ static void build_detail_overlay(void) {
         lv_obj_set_style_text_font(s_detail_volume_label, font_tiny(), 0);
         lv_obj_set_style_text_align(s_detail_volume_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(s_detail_volume_label, lv_color_hex(0xfafafa), 0);
-        lv_obj_set_width(s_detail_volume_label, DETAIL_BADGE_WIDTH);
+        // Wider than the notional badge column - format_volume_text() can
+        // itself emit a "-XX.X dB"-style string (Roon-relative volume
+        // scale), same width risk as s_detail_db_label below.
+        lv_obj_set_width(s_detail_volume_label, DETAIL_DB_LABEL_WIDTH);
         // See s_detail_battery_pct_label above - same wrap-causes-overlap fix.
         lv_label_set_long_mode(s_detail_volume_label, LV_LABEL_LONG_CLIP);
         lv_label_set_text(s_detail_volume_label, "");
@@ -1643,12 +1668,16 @@ static void build_detail_overlay(void) {
         lv_obj_set_style_text_font(s_detail_db_label, font_tiny(), 0);
         lv_obj_set_style_text_align(s_detail_db_label, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(s_detail_db_label, lv_color_hex(0x888888), 0);
-        lv_obj_set_width(s_detail_db_label, DETAIL_BADGE_WIDTH);
+        // "-XX.X dB" clipped at the narrower DETAIL_BADGE_WIDTH lost its
+        // leading "-" and trailing "B" (centered text, box too narrow) -
+        // owner hardware feedback.
+        lv_obj_set_width(s_detail_db_label, DETAIL_DB_LABEL_WIDTH);
         lv_label_set_long_mode(s_detail_db_label, LV_LABEL_LONG_CLIP);
         lv_label_set_text(s_detail_db_label, "");
         lv_obj_align(s_detail_db_label, LV_ALIGN_BOTTOM_MID, 0, 0);
 #undef DETAIL_BADGE_WIDTH
 #undef DETAIL_BADGE_MARGIN
+#undef DETAIL_DB_LABEL_WIDTH
     }
 #endif
 
@@ -3156,7 +3185,7 @@ void ui_set_artwork(const char *image_key) {
         // No artwork - hide image
         if (s_last_image_key[0]) {
             lv_obj_add_flag(s_artwork_image, LV_OBJ_FLAG_HIDDEN);
-            if (s_detail_thumbnail) lv_obj_add_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);
+            if (s_detail_thumbnail_mask) lv_obj_add_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
             s_last_image_key[0] = '\0';
         }
         return;
@@ -3241,14 +3270,15 @@ void ui_set_artwork(const char *image_key) {
     if (s_detail_thumbnail && s_artwork_img.dsc.header.w > 0) {
         lv_image_set_src(s_detail_thumbnail, &s_artwork_img.dsc);
         lv_image_set_scale(s_detail_thumbnail, (DETAIL_ARTWORK_SIZE * 256) / s_artwork_img.dsc.header.w);
-        lv_obj_set_size(s_detail_thumbnail, DETAIL_ARTWORK_SIZE, DETAIL_ARTWORK_SIZE);
-        lv_obj_align(s_detail_thumbnail, LV_ALIGN_TOP_MID, 0, DETAIL_ARTWORK_TOP_Y);
+        // Size/position are fixed at creation (filling s_detail_thumbnail_mask,
+        // which is what's actually positioned/sized against s_detail_overlay
+        // and does the circular clipping) - nothing to redo here per-track.
         // Nested inside s_detail_overlay, whose own HIDDEN flag already
         // governs whether any of this actually renders - clearing this
         // one unconditionally (like s_artwork_image does) is harmless
         // either way, not gated on whether detail mode happens to be
         // active right now.
-        lv_obj_clear_flag(s_detail_thumbnail, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
         lv_obj_invalidate(s_detail_thumbnail);
     }
 
