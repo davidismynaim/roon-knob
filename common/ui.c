@@ -17,6 +17,7 @@
 #include "bridge_client.h"
 #include "ha_volume_client.h"
 #include "ha_mute_client.h"
+#include "vinyl_client.h"
 #include "track_title_filter.h"
 
 #ifdef ESP_PLATFORM
@@ -2351,7 +2352,9 @@ static void apply_current_screen(void) {
         if (strcmp(source, "TV") == 0) {
             new_screen = DIAL_SCREEN_TV;
         } else if (strcmp(source, "Vinyl") == 0) {
-            new_screen = DIAL_SCREEN_VINYL;
+            // With a recognised track (see vinyl_client.h) the Music screen
+            // shows it; otherwise the static Vinyl picture, as before.
+            new_screen = vinyl_client_showing() ? DIAL_SCREEN_MUSIC : DIAL_SCREEN_VINYL;
         } else {
             new_screen = DIAL_SCREEN_MUSIC;
         }
@@ -3251,7 +3254,10 @@ void ui_set_artwork(const char *image_key) {
     // Build artwork URL (request 360x360 to match display - no scaling needed)
     // With PSRAM enabled, we can handle the full display resolution
     char url[512];
-    if (!bridge_client_get_artwork_url(url, sizeof(url), SCREEN_SIZE, SCREEN_SIZE)) {
+    bool have_url = vinyl_client_showing()
+        ? vinyl_client_artwork_url(url, sizeof(url), SCREEN_SIZE, SCREEN_SIZE)
+        : bridge_client_get_artwork_url(url, sizeof(url), SCREEN_SIZE, SCREEN_SIZE) != NULL;
+    if (!have_url) {
         ESP_LOGW(UI_TAG, "Failed to build artwork URL");
         return;
     }

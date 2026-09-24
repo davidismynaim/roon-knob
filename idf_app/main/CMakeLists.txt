@@ -47,6 +47,7 @@ set(SRC_FILES
     "../../common/ha_source_client.c"
     "../../common/ha_mute_client.c"
     "../../common/source_picker_client.c"
+    "../../common/vinyl_client.c"
     "../../common/room_cfg.c"
     "../../common/track_title_filter.c"
     "../../common/controller_config.c"

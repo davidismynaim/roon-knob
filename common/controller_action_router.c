@@ -18,6 +18,12 @@ void controller_action_router_set_volume_override(
     s_volume_override = fn;
 }
 
+static controller_command_filter_fn_t s_command_filter;
+
+void controller_action_router_set_command_filter(controller_command_filter_fn_t fn) {
+    s_command_filter = fn;
+}
+
 static controller_source_picker_open_fn_t s_source_picker_open;
 static controller_source_picker_select_fn_t s_source_picker_select;
 
@@ -208,6 +214,9 @@ bool controller_action_router_handle(const controller_action_t *action) {
                 CONTROLLER_COMMAND_ADJUST_VOLUME_STEPS &&
             s_volume_override) {
             return s_volume_override(action->value.command.volume_steps);
+        }
+        if (s_command_filter && s_command_filter(&action->value.command)) {
+            return true;
         }
         return bridge_client_execute_command(&action->value.command);
 

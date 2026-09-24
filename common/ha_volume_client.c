@@ -10,6 +10,7 @@
 #include "platform/platform_task.h"
 #include "platform/platform_time.h"
 #include "room_cfg.h"
+#include "vinyl_client.h"
 
 #include <cJSON.h>
 #include <math.h>
@@ -311,6 +312,12 @@ static void poll_task(void *arg) {
             }
             if (!poll_mute_once(&cfg)) {
                 LOGW("HA mute poll failed (host='%s')", cfg.host);
+            }
+            {
+                char src[HA_CURRENT_SOURCE_MAX];
+                bool on_vinyl = ha_volume_client_get_current_source(src, sizeof(src)) &&
+                                strcmp(src, "Vinyl") == 0;
+                vinyl_client_poll(cfg.host, on_vinyl);
             }
         }
         platform_sleep_ms(poll_interval_ms());

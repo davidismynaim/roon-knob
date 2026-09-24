@@ -14,6 +14,8 @@
 #include "controller_action_router.h"
 #include "controller_config.h"
 #include "ha_mute_client.h"
+#include "controller_view_compat.h"
+#include "vinyl_client.h"
 #include "ha_volume_client.h"
 #include "source_picker_client.h"
 #include "track_title_filter.h"
@@ -487,6 +489,11 @@ void app_main(void) {
     // input_boolean.audio_mute; the full-screen red mute icon is a
     // separate, later slice.
     controller_action_router_set_mute_override(ha_mute_client_toggle);
+
+    // Vinyl feed (Dial-only): while it owns the Music screen, Roon media
+    // patches are dropped and transport gestures do nothing.
+    controller_view_compat_set_suppress_fn(vinyl_client_showing);
+    controller_action_router_set_command_filter(vinyl_client_swallow_command);
     show_config_durability_diagnostic();
 
     // Start WiFi AFTER UI task is running (WiFi event callbacks use lv_async_call)
