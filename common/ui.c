@@ -2393,7 +2393,7 @@ static void set_vinyl_mode(bool on) {
 // over the same flag.
 static void apply_current_screen(void) {
     set_vinyl_mode(vinyl_client_showing());
-    char source[32];
+    char source[32] = "";
     dial_screen_t new_screen = s_current_screen;
     if (ha_volume_client_get_current_source(source, sizeof(source))) {
         if (strcmp(source, "TV") == 0) {
@@ -2409,6 +2409,8 @@ static void apply_current_screen(void) {
     if (new_screen == s_current_screen) {
         return;
     }
+    ESP_LOGI(UI_TAG, "Screen %d -> %d (source='%s', vinyl feed=%d)",
+             (int)s_current_screen, (int)new_screen, source, (int)vinyl_client_showing());
     s_current_screen = new_screen;
     bool music = (new_screen == DIAL_SCREEN_MUSIC);
 

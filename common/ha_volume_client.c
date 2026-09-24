@@ -160,9 +160,13 @@ static int get_cached_position(void) {
 
 static void set_cached_source(const char *source) {
     os_mutex_lock(&s_lock);
+    bool changed = !s_have_source || strcmp(s_current_source, source) != 0;
     rk_strlcpy(s_current_source, source, sizeof(s_current_source));
     s_have_source = true;
     os_mutex_unlock(&s_lock);
+    if (changed) {
+        LOGI("Source is now '%s'", source);
+    }
 }
 
 bool ha_volume_client_get_current_source(char *out, size_t len) {

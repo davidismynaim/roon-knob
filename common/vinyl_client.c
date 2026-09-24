@@ -78,6 +78,9 @@ static void set_showing(bool showing) {
         s_fail_count = 0;
     }
     os_mutex_unlock(&s_lock);
+    if (was_showing != showing) {
+        LOGI("Vinyl feed %s", showing ? "on (track recognised)" : "off");
+    }
     if (was_showing && !showing) {
         (void)platform_task_post_to_ui(hand_back_to_roon, NULL);
     }
