@@ -780,7 +780,7 @@ static int32_t seek_arc_angle_for_seconds(int seconds) {
 // [s_seek_start_seconds, s_seek_preview_seconds], so the ring shows how far
 // the knob has moved rather than recoloring the whole played portion.
 void ui_seek_adjust(int32_t ticks) {
-    if (vinyl_client_showing()) {
+    if (vinyl_client_owns_media()) {
         return;  // seeking a record is not possible
     }
     if (ticks == 0 || !s_progress_arc || !s_seek_delta_arc) {
@@ -1989,7 +1989,7 @@ static void source_region_long_press_cb(lv_event_t *e) {
 static void btn_prev_event_cb(lv_event_t *e) {
     (void)e;
     // Nothing to control for a record: no haptic, no feedback icon.
-    if (vinyl_client_showing()) {
+    if (vinyl_client_owns_media()) {
         return;
     }
     ESP_LOGI(UI_TAG, "btn_prev_event_cb triggered");
@@ -2041,7 +2041,7 @@ static void btn_play_long_press_cb(lv_event_t *e) {
 static void btn_play_event_cb(lv_event_t *e) {
     (void)e;
     // Nothing to control for a record: no haptic, no feedback icon.
-    if (vinyl_client_showing()) {
+    if (vinyl_client_owns_media()) {
         return;
     }
     ESP_LOGI(UI_TAG, "btn_play_event_cb triggered");
@@ -2062,7 +2062,7 @@ static void btn_play_event_cb(lv_event_t *e) {
 static void btn_next_event_cb(lv_event_t *e) {
     (void)e;
     // Nothing to control for a record: no haptic, no feedback icon.
-    if (vinyl_client_showing()) {
+    if (vinyl_client_owns_media()) {
         return;
     }
     ESP_LOGI(UI_TAG, "btn_next_event_cb triggered");
@@ -2430,7 +2430,7 @@ static void set_vinyl_mode(bool on) {
 // visually cover the artwork without the two pieces of code fighting
 // over the same flag.
 static void apply_current_screen(void) {
-    set_vinyl_mode(vinyl_client_showing());
+    set_vinyl_mode(vinyl_client_content_ready());
     char source[32] = "";
     dial_screen_t new_screen = s_current_screen;
     if (ha_volume_client_get_current_source(source, sizeof(source))) {
@@ -2439,7 +2439,7 @@ static void apply_current_screen(void) {
         } else if (strcmp(source, "Vinyl") == 0) {
             // With a recognised track (see vinyl_client.h) the Music screen
             // shows it; otherwise the static Vinyl picture, as before.
-            new_screen = vinyl_client_showing() ? DIAL_SCREEN_MUSIC : DIAL_SCREEN_VINYL;
+            new_screen = vinyl_client_content_ready() ? DIAL_SCREEN_MUSIC : DIAL_SCREEN_VINYL;
         } else {
             new_screen = DIAL_SCREEN_MUSIC;
         }
@@ -2448,7 +2448,7 @@ static void apply_current_screen(void) {
         return;
     }
     ESP_LOGI(UI_TAG, "Screen %d -> %d (source='%s', vinyl feed=%d)",
-             (int)s_current_screen, (int)new_screen, source, (int)vinyl_client_showing());
+             (int)s_current_screen, (int)new_screen, source, (int)vinyl_client_content_ready());
     s_current_screen = new_screen;
     bool music = (new_screen == DIAL_SCREEN_MUSIC);
 

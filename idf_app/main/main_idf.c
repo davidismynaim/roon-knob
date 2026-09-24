@@ -492,7 +492,7 @@ void app_main(void) {
 
     // Vinyl feed (Dial-only): while it owns the Music screen, Roon media
     // patches are dropped and transport gestures do nothing.
-    controller_view_compat_set_suppress_fn(vinyl_client_showing);
+    controller_view_compat_set_suppress_fn(vinyl_client_owns_media);
     controller_action_router_set_command_filter(vinyl_client_swallow_command);
     show_config_durability_diagnostic();
 
