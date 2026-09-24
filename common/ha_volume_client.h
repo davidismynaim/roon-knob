@@ -95,6 +95,10 @@ typedef void (*ha_script_done_fn_t)(bool ok);
 bool ha_volume_client_call_script_async(const char *script_entity_id,
                                         ha_script_done_fn_t done);
 
+// Poll Home Assistant now instead of waiting out the interval, e.g. right
+// after the source is switched. Safe from any task.
+void ha_volume_client_poll_now(void);
+
 #ifdef __cplusplus
 }
 #endif

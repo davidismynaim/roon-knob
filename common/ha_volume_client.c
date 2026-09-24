@@ -304,6 +304,8 @@ static bool poll_mute_once(const rk_ha_cfg_t *cfg) {
     return ok;
 }
 
+static volatile bool s_poll_now;
+
 static void poll_task(void *arg) {
     (void)arg;
     while (true) {
@@ -326,8 +328,19 @@ static void poll_task(void *arg) {
             }
             voice_client_poll(&cfg);
         }
-        platform_sleep_ms(poll_interval_ms());
+        // Sleep in short slices so ha_volume_client_poll_now() can cut it short.
+        uint32_t remaining = poll_interval_ms();
+        while (remaining > 0 && !s_poll_now) {
+            uint32_t step = remaining < 100 ? remaining : 100;
+            platform_sleep_ms(step);
+            remaining -= step;
+        }
+        s_poll_now = false;
     }
+}
+
+void ha_volume_client_poll_now(void) {
+    s_poll_now = true;
 }
 
 void ha_volume_client_init(void) {

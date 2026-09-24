@@ -157,6 +157,7 @@
     "dial|common/ui.c|include/os_mutex.h",
     "dial|common/ui_jpeg.c|common/ui_jpeg.h",
     "dial|common/vinyl_client.c|common/controller_presentation.h",
+    "dial|common/vinyl_client.c|common/controller_view_compat.h",
     "dial|common/vinyl_client.c|common/platform/platform_http.h",
     "dial|common/vinyl_client.c|common/platform/platform_log.h",
     "dial|common/vinyl_client.c|common/platform/platform_task.h",
