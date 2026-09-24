@@ -245,6 +245,7 @@
     "dial|idf_app/main/platform_display_idf.c|common/platform/platform_display.h",
     "dial|idf_app/main/platform_display_idf.c|common/room_cfg.h",
     "dial|idf_app/main/platform_display_idf.c|common/ui.h",
+    "dial|idf_app/main/platform_display_idf.c|common/vinyl_client.h",
     "dial|idf_app/main/platform_display_idf.c|idf_app/components/i2c_bsp/i2c_bsp.h",
     "dial|idf_app/main/platform_display_idf.c|idf_app/components/lcd_touch_bsp/lcd_touch_bsp.h",
     "dial|idf_app/main/platform_display_idf.c|idf_app/main/battery.h",

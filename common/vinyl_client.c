@@ -83,7 +83,7 @@ bool vinyl_client_owns_media(void) {
 static void clear_content_on_ui(void *arg) {
     (void)arg;
     controller_presentation_set_artwork("");
-    controller_presentation_update("", "", "", false, 0.0f, 0.0f, 255.0f, 1.0f, 0, 0);
+    controller_presentation_update("Vinyl", "Nothing playing", "", false, 0.0f, 0.0f, 255.0f, 1.0f, 0, 0);
     controller_presentation_set_media_enrichment("", "", 0, "", false);
 }
 
@@ -212,6 +212,11 @@ void vinyl_client_poll(const char *ha_host, bool source_is_vinyl) {
             (void)platform_task_post_to_ui(hand_back_to_roon, NULL);
         }
         return;
+    }
+    if (!was_owns) {
+        // Just arrived on the Vinyl source: whatever Roon last put in the
+        // widgets (artwork, detail thumbnail) must not linger.
+        (void)platform_task_post_to_ui(clear_content_on_ui, NULL);
     }
 
     char host[sizeof(s_host)];

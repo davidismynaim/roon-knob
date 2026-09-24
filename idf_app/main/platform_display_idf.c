@@ -9,6 +9,7 @@
 #include "lcd_touch_bsp.h"
 #include "room_cfg.h"
 #include "ui.h"
+#include "vinyl_client.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -526,7 +527,10 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                 // screen. If already playing, exit detail mode as before.
                 // Off the detail screen, unchanged: enter art mode.
                 if (dy < -SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
-                    if (s_detail_mode_active && !ui_is_playing()) {
+                    // On the Vinyl source there is nothing to resume, and "not
+                    // playing" must never turn the exit gesture into a resume
+                    // (that trapped the dial on the detail screen).
+                    if (s_detail_mode_active && !ui_is_playing() && !vinyl_client_owns_media()) {
                         ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing play", s_current_rotation);
                         s_pending_detail_play = true;
                     } else if (s_detail_mode_active) {
@@ -555,7 +559,7 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                         ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing exit art mode", s_current_rotation);
                         s_pending_exit_art_mode = true;  // Defer to avoid LVGL threading issues
                     } else if (s_detail_mode_active) {
-                        if (ui_is_playing()) {
+                        if (ui_is_playing() && !vinyl_client_owns_media()) {
                             ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing pause", s_current_rotation);
                             s_pending_detail_pause = true;
                         }
@@ -836,17 +840,21 @@ void platform_display_process_pending(void) {
     // once it lands.
     if (s_pending_previous_track) {
         s_pending_previous_track = false;
+        if (!vinyl_client_owns_media()) {
         ui_show_track_feedback(false);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_PREVIOUS_TRACK));
         (void)controller_input_dispatch_action(&action);
+        }
     }
     if (s_pending_next_track) {
         s_pending_next_track = false;
+        if (!vinyl_client_owns_media()) {
         ui_show_track_feedback(true);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_NEXT_TRACK));
         (void)controller_input_dispatch_action(&action);
+        }
     }
     // Process deferred detail-info-screen swipes. Calls ui_set_detail_mode()
     // directly rather than routing through display_sleep.c the way art mode
@@ -869,17 +877,21 @@ void platform_display_process_pending(void) {
     // has, not something new here.
     if (s_pending_detail_pause) {
         s_pending_detail_pause = false;
+        if (!vinyl_client_owns_media()) {
         ui_show_playback_feedback(false);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
         (void)controller_input_dispatch_action(&action);
+        }
     }
     if (s_pending_detail_play) {
         s_pending_detail_play = false;
+        if (!vinyl_client_owns_media()) {
         ui_show_playback_feedback(true);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
         (void)controller_input_dispatch_action(&action);
+        }
     }
     // Process deferred timer-triggered state changes
     display_process_pending();

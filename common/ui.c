@@ -3283,15 +3283,37 @@ void ui_test_pattern(void) {
 #endif
 }
 
+// The Vinyl-source stand-in for the detail view's circular thumbnail: the same
+// static photo the Vinyl screen shows, scaled to fit the thumbnail.
+static void show_static_vinyl_thumbnail(bool show) {
+#if !TARGET_PC
+    if (!show || !s_detail_thumbnail || !s_detail_thumbnail_mask) {
+        return;
+    }
+    lv_image_set_src(s_detail_thumbnail, &vinyl_background);
+    lv_image_set_scale(s_detail_thumbnail,
+                       (DETAIL_ARTWORK_SIZE * 256) / vinyl_background.header.w);
+    lv_obj_clear_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(s_detail_thumbnail);
+#else
+    (void)show;
+#endif
+}
+
 void ui_set_artwork(const char *image_key) {
     // Check if image_key changed
     if (!image_key || !image_key[0]) {
         // No artwork - hide image
         if (s_last_image_key[0]) {
             lv_obj_add_flag(s_artwork_image, LV_OBJ_FLAG_HIDDEN);
-            if (s_detail_thumbnail_mask) lv_obj_add_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
+            if (s_detail_thumbnail_mask && !vinyl_client_owns_media()) {
+                lv_obj_add_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
+            }
             s_last_image_key[0] = '\0';
         }
+        // On the Vinyl source with no track, the detail view's small circular
+        // picture is the static vinyl photo rather than nothing.
+        show_static_vinyl_thumbnail(vinyl_client_owns_media());
         return;
     }
 
