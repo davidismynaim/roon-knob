@@ -36,6 +36,7 @@ bool font_manager_has_icons(void);    // Icon fonts loaded?
 // Media controls
 #define ICON_PLAY           "\xEE\x80\xB7"  // U+E037
 #define ICON_PAUSE          "\xEE\x80\xB4"  // U+E034
+#define ICON_MIC            "\xEE\x80\xA9"  // U+E029 (44px font only)
 #define ICON_SKIP_PREV      "\xEE\x81\x85"  // U+E045
 #define ICON_SKIP_NEXT      "\xEE\x81\x84"  // U+E044
 

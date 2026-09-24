@@ -18,6 +18,7 @@
 #include "ha_volume_client.h"
 #include "ha_mute_client.h"
 #include "vinyl_client.h"
+#include "voice_client.h"
 #include "track_title_filter.h"
 
 #ifdef ESP_PLATFORM
@@ -363,6 +364,8 @@ static void apply_current_screen(void);
 static void apply_mute_overlay(void);
 static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
+static void btn_play_long_press_cb(lv_event_t *e);
+static void refresh_play_icon(void);
 static void btn_next_event_cb(lv_event_t *e);
 static void zone_list_item_event_cb(lv_event_t *e);
 static void show_status_message(const char *message);
@@ -1231,7 +1234,10 @@ static void build_layout(void) {
     s_btn_play = lv_btn_create(s_ui_container);
     lv_obj_set_size(s_btn_play, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE);
     lv_obj_add_style(s_btn_play, &style_button_primary, 0);
-    lv_obj_add_event_cb(s_btn_play, btn_play_event_cb, LV_EVENT_CLICKED, NULL);
+    // SHORT_CLICKED, not CLICKED: LVGL also sends CLICKED on release after a
+    // long press, which would pause the music every time voice is triggered.
+    lv_obj_add_event_cb(s_btn_play, btn_play_event_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_btn_play, btn_play_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_align(s_btn_play, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(s_btn_play, lv_color_hex(0x000000), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(s_btn_play, LV_OPA_60, LV_STATE_DEFAULT);
@@ -1994,6 +2000,41 @@ static void btn_prev_event_cb(lv_event_t *e) {
     (void)controller_input_dispatch_action(&action);
 }
 
+static int s_icon_playing = -1;  // -1 = never applied
+static bool s_voice_active;      // a voice interaction is showing: play button is a red mic
+
+static void refresh_play_icon(void) {
+    if (!s_play_icon) {
+        return;
+    }
+#if !TARGET_PC
+    if (s_voice_active) {
+        lv_label_set_text(s_play_icon, ICON_MIC);
+        lv_obj_set_style_text_color(s_play_icon, lv_color_hex(0xff3b30), 0);
+        return;
+    }
+    lv_obj_remove_local_style_prop(s_play_icon, LV_STYLE_TEXT_COLOR, 0);
+    lv_label_set_text(s_play_icon, s_icon_playing == 1 ? ICON_PAUSE : ICON_PLAY);
+#else
+    lv_label_set_text(s_play_icon, s_icon_playing == 1 ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+#endif
+}
+
+void ui_set_voice_active(bool active) {
+    s_voice_active = active;
+    refresh_play_icon();
+}
+
+static void btn_play_long_press_cb(lv_event_t *e) {
+    (void)e;
+    // Lounge only; otherwise (or if already listening) this does nothing.
+    if (voice_client_request_listen()) {
+#if !TARGET_PC
+        haptic_driver_pulse();
+#endif
+    }
+}
+
 static void btn_play_event_cb(lv_event_t *e) {
     (void)e;
     // Nothing to control for a record: no haptic, no feedback icon.
@@ -2323,14 +2364,9 @@ static void apply_state(const struct ui_state *state) {
     }
 
     // Update play/pause icon - only on an actual state change.
-    static int s_last_playing = -1;  // -1 = never applied
-    if (s_play_icon && (int)state->playing != s_last_playing) {
-        s_last_playing = state->playing ? 1 : 0;
-#if !TARGET_PC
-        lv_label_set_text(s_play_icon, state->playing ? ICON_PAUSE : ICON_PLAY);
-#else
-        lv_label_set_text(s_play_icon, state->playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
-#endif
+    if (s_play_icon && (int)state->playing != s_icon_playing) {
+        s_icon_playing = state->playing ? 1 : 0;
+        refresh_play_icon();
     }
 
     // Update online status

@@ -11,6 +11,7 @@
 #include "platform/platform_time.h"
 #include "room_cfg.h"
 #include "vinyl_client.h"
+#include "voice_client.h"
 
 #include <cJSON.h>
 #include <math.h>
@@ -32,9 +33,13 @@
 #define HA_VOLUME_POLL_INTERVAL_AWAKE_CHARGING_MS 2000
 #define HA_VOLUME_POLL_INTERVAL_AWAKE_BATTERY_MS 5000
 #define HA_VOLUME_POLL_INTERVAL_SLEEPING_MS 30000
+#define HA_VOLUME_POLL_INTERVAL_VOICE_MS 1000
 #define HA_VOLUME_POLL_TASK_STACK 4096
 
 static uint32_t poll_interval_ms(void) {
+    if (voice_client_wants_fast_poll()) {
+        return HA_VOLUME_POLL_INTERVAL_VOICE_MS;  // clear the red mic promptly
+    }
     if (platform_display_is_sleeping()) {
         return HA_VOLUME_POLL_INTERVAL_SLEEPING_MS;
     }
@@ -319,6 +324,7 @@ static void poll_task(void *arg) {
                                 strcmp(src, "Vinyl") == 0;
                 vinyl_client_poll(cfg.host, on_vinyl);
             }
+            voice_client_poll(&cfg);
         }
         platform_sleep_ms(poll_interval_ms());
     }
@@ -454,10 +460,59 @@ static void flush_pending(void) {
     }
 }
 
+static char s_pending_script[64];
+static ha_script_done_fn_t s_pending_script_done;
+
+bool ha_volume_client_call_script_async(const char *script_entity_id,
+                                        ha_script_done_fn_t done) {
+    if (!script_entity_id || !script_entity_id[0] ||
+        strlen(script_entity_id) >= sizeof(s_pending_script)) {
+        return false;
+    }
+    os_mutex_lock(&s_lock);
+    bool ok = s_configured && s_network_ready && s_pending_script[0] == '\0';
+    if (ok) {
+        memcpy(s_pending_script, script_entity_id, strlen(script_entity_id) + 1);
+        s_pending_script_done = done;
+    }
+    os_mutex_unlock(&s_lock);
+    return ok;
+}
+
+static void run_pending_script(void) {
+    char script[sizeof(s_pending_script)];
+    ha_script_done_fn_t done;
+    rk_ha_cfg_t cfg;
+    os_mutex_lock(&s_lock);
+    if (s_pending_script[0] == '\0') {
+        os_mutex_unlock(&s_lock);
+        return;
+    }
+    memcpy(script, s_pending_script, sizeof(script));
+    done = s_pending_script_done;
+    s_pending_script[0] = '\0';
+    s_pending_script_done = NULL;
+    cfg = s_cfg;
+    os_mutex_unlock(&s_lock);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s/api/services/script/turn_on", cfg.host);
+    char body[96];
+    snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", script);
+    char *resp = NULL;
+    size_t resp_len = 0;
+    int ret = platform_http_post_auth(url, cfg.token, body, &resp, &resp_len);
+    platform_http_free(resp);
+    if (done) {
+        done(ret == 0);
+    }
+}
+
 static void flush_task(void *arg) {
     (void)arg;
     while (true) {
         platform_sleep_ms(HA_VOLUME_FLUSH_POLL_MS);
+        run_pending_script();
         os_mutex_lock(&s_lock);
         bool due = s_pending_ticks != 0 &&
                    (platform_millis() - s_last_tick_ms) >=
