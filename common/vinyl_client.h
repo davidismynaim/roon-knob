@@ -23,8 +23,18 @@ extern "C" {
 // Assistant - the service is assumed to run on the same host, port 8099.
 void vinyl_client_poll(const char *ha_host, bool source_is_vinyl);
 
-// True while a recognised track is being shown in place of Roon's.
+// True while a recognised track is available from the service.
 bool vinyl_client_showing(void);
+
+// True while the vinyl track's text/artwork have been handed to the UI, i.e. it
+// is safe to switch the screen to the Music layout without a flash of stale
+// content. False again the moment the feed goes off.
+bool vinyl_client_content_ready(void);
+
+// True whenever this dial is on the Vinyl source in the Lounge, with or without
+// a recognised track. Roon's media data must never reach the screen then: with
+// no track the static picture is shown, not whatever Roon last had.
+bool vinyl_client_owns_media(void);
 
 // Artwork request for the current track, same query shape UHC's
 // /now_playing/image takes. False if no service host is known.
@@ -32,7 +42,7 @@ bool vinyl_client_artwork_url(char *url, size_t len, int width, int height);
 
 // Command filter for controller_action_router: transport commands (play/pause,
 // next/previous, seek) have nothing to act on for vinyl, so they are consumed
-// while a track is shown. Volume is untouched.
+// while Vinyl is the source. Volume is untouched.
 bool vinyl_client_swallow_command(const controller_command_t *command);
 
 // Host part of "host:port" (no scheme), for building the service address.
