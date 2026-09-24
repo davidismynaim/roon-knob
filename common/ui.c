@@ -361,6 +361,8 @@ static void source_region_long_press_cb(lv_event_t *e);
 static void build_tv_vinyl_layout(void);
 static void build_mute_overlay(void);
 static void apply_current_screen(void);
+static void set_vinyl_mode(bool on);
+static void apply_vinyl_transport(void);
 static void apply_mute_overlay(void);
 static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
@@ -2384,6 +2386,35 @@ static void set_status_dot(bool online) {
     }
 }
 
+static bool s_controls_visible = true;  // false in art mode - see ui_set_controls_visible
+static bool s_vinyl_mode;               // the Music layout is showing a recognised record
+
+// A record has nothing to skip or pause: previous/next are hidden and the play
+// button is invisible - but still there, so a long-press on it keeps working.
+// HIDDEN is also used by art mode, so both are folded together here.
+static void apply_vinyl_transport(void) {
+    bool show_skip = s_controls_visible && !s_vinyl_mode;
+    if (s_btn_prev) {
+        if (show_skip) lv_obj_clear_flag(s_btn_prev, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_btn_prev, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_btn_next) {
+        if (show_skip) lv_obj_clear_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_btn_play) {
+        lv_obj_set_style_opa(s_btn_play, s_vinyl_mode ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    }
+}
+
+static void set_vinyl_mode(bool on) {
+    if (on == s_vinyl_mode) {
+        return;
+    }
+    s_vinyl_mode = on;
+    apply_vinyl_transport();
+}
+
 // Switches between the Music/TV/Vinyl screens based on the polled
 // input_select.audio_input value (ha_volume_client's existing poll cycle -
 // see its header comment on why this lives there rather than a second
@@ -2397,6 +2428,7 @@ static void set_status_dot(bool online) {
 // visually cover the artwork without the two pieces of code fighting
 // over the same flag.
 static void apply_current_screen(void) {
+    set_vinyl_mode(vinyl_client_showing());
     char source[32];
     dial_screen_t new_screen = s_current_screen;
     if (ha_volume_client_get_current_source(source, sizeof(source))) {
@@ -3555,6 +3587,7 @@ void ui_trigger_update(void) {
 // ============================================================================
 
 void ui_set_controls_visible(bool visible) {
+    s_controls_visible = visible;
     if (visible) {
         // Show all controls
         if (s_btn_prev) lv_obj_clear_flag(s_btn_prev, LV_OBJ_FLAG_HIDDEN);
@@ -3608,6 +3641,7 @@ void ui_set_controls_visible(bool visible) {
         if (s_artwork_image) lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
         ESP_LOGI(UI_TAG, "Controls hidden (art mode)");
     }
+    apply_vinyl_transport();
 }
 
 // Battery/perf: the progress-arc interpolation timer and every marquee
