@@ -2025,6 +2025,7 @@ static void refresh_play_icon(void) {
 void ui_set_voice_active(bool active) {
     s_voice_active = active;
     refresh_play_icon();
+    apply_vinyl_transport();
 }
 
 static void btn_play_long_press_cb(lv_event_t *e) {
@@ -2403,7 +2404,8 @@ static void apply_vinyl_transport(void) {
         else lv_obj_add_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
     }
     if (s_btn_play) {
-        lv_obj_set_style_opa(s_btn_play, s_vinyl_mode ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+        // The red mic must still show while a voice interaction is running.
+        lv_obj_set_style_opa(s_btn_play, (s_vinyl_mode && !s_voice_active) ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     }
 }
 
