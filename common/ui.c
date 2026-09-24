@@ -423,9 +423,25 @@ static inline void format_volume_text(char *buf, size_t len, float volume, float
 // than adding a target-specific #ifdef to this shared file) and inverting
 // db_to_position's formula gets us the dB-equivalent without new plumbing
 // across the controller-boundary layers for a display-only value.
+//
+// Dining Room's dbx VENU360 reports its own 0..120 position scale instead
+// (sensor.venu360_main_gain_dial_2: 121 half-dB steps over -60..0dB, see
+// ha_volume_client.c's room_volume_max()) - recognised the same way, and
+// without it a position of 90 fell through as "90 dB" and tripped the red
+// warning threshold.
+static inline bool volume_scale_is_lounge_position(float volume_min, float volume_max) {
+    return volume_min == 0.0f && volume_max == 255.0f;
+}
+static inline bool volume_scale_is_dining_position(float volume_min, float volume_max) {
+    return volume_min == 0.0f && volume_max == 120.0f;
+}
+
 static inline float derive_volume_db_equivalent(float volume, float volume_min, float volume_max) {
-    if (volume_min == 0.0f && volume_max == 255.0f) {
+    if (volume_scale_is_lounge_position(volume_min, volume_max)) {
         return volume / 2.0f - 127.5f;
+    }
+    if (volume_scale_is_dining_position(volume_min, volume_max)) {
+        return volume / 2.0f - 60.0f;
     }
     return volume;
 }
@@ -437,8 +453,11 @@ static inline float derive_volume_db_equivalent(float volume, float volume_min, 
 // calculate_volume_lit_ticks() rounding the live tick count itself uses -
 // see that function's own comment for why the two need to agree exactly.
 static inline float volume_for_db_equivalent(float db, float volume_min, float volume_max) {
-    if (volume_min == 0.0f && volume_max == 255.0f) {
+    if (volume_scale_is_lounge_position(volume_min, volume_max)) {
         return (db + 127.5f) * 2.0f;
+    }
+    if (volume_scale_is_dining_position(volume_min, volume_max)) {
+        return (db + 60.0f) * 2.0f;
     }
     return db;
 }
