@@ -1,12 +1,12 @@
 #pragma once
 
-// Voice-listen trigger for the Dial (Lounge only): a long-press on the play
-// button starts the Lounge voice satellite listening (no wake word needed) and
+// Voice-listen trigger for the Dial (Lounge and Dining Room): a long-press on the
+// play button starts this room's voice satellite listening (no wake word needed) and
 // swaps the button to a red mic until the conversation ends.
 //
-// Starting is delegated to the Home Assistant script script.lounge_voice_listen,
+// Starting is delegated to the Home Assistant script script.<room>_voice_listen,
 // so how listening starts can change in HA without reflashing. The "conversation
-// ended" signal comes from binary_sensor.lounge_voice_active, which an HA
+// ended" signal comes from binary_sensor.<room>_voice_active, which an HA
 // automation mirrors from the satellite's listening/idle events - the same
 // events the LUMIN ducking automation uses.
 //
@@ -21,7 +21,7 @@ extern "C" {
 #endif
 
 // UI thread, from the long-press handler. Shows the red mic straight away and
-// fires the HA script off-thread. False if not applicable (not the Lounge, HA
+// fires the HA script off-thread. False if not applicable (HA
 // not configured) or a voice interaction is already showing.
 bool voice_client_request_listen(void);
 

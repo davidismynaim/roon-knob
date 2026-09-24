@@ -2030,7 +2030,7 @@ void ui_set_voice_active(bool active) {
 
 static void btn_play_long_press_cb(lv_event_t *e) {
     (void)e;
-    // Lounge only; otherwise (or if already listening) this does nothing.
+    // Does nothing if HA isn't configured or a voice interaction is already showing.
     if (voice_client_request_listen()) {
 #if !TARGET_PC
         haptic_driver_pulse();

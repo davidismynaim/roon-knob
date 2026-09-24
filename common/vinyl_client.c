@@ -13,7 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define VINYL_SERVICE_PORT 8099
+// One recogniser instance per room on the NUC, each listening to that room's own
+// microphone: the Lounge on 8099, the Dining Room on 8100.
+#define VINYL_PORT_LOUNGE 8099
+#define VINYL_PORT_DINING 8100
 #define VINYL_TEXT_MAX 128
 #define VINYL_KEY_MAX 40
 // A failed request tolerates a couple of misses before falling back to the
@@ -36,7 +39,7 @@ typedef struct {
 static os_mutex_t s_lock = OS_MUTEX_INITIALIZER;
 static bool s_showing;        // service has a recognised track
 static bool s_content_ready;  // ...and it has been handed to the UI
-static bool s_owns;           // Vinyl is the source (Lounge): Roon media is suppressed
+static bool s_owns;           // Vinyl is the source: Roon media is suppressed
 static int s_fail_count;
 static char s_host[64];
 
@@ -54,6 +57,10 @@ bool vinyl_client_host_from_ha(const char *ha_host, char *out, size_t len) {
     memcpy(out, ha_host, n);
     out[n] = '\0';
     return true;
+}
+
+static int service_port(void) {
+    return room_cfg_get_current() == RK_ROOM_DINING ? VINYL_PORT_DINING : VINYL_PORT_LOUNGE;
 }
 
 bool vinyl_client_showing(void) {
@@ -128,7 +135,7 @@ bool vinyl_client_artwork_url(char *url, size_t len, int width, int height) {
     }
     snprintf(url, len,
              "http://%s:%d/now_playing/image?scale=fit&width=%d&height=%d&format=rgb565",
-             host, VINYL_SERVICE_PORT, width, height);
+             host, service_port(), width, height);
     return true;
 }
 
@@ -199,7 +206,7 @@ static void apply_on_ui(void *arg) {
 }
 
 void vinyl_client_poll(const char *ha_host, bool source_is_vinyl) {
-    bool owns = source_is_vinyl && room_cfg_get_current() == RK_ROOM_LOUNGE;
+    bool owns = source_is_vinyl;  // both rooms have a vinyl source and a recogniser
     os_mutex_lock(&s_lock);
     bool was_owns = s_owns;
     s_owns = owns;
@@ -228,7 +235,7 @@ void vinyl_client_poll(const char *ha_host, bool source_is_vinyl) {
     os_mutex_unlock(&s_lock);
 
     char url[96];
-    snprintf(url, sizeof(url), "http://%s:%d/now_playing", host, VINYL_SERVICE_PORT);
+    snprintf(url, sizeof(url), "http://%s:%d/now_playing", host, service_port());
     char *resp = NULL;
     size_t resp_len = 0;
     // Plain GET on purpose: nothing here may carry the Home Assistant token.

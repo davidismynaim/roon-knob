@@ -15,8 +15,17 @@
 #include <stdio.h>
 #include <string.h>
 
-#define VOICE_SCRIPT "script.lounge_voice_listen"
-#define VOICE_STATE_ENTITY "binary_sensor.lounge_voice_active"
+// Per room: a script that starts the room's satellite listening, and a sensor
+// mirrored from that satellite's listening/idle events.
+static const char *voice_script(void) {
+    return room_cfg_get_current() == RK_ROOM_DINING ? "script.dining_voice_listen"
+                                                    : "script.lounge_voice_listen";
+}
+
+static const char *voice_state_entity(void) {
+    return room_cfg_get_current() == RK_ROOM_DINING ? "binary_sensor.dining_voice_active"
+                                                    : "binary_sensor.lounge_voice_active";
+}
 // The satellite goes listening a moment after the request (it plays its prompt
 // first). If it never does, stop showing the mic.
 #define VOICE_REQUEST_GRACE_MS 12000
@@ -71,7 +80,7 @@ static void request_done(bool ok) {
 }
 
 bool voice_client_request_listen(void) {
-    if (room_cfg_get_current() != RK_ROOM_LOUNGE || !ha_volume_client_is_active()) {
+    if (!ha_volume_client_is_active()) {
         return false;
     }
     os_mutex_lock(&s_lock);
@@ -85,7 +94,7 @@ bool voice_client_request_listen(void) {
     os_mutex_unlock(&s_lock);
 
     ui_set_voice_active(true);  // already on the UI thread: instant feedback
-    if (!ha_volume_client_call_script_async(VOICE_SCRIPT, request_done)) {
+    if (!ha_volume_client_call_script_async(voice_script(), request_done)) {
         request_done(false);
         return false;
     }
@@ -119,10 +128,6 @@ void voice_client_poll(const rk_ha_cfg_t *cfg) {
     if (!cfg) {
         return;
     }
-    if (room_cfg_get_current() != RK_ROOM_LOUNGE) {
-        reconcile(true, false);
-        return;
-    }
     // The red mic is only visible with the screen on; skip the extra GET
     // while it sleeps (the state is read again on the first poll after wake).
     if (platform_display_is_sleeping()) {
@@ -130,7 +135,7 @@ void voice_client_poll(const rk_ha_cfg_t *cfg) {
     }
 
     char url[128];
-    snprintf(url, sizeof(url), "http://%s/api/states/" VOICE_STATE_ENTITY, cfg->host);
+    snprintf(url, sizeof(url), "http://%s/api/states/%s", cfg->host, voice_state_entity());
     char *resp = NULL;
     size_t resp_len = 0;
     if (platform_http_get_auth(url, cfg->token, &resp, &resp_len) != 0 || !resp) {
