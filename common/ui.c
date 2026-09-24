@@ -775,6 +775,9 @@ static int32_t seek_arc_angle_for_seconds(int seconds) {
 // [s_seek_start_seconds, s_seek_preview_seconds], so the ring shows how far
 // the knob has moved rather than recoloring the whole played portion.
 void ui_seek_adjust(int32_t ticks) {
+    if (vinyl_client_showing()) {
+        return;  // seeking a record is not possible
+    }
     if (ticks == 0 || !s_progress_arc || !s_seek_delta_arc) {
         return;
     }
@@ -1977,6 +1980,10 @@ static void source_region_long_press_cb(lv_event_t *e) {
 
 static void btn_prev_event_cb(lv_event_t *e) {
     (void)e;
+    // Nothing to control for a record: no haptic, no feedback icon.
+    if (vinyl_client_showing()) {
+        return;
+    }
     ESP_LOGI(UI_TAG, "btn_prev_event_cb triggered");
 #if !TARGET_PC
     haptic_driver_pulse();
@@ -1989,6 +1996,10 @@ static void btn_prev_event_cb(lv_event_t *e) {
 
 static void btn_play_event_cb(lv_event_t *e) {
     (void)e;
+    // Nothing to control for a record: no haptic, no feedback icon.
+    if (vinyl_client_showing()) {
+        return;
+    }
     ESP_LOGI(UI_TAG, "btn_play_event_cb triggered");
 #if !TARGET_PC
     haptic_driver_pulse();
@@ -2006,6 +2017,10 @@ static void btn_play_event_cb(lv_event_t *e) {
 
 static void btn_next_event_cb(lv_event_t *e) {
     (void)e;
+    // Nothing to control for a record: no haptic, no feedback icon.
+    if (vinyl_client_showing()) {
+        return;
+    }
     ESP_LOGI(UI_TAG, "btn_next_event_cb triggered");
 #if !TARGET_PC
     haptic_driver_pulse();
