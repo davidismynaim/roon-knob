@@ -1,6 +1,7 @@
 #include "vinyl_client.h"
 
 #include "controller_presentation.h"
+#include "controller_view_compat.h"
 #include "os_mutex.h"
 #include "platform/platform_http.h"
 #include "platform/platform_log.h"
@@ -60,13 +61,26 @@ bool vinyl_client_showing(void) {
     return showing;
 }
 
+// Hand the media display back to Roon (UI task). The Roon path only reloads
+// artwork when Roon's own artwork reference changes, so without this the vinyl
+// cover stayed up next to Roon's text.
+static void hand_back_to_roon(void *arg) {
+    (void)arg;
+    controller_presentation_set_artwork("");
+    controller_view_compat_reset();
+}
+
 static void set_showing(bool showing) {
     os_mutex_lock(&s_lock);
+    bool was_showing = s_showing;
     s_showing = showing;
     if (showing) {
         s_fail_count = 0;
     }
     os_mutex_unlock(&s_lock);
+    if (was_showing && !showing) {
+        (void)platform_task_post_to_ui(hand_back_to_roon, NULL);
+    }
 }
 
 bool vinyl_client_artwork_url(char *url, size_t len, int width, int height) {

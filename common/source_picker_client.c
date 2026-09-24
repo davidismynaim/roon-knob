@@ -101,6 +101,7 @@ bool source_picker_select(void) {
     bool ok = ha_source_client_select(selected_id);
     if (ok) {
         ha_volume_client_set_current_source_optimistic(selected_id);
+        ha_volume_client_poll_now();  // pick up a vinyl track / new state straight away
     }
     controller_presentation_hide_zone_picker();
     (void)controller_input_set_context(CONTROLLER_INTERACTION_CONTEXT_MEDIA);

@@ -87,6 +87,10 @@ bool ha_volume_client_get_muted(void);
 // corrects) it. Not for use outside ha_mute_client.c.
 void ha_volume_client_set_muted_optimistic(bool muted);
 
+// Poll Home Assistant now instead of waiting out the interval, e.g. right
+// after the source is switched. Safe from any task.
+void ha_volume_client_poll_now(void);
+
 #ifdef __cplusplus
 }
 #endif
