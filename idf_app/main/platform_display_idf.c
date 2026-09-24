@@ -507,7 +507,10 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
             // screens, including art mode itself: its only visible effect
             // there would be hiding the battery/status indicators, with no
             // track/timeline concept for the rest of it to act on anyway.
-            if (elapsed < SWIPE_MAX_TIME_MS && ui_is_music_screen()) {
+            // ...except while the detail view is open: it sits on top of
+            // whichever screen is underneath (on the Vinyl source that is the
+            // static Vinyl screen, not Music), and swipe-up is its only way out.
+            if (elapsed < SWIPE_MAX_TIME_MS && (ui_is_music_screen() || s_detail_mode_active)) {
                 int16_t dx = data->point.x - s_touch_start_x;
                 int16_t dy = data->point.y - s_touch_start_y;
 
