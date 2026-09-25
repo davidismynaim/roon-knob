@@ -5,3 +5,7 @@ CONFIG_RK_PERF_LOG=y
 # ESP-IDF power-manager profiling: esp_pm_dump_locks() then also reports the time spent in each
 # power mode (SLEEP / APB_MIN / APB_MAX / CPU_MAX) and the light-sleep entry and reject counts.
 CONFIG_PM_PROFILING=y
+# Per-task CPU time and per-timer firing counts, printed by perf_stats around each sleep session.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_ESP_TIMER_PROFILING=y

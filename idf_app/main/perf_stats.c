@@ -7,6 +7,8 @@
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "perf";
 
@@ -85,6 +87,17 @@ static void dump_pm(const char *when) {
     printf("[perf] --- end ---\n");
 #else
     (void)when;
+#endif
+#if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
+    static char stats[2048];
+    printf("[perf] --- task CPU time %s (cumulative since boot) ---\n", when);
+    vTaskGetRunTimeStats(stats);
+    printf("%s\n[perf] --- end ---\n", stats);
+#endif
+#if CONFIG_ESP_TIMER_PROFILING
+    printf("[perf] --- esp_timer callbacks %s (cumulative) ---\n", when);
+    esp_timer_dump(stdout);
+    printf("[perf] --- end ---\n");
 #endif
 }
 
