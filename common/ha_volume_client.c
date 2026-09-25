@@ -1,3 +1,4 @@
+#include "os_event.h"
 #include "ha_volume_client.h"
 
 #include "controller_presentation.h"
@@ -57,6 +58,7 @@ static uint32_t poll_interval_ms(void) {
 // than that automation's 500ms - tune on real hardware once flashed.
 #define HA_VOLUME_DEBOUNCE_MS 90
 #define HA_VOLUME_FLUSH_POLL_MS 30
+#define HA_VOLUME_FLUSH_IDLE_WAIT_MS 500  // upper bound on an idle wait; new work signals the event
 #define HA_VOLUME_FLUSH_TASK_STACK 4096
 
 // common/controller_input.c's resolve_volume_ticks now passes the true
@@ -68,6 +70,8 @@ static uint32_t poll_interval_ms(void) {
 // temporary log of raw ticks against a known number of manual clicks).
 #define HA_VOLUME_TICKS_PER_CLICK 1
 
+static os_event_t s_poll_event = OS_EVENT_INITIALIZER;   // ends the wait for the next poll
+static os_event_t s_flush_event = OS_EVENT_INITIALIZER;  // new volume ticks / script / network up
 static os_mutex_t s_lock = OS_MUTEX_INITIALIZER;
 static rk_ha_cfg_t s_cfg;
 static bool s_configured;
@@ -147,6 +151,7 @@ void ha_volume_client_set_network_ready(bool ready) {
     os_mutex_lock(&s_lock);
     s_network_ready = ready;
     os_mutex_unlock(&s_lock);
+    os_event_set(&s_flush_event);  // ticks queued before the network came up can go out now
 }
 
 static void set_cached_position(int position) {
@@ -332,12 +337,16 @@ static void poll_task(void *arg) {
             }
             voice_client_poll(&cfg);
         }
-        // Sleep in short slices so ha_volume_client_poll_now() can cut it short.
-        uint32_t remaining = poll_interval_ms();
-        while (remaining > 0 && !s_poll_now) {
-            uint32_t step = remaining < 100 ? remaining : 100;
-            platform_sleep_ms(step);
-            remaining -= step;
+        // Block until the next poll is due; ha_volume_client_poll_now() cuts the wait short.
+        // (Was 100 ms slices: 10 wake-ups a second, all night.)
+        uint32_t interval = poll_interval_ms();
+        uint64_t wait_start = platform_millis();
+        while (!s_poll_now) {
+            uint64_t elapsed = platform_millis() - wait_start;
+            if (elapsed >= interval) {
+                break;
+            }
+            (void)os_event_wait_ms(&s_poll_event, (uint32_t)(interval - elapsed));
         }
         s_poll_now = false;
     }
@@ -345,6 +354,7 @@ static void poll_task(void *arg) {
 
 void ha_volume_client_poll_now(void) {
     s_poll_now = true;
+    os_event_set(&s_poll_event);
 }
 
 void ha_volume_client_init(void) {
@@ -493,6 +503,9 @@ bool ha_volume_client_call_script_async(const char *script_entity_id,
         s_pending_script_done = done;
     }
     os_mutex_unlock(&s_lock);
+    if (ok) {
+        os_event_set(&s_flush_event);
+    }
     return ok;
 }
 
@@ -528,7 +541,16 @@ static void run_pending_script(void) {
 static void flush_task(void *arg) {
     (void)arg;
     while (true) {
-        platform_sleep_ms(HA_VOLUME_FLUSH_POLL_MS);
+        // Wait for work. With volume ticks or a script pending, look again every
+        // HA_VOLUME_FLUSH_POLL_MS (the debounce window is measured against the clock); with
+        // nothing pending, block until new work signals s_flush_event (bounded, in case a signal
+        // were ever missed). This was an unconditional 30 ms sleep: 33 wake-ups a second forever,
+        // which alone kept the CPU from light-sleeping (issue #45).
+        os_mutex_lock(&s_lock);
+        bool work_pending = s_pending_ticks != 0 || s_pending_script[0] != '\0';
+        os_mutex_unlock(&s_lock);
+        (void)os_event_wait_ms(&s_flush_event,
+                               work_pending ? HA_VOLUME_FLUSH_POLL_MS : HA_VOLUME_FLUSH_IDLE_WAIT_MS);
         run_pending_script();
         os_mutex_lock(&s_lock);
         bool due = s_pending_ticks != 0 &&
@@ -579,6 +601,7 @@ bool ha_volume_client_adjust(int32_t ticks) {
     s_pending_ticks += ticks;
     s_last_tick_ms = platform_millis();
     os_mutex_unlock(&s_lock);
+    os_event_set(&s_flush_event);
     return true;
 }
 

@@ -1,3 +1,4 @@
+#include "os_event.h"
 #include "bridge_client.h"
 
 #include "bridge_command_plan.h"
@@ -152,6 +153,8 @@ static os_mutex_t s_state_lock = OS_MUTEX_INITIALIZER;
 static atomic_bool s_running = ATOMIC_VAR_INIT(false);
 static atomic_uint s_worker_start_attempts = ATOMIC_VAR_INIT(0);
 static bool s_trigger_poll;
+// Wakes wait_for_poll_interval() when a poll is requested; see that function.
+static os_event_t s_poll_event = OS_EVENT_INITIALIZER;
 // Extra quick polls still owed after a track/transport command. Without
 // them the dial waits out the whole regular interval (2s charging, 5s on
 // battery) before it even asks what changed, then may get the pre-change
@@ -663,16 +666,20 @@ static void wait_for_poll_interval(void) {
         delay_ms = followups >= 2 ? COMMAND_FOLLOWUP_FIRST_MS
                                   : COMMAND_FOLLOWUP_SECOND_MS;
     }
+    // Block until a poll is requested or the interval ends. This used to sleep 50 ms and look
+    // again (20 wake-ups a second, all night), which by itself kept the CPU from ever finding a
+    // long enough idle gap for light sleep (issue #46).
     uint64_t start = platform_millis();
     while (atomic_load_explicit(&s_running, memory_order_acquire)) {
         if (s_trigger_poll) {
             s_trigger_poll = false;
             break;
         }
-        if (platform_millis() - start >= delay_ms) {
+        uint64_t elapsed = platform_millis() - start;
+        if (elapsed >= delay_ms) {
             break;
         }
-        platform_sleep_ms(50);
+        (void)os_event_wait_ms(&s_poll_event, (uint32_t)(delay_ms - elapsed));
     }
 }
 
@@ -1400,6 +1407,7 @@ bool bridge_client_execute_command(const controller_command_t *command) {
         atomic_store_explicit(&s_command_followup_polls, 2,
                               memory_order_release);
         s_trigger_poll = true;
+        os_event_set(&s_poll_event);
     }
     if (!sent &&
         plan.failure_feedback > BRIDGE_COMMAND_FEEDBACK_NONE &&
@@ -1440,6 +1448,7 @@ void bridge_client_set_network_ready(bool ready) {
         s_device_state = DEVICE_STATE_CONNECTED;  // Transition: WiFi connected, zones not yet loaded
         network_status = "Loading zones...";
         s_trigger_poll = true;  // Trigger immediate poll when network becomes ready
+        os_event_set(&s_poll_event);
     } else {
         // Transition to RECONNECTING if we were operational, otherwise back to BOOT
         device_state_t new_state = (s_device_state == DEVICE_STATE_OPERATIONAL)
@@ -1661,6 +1670,7 @@ bridge_zone_selection_result_t bridge_client_select_zone_value(
     result.became_operational = s_device_state != DEVICE_STATE_OPERATIONAL;
     s_device_state = DEVICE_STATE_OPERATIONAL;
     s_trigger_poll = true;
+    os_event_set(&s_poll_event);
     s_force_artwork_refresh = true;
     result.persisted = true;
     unlock_state();

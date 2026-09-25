@@ -95,6 +95,9 @@ static lv_obj_t *s_progress_arc;       // Inner arc for track progress
 // not a timing problem, a resolution one. 1000 steps make each step a
 // fraction of a second on any normal track length.
 #define PROGRESS_ARC_MAX 1000
+// The 50 ms LVGL timer that runs poll_pending(). ui_loop_iter() already runs it on every pass, so
+// this timer only adds wake-ups; it is paused while the panel sleeps.
+static lv_timer_t *s_poll_pending_timer;
 static lv_timer_t *s_progress_interp_timer;  // Advances the arc between polls - see progress_interp_timer_cb
 static int s_progress_base_ms = -1;    // Last known real seek position (-1 = no data yet)
 static int s_progress_length_ms;       // Track length at the time s_progress_base_ms was recorded
@@ -919,6 +922,7 @@ void ui_init(void) {
 
     // Poll for state updates every 50ms
     lv_timer_t *poll_timer = lv_timer_create(poll_pending, 50, NULL);
+    s_poll_pending_timer = poll_timer;
     if (poll_timer) {
         lv_timer_set_repeat_count(poll_timer, -1);
     } else {
@@ -3710,6 +3714,13 @@ void ui_set_background_animation_paused(bool paused) {
     // controller more slowly, which is what lets the CPU stay in light sleep. A tap is still
     // noticed within UI_SLEEP_TOUCH_POLL_MS. Restored on wake, followed by the full redraw below.
     {
+        if (s_poll_pending_timer) {
+            if (paused) {
+                lv_timer_pause(s_poll_pending_timer);
+            } else {
+                lv_timer_resume(s_poll_pending_timer);
+            }
+        }
         lv_display_t *disp = lv_display_get_default();
         lv_timer_t *refr = disp ? lv_display_get_refr_timer(disp) : NULL;
         if (refr) {
