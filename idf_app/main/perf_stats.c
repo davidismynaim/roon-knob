@@ -27,6 +27,8 @@ static uint32_t s_at_begin[PERF_COUNTER_COUNT];
 static uint32_t s_acc_at_begin[PERF_ACC_COUNT];
 static int64_t s_begin_us;
 static volatile bool s_in_session;
+static bool s_mid_dumped;
+#define PERF_MID_SLEEP_US (90LL * 1000000LL)
 
 static uint32_t s_win_counts[PERF_COUNTER_COUNT];
 static uint32_t s_win_accs[PERF_ACC_COUNT];
@@ -44,40 +46,6 @@ void IRAM_ATTR perf_add(perf_acc_t acc, uint32_t value) {
     if (acc < PERF_ACC_COUNT) {
         __atomic_fetch_add(&s_accs[acc], value, __ATOMIC_RELAXED);
     }
-}
-
-static int format_window(char *line, size_t cap, const uint32_t *counts0, const uint32_t *accs0, double secs) {
-    int n = 0;
-    for (int i = 0; i < PERF_COUNTER_COUNT && n < (int)cap; i++) {
-        uint32_t d = s_counts[i] - counts0[i];
-        n += snprintf(line + n, cap - n, " %s=%lu(%.1f/s)", NAMES[i], (unsigned long)d, d / secs);
-    }
-    for (int i = 0; i < PERF_ACC_COUNT && n < (int)cap; i++) {
-        uint32_t d = s_accs[i] - accs0[i];
-        // render/flush time is kept in microseconds and reported in milliseconds
-        double v = (i == PERF_ACC_RENDER_US || i == PERF_ACC_FLUSH_US) ? d / 1000.0 : (double)d;
-        n += snprintf(line + n, cap - n, " %s=%.0f", ACC_NAMES[i], v);
-    }
-    return n;
-}
-
-void perf_periodic(const char *state_name) {
-    int64_t now = esp_timer_get_time();
-    if (s_win_start_us == 0) {
-        s_win_start_us = now;
-        for (int i = 0; i < PERF_COUNTER_COUNT; i++) s_win_counts[i] = s_counts[i];
-        for (int i = 0; i < PERF_ACC_COUNT; i++) s_win_accs[i] = s_accs[i];
-        return;
-    }
-    if (now - s_win_start_us < PERF_WINDOW_US) return;
-    double secs = (double)(now - s_win_start_us) / 1e6;
-    char line[520];
-    int n = snprintf(line, sizeof(line), "%.0fs window, display=%s:", secs, state_name ? state_name : "?");
-    format_window(line + n, sizeof(line) - n, s_win_counts, s_win_accs, secs);
-    ESP_LOGI(TAG, "%s", line);
-    s_win_start_us = now;
-    for (int i = 0; i < PERF_COUNTER_COUNT; i++) s_win_counts[i] = s_counts[i];
-    for (int i = 0; i < PERF_ACC_COUNT; i++) s_win_accs[i] = s_accs[i];
 }
 
 static void dump_pm(const char *when) {
@@ -101,12 +69,59 @@ static void dump_pm(const char *when) {
 #endif
 }
 
+static int format_window(char *line, size_t cap, const uint32_t *counts0, const uint32_t *accs0, double secs) {
+    int n = 0;
+    for (int i = 0; i < PERF_COUNTER_COUNT && n < (int)cap; i++) {
+        uint32_t d = s_counts[i] - counts0[i];
+        n += snprintf(line + n, cap - n, " %s=%lu(%.1f/s)", NAMES[i], (unsigned long)d, d / secs);
+    }
+    for (int i = 0; i < PERF_ACC_COUNT && n < (int)cap; i++) {
+        uint32_t d = s_accs[i] - accs0[i];
+        // render/flush time is kept in microseconds and reported in milliseconds
+        double v = (i == PERF_ACC_RENDER_US || i == PERF_ACC_FLUSH_US) ? d / 1000.0 : (double)d;
+        n += snprintf(line + n, cap - n, " %s=%.0f", ACC_NAMES[i], v);
+    }
+    return n;
+}
+
+void perf_periodic(const char *state_name) {
+    int64_t now = esp_timer_get_time();
+    // 90 s into a sleep, print the same statistics as at wake, so a session can be measured
+    // without waking the dial (the tap that ends a session also changes what is being measured).
+    if (s_in_session && !s_mid_dumped && now - s_begin_us >= PERF_MID_SLEEP_US) {
+        s_mid_dumped = true;
+        double secs = (double)(now - s_begin_us) / 1e6;
+        char line[520];
+        int n = snprintf(line, sizeof(line), "sleep snapshot %.1fs (still asleep):", secs);
+        format_window(line + n, sizeof(line) - n, s_at_begin, s_acc_at_begin, secs);
+        ESP_LOGI(TAG, "%s", line);
+        dump_pm("mid-sleep snapshot");
+    }
+    if (s_win_start_us == 0) {
+        s_win_start_us = now;
+        for (int i = 0; i < PERF_COUNTER_COUNT; i++) s_win_counts[i] = s_counts[i];
+        for (int i = 0; i < PERF_ACC_COUNT; i++) s_win_accs[i] = s_accs[i];
+        return;
+    }
+    if (now - s_win_start_us < PERF_WINDOW_US) return;
+    double secs = (double)(now - s_win_start_us) / 1e6;
+    char line[520];
+    int n = snprintf(line, sizeof(line), "%.0fs window, display=%s:", secs, state_name ? state_name : "?");
+    format_window(line + n, sizeof(line) - n, s_win_counts, s_win_accs, secs);
+    ESP_LOGI(TAG, "%s", line);
+    s_win_start_us = now;
+    for (int i = 0; i < PERF_COUNTER_COUNT; i++) s_win_counts[i] = s_counts[i];
+    for (int i = 0; i < PERF_ACC_COUNT; i++) s_win_accs[i] = s_accs[i];
+}
+
+
 void perf_sleep_begin(void) {
     if (s_in_session) return;
     for (int i = 0; i < PERF_COUNTER_COUNT; i++) s_at_begin[i] = s_counts[i];
     for (int i = 0; i < PERF_ACC_COUNT; i++) s_acc_at_begin[i] = s_accs[i];
     s_begin_us = esp_timer_get_time();
     s_in_session = true;
+    s_mid_dumped = false;
     ESP_LOGI(TAG, "sleep session begins");
     dump_pm("at sleep start");
 }
