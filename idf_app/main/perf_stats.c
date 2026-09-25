@@ -13,7 +13,7 @@ static const char *TAG = "perf";
 static const char *const NAMES[PERF_COUNTER_COUNT] = {
     "ui_loop", "encoder_timer", "lvgl_tick", "touch_read",
     "notify_post", "notify_timer", "notify_input", "notify_other", "encoder_isr",
-    "invalidate", "render", "flush",
+    "invalidate", "render", "flush", "wait_signalled",
 };
 static const char *const ACC_NAMES[PERF_ACC_COUNT] = {
     "invalid_px", "flush_px", "render_ms", "flush_ms",

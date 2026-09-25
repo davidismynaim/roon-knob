@@ -39,6 +39,7 @@
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <stdatomic.h>
 
 static const char *TAG = "main";
@@ -306,22 +307,25 @@ static void check_ota_status(void) {
 #define UI_LOOP_AWAKE_PERIOD_MS 10
 #define UI_LOOP_SLEEP_MAX_WAIT_MS 1000
 
-static TaskHandle_t s_ui_loop_task = NULL;
+// A private binary semaphore rather than the task's own notification: drivers that run on this
+// task (the I2C touch read among them) use its notification too, and a stray one made every wait
+// return at once, doubling the loop's wake-ups.
+static SemaphoreHandle_t s_ui_wake_sem = NULL;
 
 void ui_loop_wake(void) {
-    TaskHandle_t task = s_ui_loop_task;
-    if (task) {
-        xTaskNotifyGive(task);
+    SemaphoreHandle_t sem = s_ui_wake_sem;
+    if (sem) {
+        (void)xSemaphoreGive(sem);  // a binary semaphore: repeated gives stay one signal
     }
 }
 
 void IRAM_ATTR ui_loop_wake_from_isr(void) {
-    TaskHandle_t task = s_ui_loop_task;
-    if (!task) {
+    SemaphoreHandle_t sem = s_ui_wake_sem;
+    if (!sem) {
         return;
     }
     BaseType_t higher_priority_woken = pdFALSE;
-    vTaskNotifyGiveFromISR(task, &higher_priority_woken);
+    (void)xSemaphoreGiveFromISR(sem, &higher_priority_woken);
     if (higher_priority_woken) {
         portYIELD_FROM_ISR();
     }
@@ -352,7 +356,7 @@ static void ui_loop_task(void *arg) {
     ESP_LOGI(TAG, "UI loop task started on core %d", xPortGetCoreID());
     log_memory("UI loop start");
 
-    s_ui_loop_task = xTaskGetCurrentTaskHandle();
+    s_ui_wake_sem = xSemaphoreCreateBinary();
     platform_task_set_ui_wake_hook(ui_post_wake_hook);
 
     // Periodic work runs on the clock, not per pass: the loop no longer passes at a fixed 10 ms
@@ -463,7 +467,9 @@ static void ui_loop_task(void *arg) {
             if (wait_ms < UI_LOOP_AWAKE_PERIOD_MS) wait_ms = UI_LOOP_AWAKE_PERIOD_MS;
             if (wait_ms > UI_LOOP_SLEEP_MAX_WAIT_MS) wait_ms = UI_LOOP_SLEEP_MAX_WAIT_MS;
         }
-        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
+        if (s_ui_wake_sem && xSemaphoreTake(s_ui_wake_sem, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+            perf_count(PERF_UI_WAIT_SIGNALLED);
+        }
     }
 }
 

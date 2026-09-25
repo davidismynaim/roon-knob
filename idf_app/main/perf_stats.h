@@ -25,6 +25,7 @@ typedef enum {
     PERF_LV_INVALIDATE,      // an area was marked for redraw (LV_EVENT_INVALIDATE_AREA)
     PERF_LV_RENDER,          // one LVGL render pass (LV_EVENT_RENDER_START)
     PERF_LV_FLUSH,           // one flush of pixels toward the panel
+    PERF_UI_WAIT_SIGNALLED,  // the UI loop's wait ended because it was signalled (not a timeout)
     PERF_COUNTER_COUNT
 } perf_counter_t;
 
