@@ -10,6 +10,7 @@
 #include "room_cfg.h"
 #include "ui.h"
 #include "vinyl_client.h"
+#include "perf_stats.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -318,7 +319,23 @@ static void lvgl_rounder_cb(lv_event_t *e) {
     // Round the end of coordinate up to the nearest 2N+1 number
     area->x2 = ((area->x2 >> 1) << 1) + 1;
     area->y2 = ((area->y2 >> 1) << 1) + 1;
+
+    perf_count(PERF_LV_INVALIDATE);
+    perf_add(PERF_ACC_INVALID_PX, (uint32_t)(lv_area_get_width(area) * lv_area_get_height(area)));
 }
+
+#if CONFIG_RK_PERF_LOG
+static int64_t s_perf_render_t0_us;
+static void perf_render_start_cb(lv_event_t *e) {
+    (void)e;
+    perf_count(PERF_LV_RENDER);
+    s_perf_render_t0_us = esp_timer_get_time();
+}
+static void perf_render_ready_cb(lv_event_t *e) {
+    (void)e;
+    perf_add(PERF_ACC_RENDER_US, (uint32_t)(esp_timer_get_time() - s_perf_render_t0_us));
+}
+#endif
 
 // Static rotation buffer - sized to handle LVGL's combined flushes when rotation
 // is enabled. Observed max: 54 rows. Using 60 rows with margin.
@@ -336,7 +353,22 @@ static void rotate180_rgb565_simple(const uint16_t *src, uint16_t *dst, int pixe
 
 
 // LVGL flush callback with software rotation support
+static void lvgl_flush_cb_impl(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map);
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+#if CONFIG_RK_PERF_LOG
+    int64_t perf_t0 = esp_timer_get_time();
+    perf_count(PERF_LV_FLUSH);
+    if (!display_is_sleeping()) {
+        perf_add(PERF_ACC_FLUSH_PX, (uint32_t)(lv_area_get_width(area) * lv_area_get_height(area)));
+    }
+    lvgl_flush_cb_impl(disp, area, px_map);
+    perf_add(PERF_ACC_FLUSH_US, (uint32_t)(esp_timer_get_time() - perf_t0));
+#else
+    lvgl_flush_cb_impl(disp, area, px_map);
+#endif
+}
+
+static void lvgl_flush_cb_impl(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     // Content updates (track/artist text, artwork, progress) are never
     // gated on display-sleep state upstream - apply_state() has to keep
     // LVGL's widgets correct even while asleep, so whatever's showing is
@@ -408,12 +440,14 @@ skip_rotation:
 // LVGL tick timer callback - critical for LVGL to track time
 static void lvgl_tick_timer_cb(void *arg) {
     (void)arg;
+    perf_count(PERF_LVGL_TICK);
     lv_tick_inc(LVGL_TICK_PERIOD_MS);
 }
 
 // LVGL touch read callback with swipe gesture detection
 static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     (void)indev;
+    perf_count(PERF_TOUCH_READ);
     uint16_t x, y;
 
     if (tpGetCoordinates(&x, &y)) {
@@ -746,6 +780,10 @@ bool platform_display_register_lvgl_driver(void) {
 
     // Register rounder callback for 2-pixel alignment requirement
     lv_display_add_event_cb(s_display, lvgl_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+#if CONFIG_RK_PERF_LOG
+    lv_display_add_event_cb(s_display, perf_render_start_cb, LV_EVENT_RENDER_START, NULL);
+    lv_display_add_event_cb(s_display, perf_render_ready_cb, LV_EVENT_RENDER_READY, NULL);
+#endif
 
     // Register touch input device
     ESP_LOGI(TAG, "Registering LVGL touch input device");

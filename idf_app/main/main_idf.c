@@ -1,3 +1,4 @@
+#include "perf_stats.h"
 #include "app.h"
 #include "battery.h"
 #include "ble_hid_host_dial.h"
@@ -292,6 +293,20 @@ static void check_ota_status(void) {
     }
 }
 
+#if CONFIG_RK_PERF_LOG
+static const char *display_state_name(display_state_t state) {
+    switch (state) {
+    case DISPLAY_STATE_NORMAL: return "normal";
+    case DISPLAY_STATE_ART_MODE: return "art";
+    case DISPLAY_STATE_DIM: return "dim";
+    case DISPLAY_STATE_SLEEP: return "sleep";
+    default: return "?";
+    }
+}
+#else
+#define display_state_name(state) ((void)(state), "")
+#endif
+
 static void ui_loop_task(void *arg) {
     (void)arg;
     ESP_LOGI(TAG, "UI loop task started on core %d", xPortGetCoreID());
@@ -300,6 +315,9 @@ static void ui_loop_task(void *arg) {
     uint32_t ota_check_counter = 0;
 
     while (true) {
+        perf_count(PERF_UI_LOOP);
+        perf_periodic(display_state_name(display_get_state()));
+
         // Process queued input events from ISR context
         platform_input_process_events();
 

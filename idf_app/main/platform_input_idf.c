@@ -1,3 +1,4 @@
+#include "perf_stats.h"
 #include "platform/platform_input.h"
 #include "controller_input.h"
 #include "controller_input_mailbox.h"
@@ -191,6 +192,7 @@ static void encoder_read_and_dispatch(void) {
 
 static void input_poll_timer_callback(void* arg) {
     (void)arg;
+    perf_count(PERF_ENCODER_TIMER);
     encoder_read_and_dispatch();
 }
 

@@ -7,6 +7,7 @@ set(SRC_FILES
     "ui_network.c"
     "platform_display_idf.c"
     "display_sleep.c"
+    "perf_stats.c"
     "platform_storage_idf.c"
     "platform_http_idf.c"
     "platform_mdns_idf.c"

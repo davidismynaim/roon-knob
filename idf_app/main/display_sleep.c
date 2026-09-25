@@ -20,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "ui.h"
+#include "perf_stats.h"
 
 static const char *TAG = "display_sleep";
 
@@ -266,6 +267,7 @@ void display_sleep(void) {
 
         s_display_state = DISPLAY_STATE_SLEEP;
         ESP_LOGI(TAG, "Display sleeping");
+        perf_sleep_begin();
 
         // Start deep sleep timer (if enabled - timeout already accounts for charging state)
         if (s_deep_sleep_timer != NULL && s_deep_sleep_timeout_ms > 0) {
@@ -293,6 +295,7 @@ void display_wake(void) {
     sleep_timeout = s_sleep_timeout_ms;
 
     if (s_display_state == DISPLAY_STATE_SLEEP && s_panel_handle != NULL) {
+        perf_sleep_end("input");
         // Acquire CPU frequency and no-light-sleep locks first (need full
         // performance and no sleep-induced latency before the panel/touch
         // are live again)

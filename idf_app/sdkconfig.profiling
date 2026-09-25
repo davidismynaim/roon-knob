@@ -1,0 +1,7 @@
+# Profiling overlay for the display-sleep power work (issue #45). NOT part of release builds.
+# Build with:  idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.profiling" build
+# (delete idf_app/sdkconfig first so the defaults are re-applied).
+CONFIG_RK_PERF_LOG=y
+# ESP-IDF power-manager profiling: esp_pm_dump_locks() then also reports the time spent in each
+# power mode (SLEEP / APB_MIN / APB_MAX / CPU_MAX) and the light-sleep entry and reject counts.
+CONFIG_PM_PROFILING=y
