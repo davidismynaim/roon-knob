@@ -1,3 +1,6 @@
+#if CONFIG_RK_PERF_LOG
+#include "lvgl.h"
+#endif
 #include "perf_stats.h"
 #include "ui_loop.h"
 #include "platform/platform_task.h"
@@ -361,6 +364,24 @@ static void ui_loop_task(void *arg) {
     while (true) {
         perf_count(PERF_UI_LOOP);
         perf_periodic(display_state_name(display_get_state()));
+#if CONFIG_RK_PERF_LOG
+        // What LVGL has scheduled: anything unpaused here bounds how long the loop can sleep.
+        static int64_t next_lvgl_dump_us = 0;
+        int64_t perf_now_us = esp_timer_get_time();
+        if (perf_now_us >= next_lvgl_dump_us) {
+            next_lvgl_dump_us = perf_now_us + 30000000LL;
+            unsigned active = 0;
+            char periods[160] = "";
+            for (lv_timer_t *lt = lv_timer_get_next(NULL); lt; lt = lv_timer_get_next(lt)) {
+                if (!lv_timer_get_paused(lt)) {
+                    active++;
+                }
+            }
+            ESP_LOGI("perf", "lvgl: anims_running=%u timers_unpaused=%u until_next=%ums (%s)",
+                     (unsigned)lv_anim_count_running(), active,
+                     (unsigned)lv_timer_get_time_until_next(), periods);
+        }
+#endif
 
         // Process queued input events from ISR context
         platform_input_process_events();
