@@ -467,7 +467,15 @@ static void ui_loop_task(void *arg) {
             if (wait_ms < UI_LOOP_AWAKE_PERIOD_MS) wait_ms = UI_LOOP_AWAKE_PERIOD_MS;
             if (wait_ms > UI_LOOP_SLEEP_MAX_WAIT_MS) wait_ms = UI_LOOP_SLEEP_MAX_WAIT_MS;
         }
-        if (s_ui_wake_sem && xSemaphoreTake(s_ui_wake_sem, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+        // The tick is 10 ms (CONFIG_FREERTOS_HZ=100), so pdMS_TO_TICKS() rounds DOWN: LVGL's 49 ms
+        // became 40 ms, woke the loop just before the touch timer was due, and cost a second pass
+        // ~10 ms later - two passes per touch read. Asleep, round up instead. (Awake stays at one
+        // tick, exactly as before.)
+        TickType_t wait_ticks = pdMS_TO_TICKS(wait_ms);
+        if (display_is_sleeping()) {
+            wait_ticks += 1;
+        }
+        if (s_ui_wake_sem && xSemaphoreTake(s_ui_wake_sem, wait_ticks) == pdTRUE) {
             perf_count(PERF_UI_WAIT_SIGNALLED);
         }
     }
