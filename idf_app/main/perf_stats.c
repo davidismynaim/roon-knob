@@ -48,6 +48,52 @@ void IRAM_ATTR perf_add(perf_acc_t acc, uint32_t value) {
     }
 }
 
+
+#if CONFIG_PM_LIGHT_SLEEP_CALLBACKS
+// ESP-IDF calls this each time it considers light sleep on a core, BEFORE it checks whether the
+// gap is long enough (>= 30 ms here), passing the gap it calculated. The histogram therefore shows
+// which core keeps finding gaps that are too short, and how short.
+#define GAP_BUCKETS 7
+static const char *const GAP_LABELS[GAP_BUCKETS] = {"<5ms", "5-10", "10-20", "20-30", "30-50", "50-100", ">=100"};
+static volatile uint32_t s_gap_hist[2][GAP_BUCKETS];
+static bool s_gap_cb_registered;
+
+static esp_err_t IRAM_ATTR perf_light_sleep_enter_cb(int64_t sleep_time_us, void *arg) {
+    (void)arg;
+    int core = xPortGetCoreID() & 1;
+    int64_t ms = sleep_time_us / 1000;
+    int b = ms < 5 ? 0 : ms < 10 ? 1 : ms < 20 ? 2 : ms < 30 ? 3 : ms < 50 ? 4 : ms < 100 ? 5 : 6;
+    s_gap_hist[core][b]++;
+    return ESP_OK;
+}
+
+static void register_gap_cb(void) {
+    if (s_gap_cb_registered) return;
+    esp_pm_sleep_cbs_register_config_t cfg = {
+        .enter_cb = perf_light_sleep_enter_cb,
+        .enter_cb_user_arg = NULL,
+        .exit_cb = NULL,
+        .exit_cb_user_arg = NULL,
+        .enter_cb_prior = 0,
+        .exit_cb_prior = 0,
+    };
+    if (esp_pm_light_sleep_register_cbs(&cfg) == ESP_OK) s_gap_cb_registered = true;
+}
+
+static void dump_gap_hist(const char *when) {
+    printf("[perf] --- light-sleep gap seen by ESP-IDF per core, %s (cumulative) ---\n", when);
+    for (int core = 0; core < 2; core++) {
+        printf("core%d:", core);
+        for (int b = 0; b < GAP_BUCKETS; b++) printf(" %s=%lu", GAP_LABELS[b], (unsigned long)s_gap_hist[core][b]);
+        printf("\n");
+    }
+    printf("[perf] --- end ---\n");
+}
+#else
+static void register_gap_cb(void) {}
+static void dump_gap_hist(const char *when) { (void)when; }
+#endif
+
 static void dump_pm(const char *when) {
 #if CONFIG_PM_ENABLE
     printf("[perf] --- power-manager statistics %s ---\n", when);
@@ -56,6 +102,7 @@ static void dump_pm(const char *when) {
 #else
     (void)when;
 #endif
+    dump_gap_hist(when);
 #if CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS && CONFIG_FREERTOS_USE_TRACE_FACILITY
     static char stats[2048];
     printf("[perf] --- task CPU time %s (cumulative since boot) ---\n", when);
@@ -117,6 +164,7 @@ void perf_periodic(const char *state_name) {
 
 void perf_sleep_begin(void) {
     if (s_in_session) return;
+    register_gap_cb();
     for (int i = 0; i < PERF_COUNTER_COUNT; i++) s_at_begin[i] = s_counts[i];
     for (int i = 0; i < PERF_ACC_COUNT; i++) s_acc_at_begin[i] = s_accs[i];
     s_begin_us = esp_timer_get_time();
