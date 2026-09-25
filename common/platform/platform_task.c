@@ -83,11 +83,21 @@ static bool ui_queue_push(platform_task_fn_t fn, void *arg) {
     return true;
 }
 
+static platform_task_wake_fn_t s_ui_wake_hook;
+
+void platform_task_set_ui_wake_hook(platform_task_wake_fn_t fn) {
+    s_ui_wake_hook = fn;
+}
+
 bool platform_task_post_to_ui(platform_task_fn_t fn, void *arg) {
     if (!s_initialized) {
         platform_task_init();
     }
-    return ui_queue_push(fn, arg);
+    bool queued = ui_queue_push(fn, arg);
+    if (queued && s_ui_wake_hook) {
+        s_ui_wake_hook();
+    }
+    return queued;
 }
 
 void platform_task_run_pending(void) {

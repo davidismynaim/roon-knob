@@ -21,6 +21,8 @@
 #include "freertos/semphr.h"
 #include "ui.h"
 #include "perf_stats.h"
+#include "platform_input_sleep.h"
+#include "ui_loop.h"
 
 static const char *TAG = "display_sleep";
 
@@ -267,6 +269,8 @@ void display_sleep(void) {
 
         s_display_state = DISPLAY_STATE_SLEEP;
         ESP_LOGI(TAG, "Display sleeping");
+        // Stop the 3 ms encoder polling timer and let the pins wake the CPU instead.
+        platform_input_sleep_mode(true);
         perf_sleep_begin();
 
         // Start deep sleep timer (if enabled - timeout already accounts for charging state)
@@ -296,6 +300,8 @@ void display_wake(void) {
 
     if (s_display_state == DISPLAY_STATE_SLEEP && s_panel_handle != NULL) {
         perf_sleep_end("input");
+        // The knob is polled again from here on.
+        platform_input_sleep_mode(false);
         // Acquire CPU frequency and no-light-sleep locks first (need full
         // performance and no sleep-induced latency before the panel/touch
         // are live again)
@@ -373,16 +379,22 @@ static volatile bool s_pending_sleep = false;
 // Timer callback for art mode
 static void art_mode_timer_callback(void *arg) {
     s_pending_art_mode = true;  // Defer to UI loop
+    perf_count(PERF_UI_NOTIFY_TIMER);
+    ui_loop_wake();
 }
 
 // Timer callback for dimming
 static void dim_timer_callback(void *arg) {
     s_pending_dim = true;  // Defer to UI loop
+    perf_count(PERF_UI_NOTIFY_TIMER);
+    ui_loop_wake();
 }
 
 // Timer callback for sleep
 static void sleep_timer_callback(void *arg) {
     s_pending_sleep = true;  // Defer to UI loop
+    perf_count(PERF_UI_NOTIFY_TIMER);
+    ui_loop_wake();
 }
 
 // Pending deep sleep flag
@@ -391,6 +403,8 @@ static volatile bool s_pending_deep_sleep = false;
 // Timer callback for deep sleep
 static void deep_sleep_timer_callback(void *arg) {
     s_pending_deep_sleep = true;  // Defer to UI loop
+    perf_count(PERF_UI_NOTIFY_TIMER);
+    ui_loop_wake();
 }
 
 static void enter_deep_sleep_body(void);
@@ -425,6 +439,8 @@ static void enter_deep_sleep(void) {
 static void enter_deep_sleep_body(void) {
     ESP_LOGI(TAG, "Preparing for deep sleep...");
     crumb(1);
+    // Leave the light-sleep pin wake/interrupt setup before the pins are handed to the RTC wake logic.
+    platform_input_sleep_mode(false);
 
     // Turn off backlight (GPIO47 is not RTC-capable, won't be held)
     display_set_backlight(0);

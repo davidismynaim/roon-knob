@@ -93,8 +93,6 @@ static int16_t s_last_tap_x = 0;
 static int16_t s_last_tap_y = 0;
 
 // LVGL tick timer (critical for LVGL to know time is passing)
-static esp_timer_handle_t s_lvgl_tick_timer = NULL;
-#define LVGL_TICK_PERIOD_MS 2
 
 // Display configuration - matches hardware pinout
 #define LCD_HOST SPI2_HOST
@@ -437,11 +435,9 @@ skip_rotation:
     lv_display_flush_ready(disp);
 }
 
-// LVGL tick timer callback - critical for LVGL to track time
-static void lvgl_tick_timer_cb(void *arg) {
-    (void)arg;
-    perf_count(PERF_LVGL_TICK);
-    lv_tick_inc(LVGL_TICK_PERIOD_MS);
+// LVGL's millisecond clock (see the lv_tick_set_cb call in platform_display_register_lvgl_driver)
+static uint32_t lvgl_tick_get_ms(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 // LVGL touch read callback with swipe gesture detection
@@ -805,23 +801,11 @@ bool platform_display_register_lvgl_driver(void) {
     // watch those too after flashing, not just the transport buttons.
     lv_indev_set_scroll_limit(s_touch_indev, 20);
 
-    // Create LVGL tick timer - CRITICAL for LVGL to know time is passing
-    ESP_LOGI(TAG, "Creating LVGL tick timer (%dms period)", LVGL_TICK_PERIOD_MS);
-    const esp_timer_create_args_t lvgl_tick_timer_args = {
-        .callback = lvgl_tick_timer_cb,
-        .name = "lvgl_tick"
-    };
-    esp_err_t timer_err = esp_timer_create(&lvgl_tick_timer_args, &s_lvgl_tick_timer);
-    if (timer_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create LVGL tick timer: %s", esp_err_to_name(timer_err));
-        return false;
-    }
-    timer_err = esp_timer_start_periodic(s_lvgl_tick_timer, LVGL_TICK_PERIOD_MS * 1000ULL);
-    if (timer_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start LVGL tick timer: %s", esp_err_to_name(timer_err));
-        return false;
-    }
-    ESP_LOGI(TAG, "LVGL tick timer started successfully");
+    // LVGL's clock. Read on demand from the high-resolution timer instead of a periodic 2 ms
+    // esp_timer that called lv_tick_inc(): that timer woke the CPU 500 times a second in every
+    // state, including while the display sleeps, and kept light sleep from lasting (issue #45).
+    lv_tick_set_cb(lvgl_tick_get_ms);
+    ESP_LOGI(TAG, "LVGL tick source: on-demand esp_timer_get_time (no periodic timer)");
 
     // Note: LVGL timer_handler will be called by ui_loop_iter()
     // No separate LVGL task needed since ui_loop handles it

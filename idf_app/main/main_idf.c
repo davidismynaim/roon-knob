@@ -1,4 +1,6 @@
 #include "perf_stats.h"
+#include "ui_loop.h"
+#include "platform/platform_task.h"
 #include "app.h"
 #include "battery.h"
 #include "ble_hid_host_dial.h"
@@ -196,6 +198,8 @@ void rk_net_evt_cb(rk_net_evt_t evt, const char *ip_opt) {
         atomic_store_explicit(&s_config_server_start_pending, true,
                               memory_order_release);
         s_ble_init_pending = true;
+        perf_count(PERF_UI_NOTIFY_OTHER);
+        ui_loop_wake();
         break;
 
     // All failure events alternate between error reason and retry count
@@ -225,6 +229,8 @@ void rk_net_evt_cb(rk_net_evt_t evt, const char *ip_opt) {
                               memory_order_release);
         atomic_store_explicit(&s_config_server_stop_pending, true,
                               memory_order_release);  // Stop config server in AP mode
+        perf_count(PERF_UI_NOTIFY_OTHER);
+        ui_loop_wake();
         break;
 
     case RK_NET_EVT_AP_STOPPED:
@@ -293,6 +299,37 @@ static void check_ota_status(void) {
     }
 }
 
+// --- UI loop wake-up (see ui_loop.h) -------------------------------------------------------
+#define UI_LOOP_AWAKE_PERIOD_MS 10
+#define UI_LOOP_SLEEP_MAX_WAIT_MS 1000
+
+static TaskHandle_t s_ui_loop_task = NULL;
+
+void ui_loop_wake(void) {
+    TaskHandle_t task = s_ui_loop_task;
+    if (task) {
+        xTaskNotifyGive(task);
+    }
+}
+
+void IRAM_ATTR ui_loop_wake_from_isr(void) {
+    TaskHandle_t task = s_ui_loop_task;
+    if (!task) {
+        return;
+    }
+    BaseType_t higher_priority_woken = pdFALSE;
+    vTaskNotifyGiveFromISR(task, &higher_priority_woken);
+    if (higher_priority_woken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+// Wakes the loop when another task queues a callback for it (platform_task_post_to_ui).
+static void ui_post_wake_hook(void) {
+    perf_count(PERF_UI_NOTIFY_POST);
+    ui_loop_wake();
+}
+
 #if CONFIG_RK_PERF_LOG
 static const char *display_state_name(display_state_t state) {
     switch (state) {
@@ -312,7 +349,14 @@ static void ui_loop_task(void *arg) {
     ESP_LOGI(TAG, "UI loop task started on core %d", xPortGetCoreID());
     log_memory("UI loop start");
 
-    uint32_t ota_check_counter = 0;
+    s_ui_loop_task = xTaskGetCurrentTaskHandle();
+    platform_task_set_ui_wake_hook(ui_post_wake_hook);
+
+    // Periodic work runs on the clock, not per pass: the loop no longer passes at a fixed 10 ms
+    // (it blocks for longer while the display sleeps), so pass counts are not time.
+    int64_t next_ota_check_us = 0;
+    int64_t next_telemetry_us = 0;
+    uint8_t early_telemetry_samples = 0;
 
     while (true) {
         perf_count(PERF_UI_LOOP);
@@ -324,23 +368,21 @@ static void ui_loop_task(void *arg) {
         // Process pending display actions (e.g., swipe gestures)
         platform_display_process_pending();
 
-        // Run LVGL task handler
-        ui_loop_iter();
+        // Run LVGL task handler; it says when it next needs to run
+        uint32_t lvgl_next_ms = ui_loop_iter();
 
-        // Check OTA status periodically (every 500ms = 50 iterations at 10ms)
-        if (++ota_check_counter >= 50) {
-            ota_check_counter = 0;
+        // Check OTA status periodically: every 500 ms while the display is awake, 5 s asleep
+        // (nothing is shown, and the check only mirrors status into the UI)
+        int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_ota_check_us) {
+            next_ota_check_us = now_us + (display_is_sleeping() ? 5000000LL : 500000LL);
             check_ota_status();
         }
 
         // Keep early boot telemetry frequent enough to attribute BLE allocations,
         // then reduce it to once per minute for normal operation.
-        static uint32_t stack_check_counter = 0;
-        static uint8_t early_telemetry_samples = 0;
-        const uint32_t stack_check_interval =
-            early_telemetry_samples < 6 ? 500 : 6000;
-        if (++stack_check_counter >= stack_check_interval) {
-            stack_check_counter = 0;
+        if (now_us >= next_telemetry_us) {
+            next_telemetry_us = now_us + (early_telemetry_samples < 6 ? 5000000LL : 60000000LL);
             UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
             uint32_t free_bytes = hwm * sizeof(StackType_t);
             uint32_t used_bytes = UI_LOOP_STACK_SIZE - free_bytes;
@@ -389,8 +431,18 @@ static void ui_loop_task(void *arg) {
             }
         }
 
-        // Yield to lower priority tasks including IDLE
-        vTaskDelay(pdMS_TO_TICKS(10));
+        // Wait for the next pass. Awake, that is the same 10 ms as before. Asleep, block until
+        // LVGL next needs to run (the slowed touch poll, ~50 ms) or someone wakes the loop
+        // (a posted callback, the encoder pin interrupt, a display-state timer, WiFi flags),
+        // capped so the periodic work above still happens. Blocking, not polling, is what lets
+        // the CPU stay in light sleep in between.
+        uint32_t wait_ms = UI_LOOP_AWAKE_PERIOD_MS;
+        if (display_is_sleeping()) {
+            wait_ms = lvgl_next_ms;
+            if (wait_ms < UI_LOOP_AWAKE_PERIOD_MS) wait_ms = UI_LOOP_AWAKE_PERIOD_MS;
+            if (wait_ms > UI_LOOP_SLEEP_MAX_WAIT_MS) wait_ms = UI_LOOP_SLEEP_MAX_WAIT_MS;
+        }
+        (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
     }
 }
 

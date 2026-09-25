@@ -3033,14 +3033,16 @@ bool ui_zone_picker_is_current_selection(void) {
 // Public API
 // ============================================================================
 
-void ui_loop_iter(void) {
-    lv_task_handler();
-    lv_timer_handler();
+uint32_t ui_loop_iter(void) {
+    // lv_task_handler() is only the deprecated alias of lv_timer_handler(), so calling both ran
+    // every LVGL timer twice per pass.
+    uint32_t next_ms = lv_timer_handler();
 
     platform_task_run_pending();  // Process callbacks from bridge_client thread
 
     // Check for pending UI updates (poll_pending inline - no timer needed)
     poll_pending(NULL);
+    return next_ms;
 }
 
 void ui_set_track(const char *line1, const char *line2) {
@@ -3683,6 +3685,9 @@ void ui_set_controls_visible(bool visible) {
 // without disturbing anything else about the label; restoring
 // SCROLL_CIRCULAR on wake just restarts the marquee from the beginning,
 // which is unnoticeable since the screen was off anyway.
+// How often the touch controller is read while the panel is asleep (tap-to-wake latency).
+#define UI_SLEEP_TOUCH_POLL_MS 50
+
 void ui_set_background_animation_paused(bool paused) {
     if (s_progress_interp_timer) {
         if (paused) {
@@ -3697,6 +3702,28 @@ void ui_set_background_animation_paused(bool paused) {
             // gaps between poll cycles.
             s_progress_base_uptime_ms = platform_millis();
             lv_timer_resume(s_progress_interp_timer);
+        }
+    }
+
+    // A sleeping panel needs neither LVGL's periodic refresh (nothing is flushed anyway, see
+    // lvgl_flush_cb) nor a 30 ms touch poll: pause the refresh timer and poll the touch
+    // controller more slowly, which is what lets the CPU stay in light sleep. A tap is still
+    // noticed within UI_SLEEP_TOUCH_POLL_MS. Restored on wake, followed by the full redraw below.
+    {
+        lv_display_t *disp = lv_display_get_default();
+        lv_timer_t *refr = disp ? lv_display_get_refr_timer(disp) : NULL;
+        if (refr) {
+            if (paused) {
+                lv_timer_pause(refr);
+            } else {
+                lv_timer_resume(refr);
+            }
+        }
+        for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+            lv_timer_t *read_timer = lv_indev_get_read_timer(indev);
+            if (read_timer) {
+                lv_timer_set_period(read_timer, paused ? UI_SLEEP_TOUCH_POLL_MS : LV_DEF_REFR_PERIOD);
+            }
         }
     }
 
