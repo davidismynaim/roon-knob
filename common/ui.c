@@ -114,12 +114,15 @@ static char s_progress_last_line1[128] = "";  // Track identity, to tell a real 
 
 // Detail screen's seek-jog (ui_seek_adjust): the encoder owns this arc
 // instead of volume there, so it grows to where the volume ring used to be
-// (SCREEN_SIZE-30 -> SCREEN_SIZE-10, still leaving a gap to the true edge)
-// and thickens 3x (4px -> 12px) for the whole detail-screen visit, not just
-// while actively seeking. PROGRESS_ARC_COLOR_NORMAL matches the indicator
-// color set at creation time below.
+// (SCREEN_SIZE-30 -> SCREEN_SIZE, right out to the true edge of the glass:
+// the 5px gap the previous SCREEN_SIZE-10 left there had no purpose, and
+// DETAIL_TEXT_RADIUS below is derived from this size, so the text area
+// widens by the same 5px per side) and thickens 3x (4px -> 12px, unchanged)
+// for the whole detail-screen visit, not just while actively seeking.
+// PROGRESS_ARC_COLOR_NORMAL matches the indicator color set at creation time
+// below.
 #define PROGRESS_ARC_SIZE_NORMAL (SCREEN_SIZE - 30)
-#define PROGRESS_ARC_SIZE_SEEK (SCREEN_SIZE - 10)
+#define PROGRESS_ARC_SIZE_SEEK SCREEN_SIZE
 #define PROGRESS_ARC_WIDTH_NORMAL 4
 #define PROGRESS_ARC_WIDTH_SEEK 12
 #define PROGRESS_ARC_COLOR_NORMAL 0x7bb9e8
