@@ -210,6 +210,7 @@
     "dial|idf_app/main/config_server.c|idf_app/main/display_sleep.h",
     "dial|idf_app/main/config_server.c|idf_app/main/haptic_driver.h",
     "dial|idf_app/main/config_server.c|idf_app/main/http_server_lifecycle.h",
+    "dial|idf_app/main/config_server.c|idf_app/main/perf_stats.h",
     "dial|idf_app/main/controller_input_profile_dial.c|common/controller_input_profile.h",
     "dial|idf_app/main/controller_presentation_dial.c|common/controller_config.h",
     "dial|idf_app/main/controller_presentation_dial.c|common/controller_presentation.h",

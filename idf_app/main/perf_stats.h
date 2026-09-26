@@ -9,6 +9,7 @@
 // exists in a normal build: it is compiled in only with CONFIG_RK_PERF_LOG, so production firmware
 // carries no counters, no logging, and no PM profiling overhead.
 
+#include <stddef.h>
 #include <stdint.h>
 #include "sdkconfig.h"
 
@@ -46,10 +47,15 @@ void perf_sleep_end(const char *cause);
 // Call from the UI loop: every 30 s logs the counters for that window with the display state
 // name, so each mode (normal, art, dim, sleep) gets its own numbers as the dial moves through it.
 void perf_periodic(const char *state_name);
+// Copy up to cap bytes of the in-RAM sleep report starting at offset; returns bytes copied (0 = end).
+size_t perf_report_copy(char *out, size_t cap, size_t offset);
+// Log the rectangle and call stack of a large redraw request (first few hundred after boot).
+void perf_trace_invalidate(int x1, int y1, int x2, int y2);
 #else
 static inline void perf_count(perf_counter_t counter) { (void)counter; }
 static inline void perf_add(perf_acc_t acc, uint32_t value) { (void)acc; (void)value; }
 static inline void perf_periodic(const char *state_name) { (void)state_name; }
+static inline void perf_trace_invalidate(int x1, int y1, int x2, int y2) { (void)x1; (void)y1; (void)x2; (void)y2; }
 static inline void perf_sleep_begin(void) {}
 static inline void perf_sleep_end(const char *cause) { (void)cause; }
 #endif

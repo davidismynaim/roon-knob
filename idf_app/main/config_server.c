@@ -12,6 +12,7 @@
 #include "rk_ble_hid_host.h"
 #include "room_cfg.h"
 #include "wifi_manager.h"
+#include "perf_stats.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1339,6 +1340,21 @@ static esp_err_t ble_forget_handler(httpd_req_t *req) {
     return redirect_to_ble(req);
 }
 
+#if CONFIG_RK_PERF_LOG
+// Profiling builds only: the sleep-session report kept in RAM (the USB serial link is not
+// available while the chip light-sleeps).
+static esp_err_t perf_get_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/plain");
+    static char chunk[1024];
+    size_t off = 0, n;
+    while ((n = perf_report_copy(chunk, sizeof(chunk), off)) > 0) {
+        if (httpd_resp_send_chunk(req, chunk, (ssize_t)n) != ESP_OK) return ESP_FAIL;
+        off += n;
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+#endif
+
 void config_server_start(void) {
     if (!http_server_lifecycle_lock()) {
         ESP_LOGE(TAG, "Could not acquire HTTP lifecycle lock");
@@ -1362,6 +1378,9 @@ void config_server_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.max_uri_handlers = 15;  // root, config, ha-config, zone-config, title-filter-config, haptic-config, room-config, 2 wifi, 5 ble
+#if CONFIG_RK_PERF_LOG
+    config.max_uri_handlers++;  // /perf
+#endif
     config.stack_size = 8192;  // Increased for mDNS resolution during config save
     // Note: max_req_hdr_len set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig
 
@@ -1381,6 +1400,14 @@ void config_server_start(void) {
         .handler = config_get_handler,
     };
     httpd_register_uri_handler(s_server, &root);
+#if CONFIG_RK_PERF_LOG
+    httpd_uri_t perf_uri = {
+        .uri = "/perf",
+        .method = HTTP_GET,
+        .handler = perf_get_handler,
+    };
+    httpd_register_uri_handler(s_server, &perf_uri);
+#endif
 
     httpd_uri_t config_post = {
         .uri = "/config",

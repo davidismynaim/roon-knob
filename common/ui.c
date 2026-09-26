@@ -98,6 +98,15 @@ static lv_obj_t *s_progress_arc;       // Inner arc for track progress
 // The 50 ms LVGL timer that runs poll_pending(). ui_loop_iter() already runs it on every pass, so
 // this timer only adds wake-ups; it is paused while the panel sleeps.
 static lv_timer_t *s_poll_pending_timer;
+
+// Setting a style property to the value it already has still invalidates the object in LVGL, and
+// apply_state()/update_battery_display() run on every poll. Skip the call when nothing changes so
+// an idle screen is not redrawn every couple of seconds for no visible difference.
+static void set_text_color_if_changed(lv_obj_t *obj, lv_color_t color) {
+    if (lv_color_eq(lv_obj_get_style_text_color(obj, LV_PART_MAIN), color)) return;
+    lv_obj_set_style_text_color(obj, color, 0);
+}
+
 static lv_timer_t *s_progress_interp_timer;  // Advances the arc between polls - see progress_interp_timer_cb
 static int s_progress_base_ms = -1;    // Last known real seek position (-1 = no data yet)
 static int s_progress_length_ms;       // Track length at the time s_progress_base_ms was recorded
@@ -2243,13 +2252,13 @@ static void apply_state(const struct ui_state *state) {
     s_volume_label_resting_db = derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max);
     lv_color_t volume_color = volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa));
     if (s_volume_label_large) {
-        lv_obj_set_style_text_color(s_volume_label_large, volume_color, 0);
+        set_text_color_if_changed(s_volume_label_large, volume_color);
     }
     if (s_volume_db_label) {
-        lv_obj_set_style_text_color(s_volume_db_label, volume_color, 0);
+        set_text_color_if_changed(s_volume_db_label, volume_color);
     }
     if (s_tv_vinyl_volume_label) {
-        lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
+        set_text_color_if_changed(s_tv_vinyl_volume_label, volume_color);
     }
     if (should_emphasize) {
         emphasize_volume_label();
@@ -2650,9 +2659,9 @@ static void update_battery_display(void) {
     } else {
         battery_color = lv_color_hex(0xfafafa);  // Near-white
     }
-    lv_obj_set_style_text_color(s_battery_icon, battery_color, 0);
+    set_text_color_if_changed(s_battery_icon, battery_color);
     if (s_detail_battery_icon) {
-        lv_obj_set_style_text_color(s_detail_battery_icon, battery_color, 0);
+        set_text_color_if_changed(s_detail_battery_icon, battery_color);
     }
 
     // Flash (blink) at 5% or less, not charging - a timer only exists
@@ -3173,12 +3182,12 @@ void ui_show_volume_change(float vol, float vol_step) {
     s_volume_label_resting_db = derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max);
     lv_color_t volume_color = volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa));
     if (s_volume_label_large) {
-        lv_obj_set_style_text_color(s_volume_label_large, volume_color, 0);
+        set_text_color_if_changed(s_volume_label_large, volume_color);
         set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
         emphasize_volume_label();
     }
     if (s_tv_vinyl_volume_label) {
-        lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
+        set_text_color_if_changed(s_tv_vinyl_volume_label, volume_color);
         lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
     }
     if (s_detail_volume_label) {
@@ -3189,7 +3198,7 @@ void ui_show_volume_change(float vol, float vol_step) {
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max));
     if (s_volume_db_label) {
-        lv_obj_set_style_text_color(s_volume_db_label, volume_color, 0);
+        set_text_color_if_changed(s_volume_db_label, volume_color);
     }
     set_haloed_label_text(s_volume_db_label, s_volume_db_label_halo, db_text);
     if (s_tv_vinyl_db_label) {
@@ -3691,6 +3700,36 @@ void ui_set_controls_visible(bool visible) {
 // which is unnoticeable since the screen was off anyway.
 // How often the touch controller is read while the panel is asleep (tap-to-wake latency).
 #define UI_SLEEP_TOUCH_POLL_MS 50
+
+#ifdef CONFIG_RK_PERF_LOG
+// Diagnostic for marquee problems: is the label wide enough to need scrolling, and is an
+// animation actually attached to it?
+static void debug_one_label(const char *name, lv_obj_t *label) {
+    if (!label) {
+        ESP_LOGI(UI_TAG, "label %s: NULL", name);
+        return;
+    }
+    lv_point_t size = {0, 0};
+    const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    const char *text = lv_label_get_text(label);
+    lv_text_get_size(&size, text ? text : "", font, lv_obj_get_style_text_letter_space(label, LV_PART_MAIN),
+                     lv_obj_get_style_text_line_space(label, LV_PART_MAIN), LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+    lv_anim_t *a = lv_anim_get(label, NULL);
+    ESP_LOGI(UI_TAG,
+             "label %s: mode=%d hidden=%d obj_w=%d content_w=%d text_w=%d anim=%s act=%d dur=%d start=%d end=%d text='%.40s'",
+             name, (int)lv_label_get_long_mode(label), lv_obj_has_flag(label, LV_OBJ_FLAG_HIDDEN),
+             (int)lv_obj_get_width(label), (int)lv_obj_get_content_width(label), (int)size.x,
+             a ? "yes" : "no", a ? (int)a->act_time : 0, a ? (int)a->duration : 0,
+             a ? (int)a->start_value : 0, a ? (int)a->end_value : 0, text ? text : "");
+}
+
+void ui_debug_label_state(void) {
+    debug_one_label("track", s_track_label);
+    debug_one_label("artist", s_artist_label);
+    debug_one_label("detail_title", s_detail_title_label);
+    debug_one_label("detail_artist", s_detail_artist_label);
+}
+#endif
 
 void ui_set_background_animation_paused(bool paused) {
     if (s_progress_interp_timer) {

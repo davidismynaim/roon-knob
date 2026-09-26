@@ -381,6 +381,7 @@ static void ui_loop_task(void *arg) {
                     active++;
                 }
             }
+            ui_debug_label_state();
             ESP_LOGI("perf", "lvgl: anims_running=%u timers_unpaused=%u until_next=%ums (%s)",
                      (unsigned)lv_anim_count_running(), active,
                      (unsigned)lv_timer_get_time_until_next(), periods);
