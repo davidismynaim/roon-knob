@@ -47,7 +47,7 @@ static const char *s_bit_info;
 static bool s_next_track_none;
 
 void ui_init(void) {}
-void ui_loop_iter(void) {}
+uint32_t ui_loop_iter(void) { return 0; }
 void ui_update(const char *line1, const char *line2, bool playing,
                float volume, float volume_min, float volume_max,
                float volume_step, int seek_position, int length) {

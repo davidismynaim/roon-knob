@@ -8,10 +8,17 @@ extern "C" {
 #endif
 
 void ui_init(void);
-void ui_loop_iter(void);
+/* One pass of the UI work (LVGL timers, callbacks posted from other tasks, pending state).
+ * Returns the milliseconds until LVGL next needs to run (LV_NO_TIMER_READY, 0xFFFFFFFF, if
+ * nothing is scheduled), so a caller can block that long instead of polling. */
+uint32_t ui_loop_iter(void);
+#ifdef CONFIG_RK_PERF_LOG
+void ui_debug_label_state(void);  // log the marquee state of the title/artist labels
+#endif
 void ui_update(const char *line1, const char *line2, bool playing, float volume, float volume_min, float volume_max, float volume_step, int seek_position, int length);
 void ui_set_volume_with_range(float vol, float vol_min, float vol_max, float vol_step);  // Update volume ring/label without touching track/progress
 void ui_set_status(bool online);
+void ui_set_voice_active(bool active);  // UI thread: play button becomes a red mic while a voice interaction is showing
 void ui_set_message(const char *msg);
 void ui_set_zone_name(const char *zone_name);
 void ui_show_zone_picker(const char **zone_names, const char **zone_ids, int zone_count, int selected_idx);

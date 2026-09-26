@@ -59,3 +59,17 @@ config RK_BACKLIGHT_DIM
         Default 25 is approximately 10% brightness.
 
 endmenu
+
+menu "Power Profiling"
+
+config RK_PERF_LOG
+    bool "Log wake-up counters and power-manager statistics around display sleep"
+    default n
+    help
+        Development aid for the display-sleep power work (issue #45). Counts how often each
+        periodic timer and housekeeping loop wakes the CPU while the screen is off, and prints
+        the rates plus ESP-IDF's power-manager statistics (time in each power mode, light-sleep
+        entries and rejections) each time the display wakes. Off in release builds; enable
+        together with CONFIG_PM_PROFILING (see idf_app/sdkconfig.profiling).
+
+endmenu

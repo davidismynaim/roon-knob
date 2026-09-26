@@ -1,10 +1,15 @@
+#include "perf_stats.h"
+#include "platform_input_sleep.h"
+#include "ui_loop.h"
 #include "platform/platform_input.h"
 #include "controller_input.h"
 #include "controller_input_mailbox.h"
 #include "display_sleep.h"
 
 #include "driver/gpio.h"
+#include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -63,6 +68,11 @@ static uint32_t s_last_logged_overflow;
 // State Variables
 // ============================================================================
 static esp_timer_handle_t s_poll_timer = NULL;
+
+// Sleep mode (see platform_input_sleep.h)
+static volatile bool s_sleep_mode = false;
+static volatile bool s_sleep_edge = false;   // a pin changed while asleep - set by the ISR
+static bool s_isr_service_ready = false;
 
 // Software encoder state
 typedef struct {
@@ -191,6 +201,7 @@ static void encoder_read_and_dispatch(void) {
 
 static void input_poll_timer_callback(void* arg) {
     (void)arg;
+    perf_count(PERF_ENCODER_TIMER);
     encoder_read_and_dispatch();
 }
 
@@ -243,8 +254,87 @@ void platform_input_init(void) {
     ESP_LOGI(TAG, "Platform input initialized successfully (encoder polling at %dms)", ENCODER_POLL_INTERVAL_MS);
 }
 
+// Interrupt handler for both encoder pins while the display sleeps. The pins wake the CPU on a
+// LEVEL, which keeps asserting until the pin moves, so the interrupt disarms itself: it fires
+// once, flags the movement, and wakes the UI loop.
+static void IRAM_ATTR encoder_sleep_isr(void *arg) {
+    gpio_num_t pin = (gpio_num_t)(intptr_t)arg;
+    gpio_intr_disable(pin);
+    s_sleep_edge = true;
+    perf_count(PERF_ENCODER_WAKE_ISR);
+    perf_count(PERF_UI_NOTIFY_INPUT);
+    ui_loop_wake_from_isr();
+}
+
+// Wake on the level opposite to the pin's present one, which makes a level trigger behave like
+// "any change from here" (the ESP32-S3 can only wake light sleep on a level).
+static void arm_sleep_wake(gpio_num_t pin) {
+    int level = gpio_get_level(pin);
+    gpio_wakeup_enable(pin, level ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
+    gpio_isr_handler_add(pin, encoder_sleep_isr, (void *)(intptr_t)pin);
+    gpio_intr_enable(pin);
+}
+
+static void disarm_sleep_wake(gpio_num_t pin) {
+    gpio_intr_disable(pin);
+    gpio_isr_handler_remove(pin);
+    gpio_wakeup_disable(pin);
+}
+
+void platform_input_sleep_mode(bool sleeping) {
+    if (!s_poll_timer || sleeping == s_sleep_mode) {
+        return;
+    }
+    if (sleeping) {
+        s_sleep_edge = false;
+        s_sleep_mode = true;
+        esp_timer_stop(s_poll_timer);   // ESP_ERR_INVALID_STATE if already stopped: harmless
+        int stale;
+        while (xQueueReceive(s_input_queue, &stale, 0) == pdTRUE) {
+        }
+        if (!s_isr_service_ready) {
+            esp_err_t err = gpio_install_isr_service(0);
+            s_isr_service_ready = (err == ESP_OK || err == ESP_ERR_INVALID_STATE);
+        }
+        if (!s_isr_service_ready) {
+            // Cannot wake on the pins: stay in normal polling rather than lose the knob.
+            s_sleep_mode = false;
+            esp_timer_start_periodic(s_poll_timer, ENCODER_POLL_INTERVAL_MS * 1000);
+            ESP_LOGW(TAG, "GPIO ISR service unavailable - encoder keeps polling while asleep");
+            return;
+        }
+        arm_sleep_wake(ENCODER_GPIO_A);
+        arm_sleep_wake(ENCODER_GPIO_B);
+        esp_sleep_enable_gpio_wakeup();
+        ESP_LOGI(TAG, "Encoder sleep mode: polling timer stopped, pins armed as wake sources");
+    } else {
+        disarm_sleep_wake(ENCODER_GPIO_A);
+        disarm_sleep_wake(ENCODER_GPIO_B);
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+        s_sleep_mode = false;
+        s_sleep_edge = false;
+        // Re-read the pins so the time asleep is not decoded as movement.
+        s_encoder.encoder_a_level = gpio_get_level(ENCODER_GPIO_A);
+        s_encoder.encoder_b_level = gpio_get_level(ENCODER_GPIO_B);
+        s_encoder.debounce_a_cnt = 0;
+        s_encoder.debounce_b_cnt = 0;
+        esp_timer_start_periodic(s_poll_timer, ENCODER_POLL_INTERVAL_MS * 1000);
+        ESP_LOGI(TAG, "Encoder sleep mode off: polling timer restarted");
+    }
+}
+
 void platform_input_process_events(void) {
     if (!s_input_queue) {
+        return;
+    }
+
+    if (s_sleep_mode) {
+        // Asleep: the polling timer is stopped. The only input is the pin interrupt, which just
+        // wakes the display (display_wake() leaves sleep mode and restarts the polling).
+        if (s_sleep_edge) {
+            s_sleep_edge = false;
+            display_activity_detected();
+        }
         return;
     }
 

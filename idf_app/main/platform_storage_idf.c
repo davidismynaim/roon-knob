@@ -429,3 +429,70 @@ bool platform_storage_write_haptic(const rk_haptic_cfg_t *in) {
     ESP_LOGI(TAG, "Saved haptic config: enabled=%d", copy.enabled);
     return true;
 }
+
+static const char *ROOM_NAMESPACE = "rk_room";
+static const char *ROOM_KEY = "cfg";
+
+bool platform_storage_read_room(rk_room_cfg_t *out) {
+    if (!out) {
+        return false;
+    }
+    rk_room_cfg_set_defaults(out);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(ROOM_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "room nvs open failed: %s", esp_err_to_name(err));
+        }
+        return true;
+    }
+
+    rk_room_cfg_t stored = {0};
+    size_t len = sizeof(stored);
+    err = nvs_get_blob(handle, ROOM_KEY, &stored, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "room nvs read failed: %s", esp_err_to_name(err));
+        }
+        return true;
+    }
+    if (len != sizeof(stored) || stored.cfg_ver != RK_ROOM_CFG_CURRENT_VER) {
+        ESP_LOGW(TAG, "room config size/version mismatch, using defaults");
+        return true;
+    }
+
+    *out = stored;
+    return true;
+}
+
+bool platform_storage_write_room(const rk_room_cfg_t *in) {
+    if (!in) {
+        return false;
+    }
+    rk_room_cfg_t copy = *in;
+    copy.cfg_ver = RK_ROOM_CFG_CURRENT_VER;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(ROOM_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "room nvs open rw failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    err = nvs_set_blob(handle, ROOM_KEY, &copy, sizeof(copy));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "room nvs_set_blob failed: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return false;
+    }
+    err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "room nvs_commit failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(TAG, "Saved room config: room=%d", copy.room);
+    return true;
+}

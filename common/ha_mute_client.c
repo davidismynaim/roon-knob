@@ -4,6 +4,7 @@
 #include "platform/platform_http.h"
 #include "platform/platform_log.h"
 #include "platform/platform_storage.h"
+#include "room_cfg.h"
 
 #include <stdio.h>
 
@@ -22,14 +23,25 @@ bool ha_mute_client_toggle(void) {
     bool was_muted = ha_volume_client_get_muted();
 
     char url[128];
-    snprintf(url, sizeof(url),
-             "http://%s/api/services/input_boolean/toggle", cfg.host);
+    char body[64];
+    if (room_cfg_get_current() == RK_ROOM_DINING) {
+        // venu360_main_mute is a plain switch entity, not an
+        // input_boolean helper - same toggle shape, different domain.
+        snprintf(url, sizeof(url), "http://%s/api/services/switch/toggle",
+                 cfg.host);
+        snprintf(body, sizeof(body),
+                 "{\"entity_id\":\"switch.venu360_main_mute\"}");
+    } else {
+        snprintf(url, sizeof(url),
+                 "http://%s/api/services/input_boolean/toggle", cfg.host);
+        snprintf(body, sizeof(body),
+                 "{\"entity_id\":\"input_boolean.audio_mute\"}");
+    }
 
     char *resp = NULL;
     size_t resp_len = 0;
-    int ret = platform_http_post_auth(
-        url, cfg.token, "{\"entity_id\":\"input_boolean.audio_mute\"}",
-        &resp, &resp_len);
+    int ret =
+        platform_http_post_auth(url, cfg.token, body, &resp, &resp_len);
     platform_http_free(resp);
     if (ret != 0) {
         LOGW("Mute toggle: HA call failed");

@@ -34,6 +34,14 @@ void controller_action_router_set_volume_override(
  * zone — see docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md.
  * Registering only one of the two is treated as not registering either.
  */
+/*
+ * Optional target filter over non-volume commands: return true to consume the
+ * command (report success, do nothing). Dial registers one so transport
+ * gestures do nothing while the vinyl feed owns the Music screen.
+ */
+typedef bool (*controller_command_filter_fn_t)(const controller_command_t *command);
+void controller_action_router_set_command_filter(controller_command_filter_fn_t fn);
+
 typedef bool (*controller_source_picker_open_fn_t)(void);
 typedef bool (*controller_source_picker_select_fn_t)(void);
 void controller_action_router_set_source_picker_override(

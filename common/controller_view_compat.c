@@ -5,6 +5,16 @@
 #include <stdint.h>
 #include <string.h>
 
+static controller_view_compat_suppress_fn_t s_suppress;
+
+void controller_view_compat_set_suppress_fn(controller_view_compat_suppress_fn_t fn) {
+    s_suppress = fn;
+}
+
+static bool suppressed(void) {
+    return s_suppress && s_suppress();
+}
+
 static char s_last_artwork_ref[CONTROLLER_ARTWORK_REF_CAPACITY];
 static uint32_t s_last_artwork_generation;
 
@@ -38,7 +48,7 @@ static void apply_artwork(const controller_media_view_t *view) {
 }
 
 void controller_view_compat_apply_media(const controller_media_view_t *view) {
-    if (!view) {
+    if (!view || suppressed()) {
         return;
     }
 
@@ -58,7 +68,7 @@ void controller_view_compat_apply_media(const controller_media_view_t *view) {
 
 void controller_view_compat_apply_media_enrichment(
     const controller_media_enrichment_view_t *view) {
-    if (!view) {
+    if (!view || suppressed()) {
         return;
     }
 

@@ -87,6 +87,18 @@ bool ha_volume_client_get_muted(void);
 // corrects) it. Not for use outside ha_mute_client.c.
 void ha_volume_client_set_muted_optimistic(bool muted);
 
+// Fire a Home Assistant script (entity id like "script.some_script") without
+// blocking the caller: the call is made on this module's background flush
+// task. `done` (may be NULL) runs on that task with whether HA accepted it.
+// False if HA isn't configured or another script call is already waiting.
+typedef void (*ha_script_done_fn_t)(bool ok);
+bool ha_volume_client_call_script_async(const char *script_entity_id,
+                                        ha_script_done_fn_t done);
+
+// Poll Home Assistant now instead of waiting out the interval, e.g. right
+// after the source is switched. Safe from any task.
+void ha_volume_client_poll_now(void);
+
 #ifdef __cplusplus
 }
 #endif

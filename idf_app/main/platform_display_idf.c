@@ -7,7 +7,10 @@
 #include "haptic_driver.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"
+#include "room_cfg.h"
 #include "ui.h"
+#include "vinyl_client.h"
+#include "perf_stats.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -90,8 +93,6 @@ static int16_t s_last_tap_x = 0;
 static int16_t s_last_tap_y = 0;
 
 // LVGL tick timer (critical for LVGL to know time is passing)
-static esp_timer_handle_t s_lvgl_tick_timer = NULL;
-#define LVGL_TICK_PERIOD_MS 2
 
 // Display configuration - matches hardware pinout
 #define LCD_HOST SPI2_HOST
@@ -316,7 +317,24 @@ static void lvgl_rounder_cb(lv_event_t *e) {
     // Round the end of coordinate up to the nearest 2N+1 number
     area->x2 = ((area->x2 >> 1) << 1) + 1;
     area->y2 = ((area->y2 >> 1) << 1) + 1;
+
+    perf_count(PERF_LV_INVALIDATE);
+    perf_add(PERF_ACC_INVALID_PX, (uint32_t)(lv_area_get_width(area) * lv_area_get_height(area)));
+    perf_trace_invalidate(area->x1, area->y1, area->x2, area->y2);
 }
+
+#if CONFIG_RK_PERF_LOG
+static int64_t s_perf_render_t0_us;
+static void perf_render_start_cb(lv_event_t *e) {
+    (void)e;
+    perf_count(PERF_LV_RENDER);
+    s_perf_render_t0_us = esp_timer_get_time();
+}
+static void perf_render_ready_cb(lv_event_t *e) {
+    (void)e;
+    perf_add(PERF_ACC_RENDER_US, (uint32_t)(esp_timer_get_time() - s_perf_render_t0_us));
+}
+#endif
 
 // Static rotation buffer - sized to handle LVGL's combined flushes when rotation
 // is enabled. Observed max: 54 rows. Using 60 rows with margin.
@@ -334,7 +352,22 @@ static void rotate180_rgb565_simple(const uint16_t *src, uint16_t *dst, int pixe
 
 
 // LVGL flush callback with software rotation support
+static void lvgl_flush_cb_impl(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map);
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+#if CONFIG_RK_PERF_LOG
+    int64_t perf_t0 = esp_timer_get_time();
+    perf_count(PERF_LV_FLUSH);
+    if (!display_is_sleeping()) {
+        perf_add(PERF_ACC_FLUSH_PX, (uint32_t)(lv_area_get_width(area) * lv_area_get_height(area)));
+    }
+    lvgl_flush_cb_impl(disp, area, px_map);
+    perf_add(PERF_ACC_FLUSH_US, (uint32_t)(esp_timer_get_time() - perf_t0));
+#else
+    lvgl_flush_cb_impl(disp, area, px_map);
+#endif
+}
+
+static void lvgl_flush_cb_impl(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     // Content updates (track/artist text, artwork, progress) are never
     // gated on display-sleep state upstream - apply_state() has to keep
     // LVGL's widgets correct even while asleep, so whatever's showing is
@@ -403,15 +436,15 @@ skip_rotation:
     lv_display_flush_ready(disp);
 }
 
-// LVGL tick timer callback - critical for LVGL to track time
-static void lvgl_tick_timer_cb(void *arg) {
-    (void)arg;
-    lv_tick_inc(LVGL_TICK_PERIOD_MS);
+// LVGL's millisecond clock (see the lv_tick_set_cb call in platform_display_register_lvgl_driver)
+static uint32_t lvgl_tick_get_ms(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 // LVGL touch read callback with swipe gesture detection
 static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     (void)indev;
+    perf_count(PERF_TOUCH_READ);
     uint16_t x, y;
 
     if (tpGetCoordinates(&x, &y)) {
@@ -505,7 +538,10 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
             // screens, including art mode itself: its only visible effect
             // there would be hiding the battery/status indicators, with no
             // track/timeline concept for the rest of it to act on anyway.
-            if (elapsed < SWIPE_MAX_TIME_MS && ui_is_music_screen()) {
+            // ...except while the detail view is open: it sits on top of
+            // whichever screen is underneath (on the Vinyl source that is the
+            // static Vinyl screen, not Music), and swipe-up is its only way out.
+            if (elapsed < SWIPE_MAX_TIME_MS && (ui_is_music_screen() || s_detail_mode_active)) {
                 int16_t dx = data->point.x - s_touch_start_x;
                 int16_t dy = data->point.y - s_touch_start_y;
 
@@ -525,7 +561,10 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                 // screen. If already playing, exit detail mode as before.
                 // Off the detail screen, unchanged: enter art mode.
                 if (dy < -SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
-                    if (s_detail_mode_active && !ui_is_playing()) {
+                    // On the Vinyl source there is nothing to resume, and "not
+                    // playing" must never turn the exit gesture into a resume
+                    // (that trapped the dial on the detail screen).
+                    if (s_detail_mode_active && !ui_is_playing() && !vinyl_client_owns_media()) {
                         ESP_LOGI(TAG, "Swipe up detected (rotation=%d) - queueing play", s_current_rotation);
                         s_pending_detail_play = true;
                     } else if (s_detail_mode_active) {
@@ -554,7 +593,7 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                         ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing exit art mode", s_current_rotation);
                         s_pending_exit_art_mode = true;  // Defer to avoid LVGL threading issues
                     } else if (s_detail_mode_active) {
-                        if (ui_is_playing()) {
+                        if (ui_is_playing() && !vinyl_client_owns_media()) {
                             ESP_LOGI(TAG, "Swipe down detected (rotation=%d) - queueing pause", s_current_rotation);
                             s_pending_detail_pause = true;
                         }
@@ -679,6 +718,18 @@ bool platform_display_init(void) {
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel_handle));
 
+    // ESP-IDF floats every GPIO on each automatic light sleep (CONFIG_PM_SLP_DISABLE_GPIO, forced on
+    // by the GPIO reset workaround). A floating QSPI CS/clock/data line makes the SH8601 decode
+    // garbage as commands and pixels, so the screen wakes up as noise. Keep the panel's own pins,
+    // its reset line and the backlight driven through light sleep.
+    static const gpio_num_t keep_in_sleep[] = {
+        PIN_NUM_LCD_CS, PIN_NUM_LCD_PCLK, PIN_NUM_LCD_DATA0, PIN_NUM_LCD_DATA1,
+        PIN_NUM_LCD_DATA2, PIN_NUM_LCD_DATA3, PIN_NUM_LCD_RST, PIN_NUM_BK_LIGHT,
+    };
+    for (size_t i = 0; i < sizeof(keep_in_sleep) / sizeof(keep_in_sleep[0]); i++) {
+        gpio_sleep_sel_dis(keep_in_sleep[i]);
+    }
+
     // Initialize I2C bus and touch controller
     ESP_LOGI(TAG, "Initializing I2C bus");
     i2c_master_Init();
@@ -689,6 +740,8 @@ bool platform_display_init(void) {
 
     // Shares this same I2C bus with the touch controller above.
     haptic_driver_init();
+
+    room_cfg_init();
 
     s_hardware_ready = true;
     ESP_LOGI(TAG, "Display hardware initialized successfully");
@@ -736,6 +789,10 @@ bool platform_display_register_lvgl_driver(void) {
 
     // Register rounder callback for 2-pixel alignment requirement
     lv_display_add_event_cb(s_display, lvgl_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+#if CONFIG_RK_PERF_LOG
+    lv_display_add_event_cb(s_display, perf_render_start_cb, LV_EVENT_RENDER_START, NULL);
+    lv_display_add_event_cb(s_display, perf_render_ready_cb, LV_EVENT_RENDER_READY, NULL);
+#endif
 
     // Register touch input device
     ESP_LOGI(TAG, "Registering LVGL touch input device");
@@ -757,23 +814,11 @@ bool platform_display_register_lvgl_driver(void) {
     // watch those too after flashing, not just the transport buttons.
     lv_indev_set_scroll_limit(s_touch_indev, 20);
 
-    // Create LVGL tick timer - CRITICAL for LVGL to know time is passing
-    ESP_LOGI(TAG, "Creating LVGL tick timer (%dms period)", LVGL_TICK_PERIOD_MS);
-    const esp_timer_create_args_t lvgl_tick_timer_args = {
-        .callback = lvgl_tick_timer_cb,
-        .name = "lvgl_tick"
-    };
-    esp_err_t timer_err = esp_timer_create(&lvgl_tick_timer_args, &s_lvgl_tick_timer);
-    if (timer_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create LVGL tick timer: %s", esp_err_to_name(timer_err));
-        return false;
-    }
-    timer_err = esp_timer_start_periodic(s_lvgl_tick_timer, LVGL_TICK_PERIOD_MS * 1000ULL);
-    if (timer_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start LVGL tick timer: %s", esp_err_to_name(timer_err));
-        return false;
-    }
-    ESP_LOGI(TAG, "LVGL tick timer started successfully");
+    // LVGL's clock. Read on demand from the high-resolution timer instead of a periodic 2 ms
+    // esp_timer that called lv_tick_inc(): that timer woke the CPU 500 times a second in every
+    // state, including while the display sleeps, and kept light sleep from lasting (issue #45).
+    lv_tick_set_cb(lvgl_tick_get_ms);
+    ESP_LOGI(TAG, "LVGL tick source: on-demand esp_timer_get_time (no periodic timer)");
 
     // Note: LVGL timer_handler will be called by ui_loop_iter()
     // No separate LVGL task needed since ui_loop handles it
@@ -833,17 +878,21 @@ void platform_display_process_pending(void) {
     // once it lands.
     if (s_pending_previous_track) {
         s_pending_previous_track = false;
+        if (!vinyl_client_owns_media()) {
         ui_show_track_feedback(false);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_PREVIOUS_TRACK));
         (void)controller_input_dispatch_action(&action);
+        }
     }
     if (s_pending_next_track) {
         s_pending_next_track = false;
+        if (!vinyl_client_owns_media()) {
         ui_show_track_feedback(true);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_NEXT_TRACK));
         (void)controller_input_dispatch_action(&action);
+        }
     }
     // Process deferred detail-info-screen swipes. Calls ui_set_detail_mode()
     // directly rather than routing through display_sleep.c the way art mode
@@ -866,17 +915,21 @@ void platform_display_process_pending(void) {
     // has, not something new here.
     if (s_pending_detail_pause) {
         s_pending_detail_pause = false;
+        if (!vinyl_client_owns_media()) {
         ui_show_playback_feedback(false);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
         (void)controller_input_dispatch_action(&action);
+        }
     }
     if (s_pending_detail_play) {
         s_pending_detail_play = false;
+        if (!vinyl_client_owns_media()) {
         ui_show_playback_feedback(true);
         controller_action_t action = controller_action_command(
             controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
         (void)controller_input_dispatch_action(&action);
+        }
     }
     // Process deferred timer-triggered state changes
     display_process_pending();

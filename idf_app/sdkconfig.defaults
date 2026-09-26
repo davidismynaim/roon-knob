@@ -91,7 +91,7 @@ CONFIG_LV_USE_ARABIC_PERSIAN_CHARS=y
 CONFIG_RK_DISPLAY_DIM_TIMEOUT_SEC=30
 CONFIG_RK_DISPLAY_SLEEP_TIMEOUT_SEC=60
 CONFIG_RK_BACKLIGHT_NORMAL=100
-CONFIG_RK_BACKLIGHT_DIM=25
+CONFIG_RK_BACKLIGHT_DIM=3
 
 # Fixed Roon zone for this personal single-zone-locked fork (the Lounge
 # zone). Used only when NVS has no zone_id yet (fresh device, or a reset) -
@@ -107,6 +107,11 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 # Trade-off: adds 0.2-40us interrupt latency
 CONFIG_PM_ENABLE=y
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# Light-sleep only when the next task wake-up is at least 2 ticks (20 ms) away instead of 3 (30 ms).
+# Measured on the Dial with the screen off: at 3 ticks the CPU never slept (every gap was under 30 ms);
+# at 2 it sleeps about half of the time. Only takes effect while the display is asleep, because the
+# display's no-light-sleep lock is held in every other state.
+CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=2
 
 # BLE HID host for pairing a separate media remote. ESP32-S3 supports BLE,
 # although it does not support Classic Bluetooth. The shipping Dial firmware

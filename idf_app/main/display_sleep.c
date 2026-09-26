@@ -1,7 +1,9 @@
 #include "display_sleep.h"
+#include <stdio.h>
 #include "captive_portal.h"
 #include "platform/platform_display.h"
 #include "bridge_client.h"
+#include "ha_volume_client.h"
 #include "wifi_manager.h"
 #include "battery.h"
 #include "esp_timer.h"
@@ -9,6 +11,8 @@
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
+#include "esp_attr.h"
 #include "esp_wifi.h"
 #include "driver/ledc.h"
 #include "driver/gpio.h"
@@ -16,6 +20,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "ui.h"
+#include "perf_stats.h"
+#include "platform_input_sleep.h"
+#include "ui_loop.h"
 
 static const char *TAG = "display_sleep";
 
@@ -63,6 +70,20 @@ static SemaphoreHandle_t s_display_state_mutex = NULL;
 static display_state_t s_display_state = DISPLAY_STATE_NORMAL;
 static int64_t s_touch_suppress_until_ms = 0;  // Suppress widget touches after wake
 static int64_t s_encoder_suppress_until_ms = 0;  // Suppress encoder after deep sleep wake
+// Breadcrumb that survives a panic/software reset (RTC_NOINIT, validated by
+// magic since it is garbage after a power-on reset) so the next boot can say
+// how far enter_deep_sleep() got - lets a crash on the way into deep sleep be
+// told apart from a clean sleep followed by an immediate encoder wake without
+// needing serial attached on battery.
+#define DEEP_SLEEP_CRUMB_MAGIC 0xD5EE9C0Du
+static RTC_NOINIT_ATTR uint32_t s_crumb_magic;
+static RTC_NOINIT_ATTR uint32_t s_crumb_step;
+static char s_boot_reason[160] = "unknown";
+static void crumb(uint32_t step) {
+    s_crumb_magic = DEEP_SLEEP_CRUMB_MAGIC;
+    s_crumb_step = step;
+}
+
 static bool s_woke_from_deep_sleep = false;  // Flag set on boot if woke from deep sleep
 
 // Current timeout values (in ms, 0 = disabled)
@@ -248,6 +269,9 @@ void display_sleep(void) {
 
         s_display_state = DISPLAY_STATE_SLEEP;
         ESP_LOGI(TAG, "Display sleeping");
+        // Stop the 3 ms encoder polling timer and let the pins wake the CPU instead.
+        platform_input_sleep_mode(true);
+        perf_sleep_begin();
 
         // Start deep sleep timer (if enabled - timeout already accounts for charging state)
         if (s_deep_sleep_timer != NULL && s_deep_sleep_timeout_ms > 0) {
@@ -275,6 +299,9 @@ void display_wake(void) {
     sleep_timeout = s_sleep_timeout_ms;
 
     if (s_display_state == DISPLAY_STATE_SLEEP && s_panel_handle != NULL) {
+        perf_sleep_end("input");
+        // The knob is polled again from here on.
+        platform_input_sleep_mode(false);
         // Acquire CPU frequency and no-light-sleep locks first (need full
         // performance and no sleep-induced latency before the panel/touch
         // are live again)
@@ -352,16 +379,22 @@ static volatile bool s_pending_sleep = false;
 // Timer callback for art mode
 static void art_mode_timer_callback(void *arg) {
     s_pending_art_mode = true;  // Defer to UI loop
+    perf_count(PERF_UI_NOTIFY_TIMER);
+    ui_loop_wake();
 }
 
 // Timer callback for dimming
 static void dim_timer_callback(void *arg) {
     s_pending_dim = true;  // Defer to UI loop
+    perf_count(PERF_UI_NOTIFY_TIMER);
+    ui_loop_wake();
 }
 
 // Timer callback for sleep
 static void sleep_timer_callback(void *arg) {
     s_pending_sleep = true;  // Defer to UI loop
+    perf_count(PERF_UI_NOTIFY_TIMER);
+    ui_loop_wake();
 }
 
 // Pending deep sleep flag
@@ -370,11 +403,44 @@ static volatile bool s_pending_deep_sleep = false;
 // Timer callback for deep sleep
 static void deep_sleep_timer_callback(void *arg) {
     s_pending_deep_sleep = true;  // Defer to UI loop
+    perf_count(PERF_UI_NOTIFY_TIMER);
+    ui_loop_wake();
 }
 
-// Enter deep sleep - device will reset on wake
+static void enter_deep_sleep_body(void);
+
+// Enter deep sleep - device will reset on wake.
+// With CPU frequency scaling on, display-sleep runs with auto light sleep and
+// a scaled-down CPU. Tearing down WiFi/the panel and configuring RTC wake pins
+// in that state (and letting the idle task light-sleep during the pre-sleep
+// delay) made the chip reset instead of reaching deep sleep - it always
+// slept fine with scaling off. So hold both PM locks (full speed, no light
+// sleep) for the whole shutdown, and give them back only if we return
+// without sleeping, so the wake path's acquire/release counts stay balanced.
 static void enter_deep_sleep(void) {
+    bool held = false;
+#if CONFIG_PM_ENABLE
+    held = s_cpu_freq_scaling_enabled && s_pm_initialized &&
+           s_pm_cpu_lock && s_pm_no_light_sleep_lock;
+    if (held) {
+        esp_pm_lock_acquire(s_pm_no_light_sleep_lock);
+        esp_pm_lock_acquire(s_pm_cpu_lock);
+    }
+#endif
+    enter_deep_sleep_body();
+#if CONFIG_PM_ENABLE
+    if (held) {
+        esp_pm_lock_release(s_pm_cpu_lock);
+        esp_pm_lock_release(s_pm_no_light_sleep_lock);
+    }
+#endif
+}
+
+static void enter_deep_sleep_body(void) {
     ESP_LOGI(TAG, "Preparing for deep sleep...");
+    crumb(1);
+    // Leave the light-sleep pin wake/interrupt setup before the pins are handed to the RTC wake logic.
+    platform_input_sleep_mode(false);
 
     // Turn off backlight (GPIO47 is not RTC-capable, won't be held)
     display_set_backlight(0);
@@ -385,7 +451,17 @@ static void enter_deep_sleep(void) {
     }
 
     // Stop WiFi cleanly to reduce wake time on next boot
-    esp_wifi_stop();
+    // Quiesce everything that touches the network before the radio goes away,
+    // then use wifi_mgr_stop(), which unregisters the WiFi/IP event handlers
+    // BEFORE stopping. A bare esp_wifi_stop() emits STA_DISCONNECTED, which
+    // ran the reconnect/retry logic (retry timer, AP-provisioning fallback,
+    // UI "connecting" event) against a radio that was being torn down - the
+    // suspected cause of the reset on every deep-sleep attempt.
+    bridge_client_set_network_ready(false);
+    ha_volume_client_set_network_ready(false);
+    crumb(2);
+    wifi_mgr_stop();
+    crumb(3);
 
     // Configure wake sources: encoder pins (GPIO7 and GPIO8, both RTC-capable)
     // Keep RTC_PERIPH powered so RTC pull-ups remain active during deep sleep
@@ -439,6 +515,13 @@ static void enter_deep_sleep(void) {
     // Encoder pins are pulled HIGH, going LOW on rotation
     uint64_t wake_gpio_mask = (1ULL << ENCODER_GPIO_A) | (1ULL << ENCODER_GPIO_B);
 
+    // Auto light sleep (CPU frequency scaling) arms a timer wake for its next
+    // scheduled tick and leaves that trigger set; esp_deep_sleep_start() then
+    // honours it, so the chip woke ~1s after "sleeping" (wake cause 4 =
+    // TIMER, seen on serial) and rebooted to the WiFi-connect screen. Clear
+    // every leftover source so the encoder pins are the only way to wake.
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+
     err = esp_sleep_enable_ext1_wakeup(wake_gpio_mask, ESP_EXT1_WAKEUP_ANY_LOW);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to configure wake sources: %s", esp_err_to_name(err));
@@ -446,6 +529,7 @@ static void enter_deep_sleep(void) {
         return;
     }
 
+    crumb(4);
     ESP_LOGI(TAG, "Entering deep sleep (wake on encoder rotation)...");
 
     // Brief delay to ensure log is flushed before power cut
@@ -536,6 +620,32 @@ void display_sleep_init(esp_lcd_panel_handle_t panel_handle, TaskHandle_t lvgl_t
 
     // Check if we woke from deep sleep and set up encoder suppression
     esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+    {
+        esp_reset_reason_t rr = esp_reset_reason();
+        const char *rr_name =
+            rr == ESP_RST_POWERON ? "power-on" :
+            rr == ESP_RST_SW ? "software restart" :
+            rr == ESP_RST_PANIC ? "PANIC" :
+            rr == ESP_RST_INT_WDT ? "interrupt watchdog" :
+            rr == ESP_RST_TASK_WDT ? "task watchdog" :
+            rr == ESP_RST_WDT ? "watchdog" :
+            rr == ESP_RST_DEEPSLEEP ? "deep-sleep wake" :
+            rr == ESP_RST_BROWNOUT ? "BROWNOUT" : "other";
+        uint32_t step = (s_crumb_magic == DEEP_SLEEP_CRUMB_MAGIC) ? s_crumb_step : 0;
+        if (rr == ESP_RST_DEEPSLEEP && wakeup_cause == ESP_SLEEP_WAKEUP_EXT1) {
+            snprintf(s_boot_reason, sizeof(s_boot_reason),
+                     "%s, encoder pin mask 0x%llx", rr_name,
+                     (unsigned long long)esp_sleep_get_ext1_wakeup_status());
+        } else {
+            snprintf(s_boot_reason, sizeof(s_boot_reason),
+                     "%s, wake cause %d, ext1 mask 0x%llx (deep-sleep entry reached step %lu of 4)",
+                     rr_name, (int)wakeup_cause,
+                     (unsigned long long)esp_sleep_get_ext1_wakeup_status(),
+                     (unsigned long)step);
+        }
+        s_crumb_magic = 0;
+        ESP_LOGW(TAG, "Boot reason: %s", s_boot_reason);
+    }
     if (wakeup_cause == ESP_SLEEP_WAKEUP_EXT1) {
         s_woke_from_deep_sleep = true;
         s_encoder_suppress_until_ms = esp_timer_get_time() / 1000 + ENCODER_SUPPRESS_AFTER_WAKE_MS;
@@ -604,6 +714,10 @@ bool display_is_encoder_suppressed(void) {
 }
 
 // Check if device woke from deep sleep (for logging/diagnostics)
+const char *display_boot_reason(void) {
+    return s_boot_reason;
+}
+
 bool display_woke_from_deep_sleep(void) {
     return s_woke_from_deep_sleep;
 }

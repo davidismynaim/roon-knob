@@ -17,6 +17,8 @@
 #include "bridge_client.h"
 #include "ha_volume_client.h"
 #include "ha_mute_client.h"
+#include "vinyl_client.h"
+#include "voice_client.h"
 #include "track_title_filter.h"
 
 #ifdef ESP_PLATFORM
@@ -93,6 +95,18 @@ static lv_obj_t *s_progress_arc;       // Inner arc for track progress
 // not a timing problem, a resolution one. 1000 steps make each step a
 // fraction of a second on any normal track length.
 #define PROGRESS_ARC_MAX 1000
+// The 50 ms LVGL timer that runs poll_pending(). ui_loop_iter() already runs it on every pass, so
+// this timer only adds wake-ups; it is paused while the panel sleeps.
+static lv_timer_t *s_poll_pending_timer;
+
+// Setting a style property to the value it already has still invalidates the object in LVGL, and
+// apply_state()/update_battery_display() run on every poll. Skip the call when nothing changes so
+// an idle screen is not redrawn every couple of seconds for no visible difference.
+static void set_text_color_if_changed(lv_obj_t *obj, lv_color_t color) {
+    if (lv_color_eq(lv_obj_get_style_text_color(obj, LV_PART_MAIN), color)) return;
+    lv_obj_set_style_text_color(obj, color, 0);
+}
+
 static lv_timer_t *s_progress_interp_timer;  // Advances the arc between polls - see progress_interp_timer_cb
 static int s_progress_base_ms = -1;    // Last known real seek position (-1 = no data yet)
 static int s_progress_length_ms;       // Track length at the time s_progress_base_ms was recorded
@@ -112,12 +126,15 @@ static char s_progress_last_line1[128] = "";  // Track identity, to tell a real 
 
 // Detail screen's seek-jog (ui_seek_adjust): the encoder owns this arc
 // instead of volume there, so it grows to where the volume ring used to be
-// (SCREEN_SIZE-30 -> SCREEN_SIZE-10, still leaving a gap to the true edge)
-// and thickens 3x (4px -> 12px) for the whole detail-screen visit, not just
-// while actively seeking. PROGRESS_ARC_COLOR_NORMAL matches the indicator
-// color set at creation time below.
+// (SCREEN_SIZE-30 -> SCREEN_SIZE, right out to the true edge of the glass:
+// the 5px gap the previous SCREEN_SIZE-10 left there had no purpose, and
+// DETAIL_TEXT_RADIUS below is derived from this size, so the text area
+// widens by the same 5px per side) and thickens 3x (4px -> 12px, unchanged)
+// for the whole detail-screen visit, not just while actively seeking.
+// PROGRESS_ARC_COLOR_NORMAL matches the indicator color set at creation time
+// below.
 #define PROGRESS_ARC_SIZE_NORMAL (SCREEN_SIZE - 30)
-#define PROGRESS_ARC_SIZE_SEEK (SCREEN_SIZE - 10)
+#define PROGRESS_ARC_SIZE_SEEK SCREEN_SIZE
 #define PROGRESS_ARC_WIDTH_NORMAL 4
 #define PROGRESS_ARC_WIDTH_SEEK 12
 #define PROGRESS_ARC_COLOR_NORMAL 0x7bb9e8
@@ -359,9 +376,13 @@ static void source_region_long_press_cb(lv_event_t *e);
 static void build_tv_vinyl_layout(void);
 static void build_mute_overlay(void);
 static void apply_current_screen(void);
+static void set_vinyl_mode(bool on);
+static void apply_vinyl_transport(void);
 static void apply_mute_overlay(void);
 static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
+static void btn_play_long_press_cb(lv_event_t *e);
+static void refresh_play_icon(void);
 static void btn_next_event_cb(lv_event_t *e);
 static void zone_list_item_event_cb(lv_event_t *e);
 static void show_status_message(const char *message);
@@ -423,9 +444,25 @@ static inline void format_volume_text(char *buf, size_t len, float volume, float
 // than adding a target-specific #ifdef to this shared file) and inverting
 // db_to_position's formula gets us the dB-equivalent without new plumbing
 // across the controller-boundary layers for a display-only value.
+//
+// Dining Room's dbx VENU360 reports its own 0..120 position scale instead
+// (sensor.venu360_main_gain_dial_2: 121 half-dB steps over -60..0dB, see
+// ha_volume_client.c's room_volume_max()) - recognised the same way, and
+// without it a position of 90 fell through as "90 dB" and tripped the red
+// warning threshold.
+static inline bool volume_scale_is_lounge_position(float volume_min, float volume_max) {
+    return volume_min == 0.0f && volume_max == 255.0f;
+}
+static inline bool volume_scale_is_dining_position(float volume_min, float volume_max) {
+    return volume_min == 0.0f && volume_max == 120.0f;
+}
+
 static inline float derive_volume_db_equivalent(float volume, float volume_min, float volume_max) {
-    if (volume_min == 0.0f && volume_max == 255.0f) {
+    if (volume_scale_is_lounge_position(volume_min, volume_max)) {
         return volume / 2.0f - 127.5f;
+    }
+    if (volume_scale_is_dining_position(volume_min, volume_max)) {
+        return volume / 2.0f - 60.0f;
     }
     return volume;
 }
@@ -437,8 +474,11 @@ static inline float derive_volume_db_equivalent(float volume, float volume_min, 
 // calculate_volume_lit_ticks() rounding the live tick count itself uses -
 // see that function's own comment for why the two need to agree exactly.
 static inline float volume_for_db_equivalent(float db, float volume_min, float volume_max) {
-    if (volume_min == 0.0f && volume_max == 255.0f) {
+    if (volume_scale_is_lounge_position(volume_min, volume_max)) {
         return (db + 127.5f) * 2.0f;
+    }
+    if (volume_scale_is_dining_position(volume_min, volume_max)) {
+        return (db + 60.0f) * 2.0f;
     }
     return db;
 }
@@ -755,6 +795,9 @@ static int32_t seek_arc_angle_for_seconds(int seconds) {
 // [s_seek_start_seconds, s_seek_preview_seconds], so the ring shows how far
 // the knob has moved rather than recoloring the whole played portion.
 void ui_seek_adjust(int32_t ticks) {
+    if (vinyl_client_owns_media()) {
+        return;  // seeking a record is not possible
+    }
     if (ticks == 0 || !s_progress_arc || !s_seek_delta_arc) {
         return;
     }
@@ -888,6 +931,7 @@ void ui_init(void) {
 
     // Poll for state updates every 50ms
     lv_timer_t *poll_timer = lv_timer_create(poll_pending, 50, NULL);
+    s_poll_pending_timer = poll_timer;
     if (poll_timer) {
         lv_timer_set_repeat_count(poll_timer, -1);
     } else {
@@ -1208,7 +1252,10 @@ static void build_layout(void) {
     s_btn_play = lv_btn_create(s_ui_container);
     lv_obj_set_size(s_btn_play, TRANSPORT_BTN_SIZE, TRANSPORT_BTN_SIZE);
     lv_obj_add_style(s_btn_play, &style_button_primary, 0);
-    lv_obj_add_event_cb(s_btn_play, btn_play_event_cb, LV_EVENT_CLICKED, NULL);
+    // SHORT_CLICKED, not CLICKED: LVGL also sends CLICKED on release after a
+    // long press, which would pause the music every time voice is triggered.
+    lv_obj_add_event_cb(s_btn_play, btn_play_event_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_btn_play, btn_play_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_align(s_btn_play, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(s_btn_play, lv_color_hex(0x000000), LV_STATE_DEFAULT);
     lv_obj_set_style_bg_opa(s_btn_play, LV_OPA_60, LV_STATE_DEFAULT);
@@ -1957,6 +2004,10 @@ static void source_region_long_press_cb(lv_event_t *e) {
 
 static void btn_prev_event_cb(lv_event_t *e) {
     (void)e;
+    // Nothing to control for a record: no haptic, no feedback icon.
+    if (vinyl_client_owns_media()) {
+        return;
+    }
     ESP_LOGI(UI_TAG, "btn_prev_event_cb triggered");
 #if !TARGET_PC
     haptic_driver_pulse();
@@ -1967,8 +2018,48 @@ static void btn_prev_event_cb(lv_event_t *e) {
     (void)controller_input_dispatch_action(&action);
 }
 
+static int s_icon_playing = -1;  // -1 = never applied
+static bool s_voice_active;      // a voice interaction is showing: play button is a red mic
+
+static void refresh_play_icon(void) {
+    if (!s_play_icon) {
+        return;
+    }
+#if !TARGET_PC
+    if (s_voice_active) {
+        lv_label_set_text(s_play_icon, ICON_MIC);
+        lv_obj_set_style_text_color(s_play_icon, lv_color_hex(0xff3b30), 0);
+        return;
+    }
+    lv_obj_remove_local_style_prop(s_play_icon, LV_STYLE_TEXT_COLOR, 0);
+    lv_label_set_text(s_play_icon, s_icon_playing == 1 ? ICON_PAUSE : ICON_PLAY);
+#else
+    lv_label_set_text(s_play_icon, s_icon_playing == 1 ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+#endif
+}
+
+void ui_set_voice_active(bool active) {
+    s_voice_active = active;
+    refresh_play_icon();
+    apply_vinyl_transport();
+}
+
+static void btn_play_long_press_cb(lv_event_t *e) {
+    (void)e;
+    // Does nothing if HA isn't configured or a voice interaction is already showing.
+    if (voice_client_request_listen()) {
+#if !TARGET_PC
+        haptic_driver_pulse();
+#endif
+    }
+}
+
 static void btn_play_event_cb(lv_event_t *e) {
     (void)e;
+    // Nothing to control for a record: no haptic, no feedback icon.
+    if (vinyl_client_owns_media()) {
+        return;
+    }
     ESP_LOGI(UI_TAG, "btn_play_event_cb triggered");
 #if !TARGET_PC
     haptic_driver_pulse();
@@ -1986,6 +2077,10 @@ static void btn_play_event_cb(lv_event_t *e) {
 
 static void btn_next_event_cb(lv_event_t *e) {
     (void)e;
+    // Nothing to control for a record: no haptic, no feedback icon.
+    if (vinyl_client_owns_media()) {
+        return;
+    }
     ESP_LOGI(UI_TAG, "btn_next_event_cb triggered");
 #if !TARGET_PC
     haptic_driver_pulse();
@@ -2157,13 +2252,13 @@ static void apply_state(const struct ui_state *state) {
     s_volume_label_resting_db = derive_volume_db_equivalent(state->volume, state->volume_min, state->volume_max);
     lv_color_t volume_color = volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa));
     if (s_volume_label_large) {
-        lv_obj_set_style_text_color(s_volume_label_large, volume_color, 0);
+        set_text_color_if_changed(s_volume_label_large, volume_color);
     }
     if (s_volume_db_label) {
-        lv_obj_set_style_text_color(s_volume_db_label, volume_color, 0);
+        set_text_color_if_changed(s_volume_db_label, volume_color);
     }
     if (s_tv_vinyl_volume_label) {
-        lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
+        set_text_color_if_changed(s_tv_vinyl_volume_label, volume_color);
     }
     if (should_emphasize) {
         emphasize_volume_label();
@@ -2288,14 +2383,9 @@ static void apply_state(const struct ui_state *state) {
     }
 
     // Update play/pause icon - only on an actual state change.
-    static int s_last_playing = -1;  // -1 = never applied
-    if (s_play_icon && (int)state->playing != s_last_playing) {
-        s_last_playing = state->playing ? 1 : 0;
-#if !TARGET_PC
-        lv_label_set_text(s_play_icon, state->playing ? ICON_PAUSE : ICON_PLAY);
-#else
-        lv_label_set_text(s_play_icon, state->playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
-#endif
+    if (s_play_icon && (int)state->playing != s_icon_playing) {
+        s_icon_playing = state->playing ? 1 : 0;
+        refresh_play_icon();
     }
 
     // Update online status
@@ -2313,6 +2403,36 @@ static void set_status_dot(bool online) {
     }
 }
 
+static bool s_controls_visible = true;  // false in art mode - see ui_set_controls_visible
+static bool s_vinyl_mode;               // the Music layout is showing a recognised record
+
+// A record has nothing to skip or pause: previous/next are hidden and the play
+// button is invisible - but still there, so a long-press on it keeps working.
+// HIDDEN is also used by art mode, so both are folded together here.
+static void apply_vinyl_transport(void) {
+    bool show_skip = s_controls_visible && !s_vinyl_mode;
+    if (s_btn_prev) {
+        if (show_skip) lv_obj_clear_flag(s_btn_prev, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_btn_prev, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_btn_next) {
+        if (show_skip) lv_obj_clear_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_btn_next, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_btn_play) {
+        // The red mic must still show while a voice interaction is running.
+        lv_obj_set_style_opa(s_btn_play, (s_vinyl_mode && !s_voice_active) ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    }
+}
+
+static void set_vinyl_mode(bool on) {
+    if (on == s_vinyl_mode) {
+        return;
+    }
+    s_vinyl_mode = on;
+    apply_vinyl_transport();
+}
+
 // Switches between the Music/TV/Vinyl screens based on the polled
 // input_select.audio_input value (ha_volume_client's existing poll cycle -
 // see its header comment on why this lives there rather than a second
@@ -2326,13 +2446,16 @@ static void set_status_dot(bool online) {
 // visually cover the artwork without the two pieces of code fighting
 // over the same flag.
 static void apply_current_screen(void) {
-    char source[32];
+    set_vinyl_mode(vinyl_client_content_ready());
+    char source[32] = "";
     dial_screen_t new_screen = s_current_screen;
     if (ha_volume_client_get_current_source(source, sizeof(source))) {
         if (strcmp(source, "TV") == 0) {
             new_screen = DIAL_SCREEN_TV;
         } else if (strcmp(source, "Vinyl") == 0) {
-            new_screen = DIAL_SCREEN_VINYL;
+            // With a recognised track (see vinyl_client.h) the Music screen
+            // shows it; otherwise the static Vinyl picture, as before.
+            new_screen = vinyl_client_content_ready() ? DIAL_SCREEN_MUSIC : DIAL_SCREEN_VINYL;
         } else {
             new_screen = DIAL_SCREEN_MUSIC;
         }
@@ -2340,6 +2463,8 @@ static void apply_current_screen(void) {
     if (new_screen == s_current_screen) {
         return;
     }
+    ESP_LOGI(UI_TAG, "Screen %d -> %d (source='%s', vinyl feed=%d)",
+             (int)s_current_screen, (int)new_screen, source, (int)vinyl_client_content_ready());
     s_current_screen = new_screen;
     bool music = (new_screen == DIAL_SCREEN_MUSIC);
 
@@ -2534,9 +2659,9 @@ static void update_battery_display(void) {
     } else {
         battery_color = lv_color_hex(0xfafafa);  // Near-white
     }
-    lv_obj_set_style_text_color(s_battery_icon, battery_color, 0);
+    set_text_color_if_changed(s_battery_icon, battery_color);
     if (s_detail_battery_icon) {
-        lv_obj_set_style_text_color(s_detail_battery_icon, battery_color, 0);
+        set_text_color_if_changed(s_detail_battery_icon, battery_color);
     }
 
     // Flash (blink) at 5% or less, not charging - a timer only exists
@@ -2921,14 +3046,16 @@ bool ui_zone_picker_is_current_selection(void) {
 // Public API
 // ============================================================================
 
-void ui_loop_iter(void) {
-    lv_task_handler();
-    lv_timer_handler();
+uint32_t ui_loop_iter(void) {
+    // lv_task_handler() is only the deprecated alias of lv_timer_handler(), so calling both ran
+    // every LVGL timer twice per pass.
+    uint32_t next_ms = lv_timer_handler();
 
     platform_task_run_pending();  // Process callbacks from bridge_client thread
 
     // Check for pending UI updates (poll_pending inline - no timer needed)
     poll_pending(NULL);
+    return next_ms;
 }
 
 void ui_set_track(const char *line1, const char *line2) {
@@ -3055,12 +3182,12 @@ void ui_show_volume_change(float vol, float vol_step) {
     s_volume_label_resting_db = derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max);
     lv_color_t volume_color = volume_hot_color_for_db(s_volume_label_resting_db, lv_color_hex(0xfafafa));
     if (s_volume_label_large) {
-        lv_obj_set_style_text_color(s_volume_label_large, volume_color, 0);
+        set_text_color_if_changed(s_volume_label_large, volume_color);
         set_haloed_label_text(s_volume_label_large, s_volume_label_halo, vol_text);
         emphasize_volume_label();
     }
     if (s_tv_vinyl_volume_label) {
-        lv_obj_set_style_text_color(s_tv_vinyl_volume_label, volume_color, 0);
+        set_text_color_if_changed(s_tv_vinyl_volume_label, volume_color);
         lv_label_set_text(s_tv_vinyl_volume_label, vol_text);
     }
     if (s_detail_volume_label) {
@@ -3071,7 +3198,7 @@ void ui_show_volume_change(float vol, float vol_step) {
     snprintf(db_text, sizeof(db_text), "%.1f dB",
              derive_volume_db_equivalent(vol, s_pending.volume_min, s_pending.volume_max));
     if (s_volume_db_label) {
-        lv_obj_set_style_text_color(s_volume_db_label, volume_color, 0);
+        set_text_color_if_changed(s_volume_db_label, volume_color);
     }
     set_haloed_label_text(s_volume_db_label, s_volume_db_label_halo, db_text);
     if (s_tv_vinyl_db_label) {
@@ -3212,15 +3339,37 @@ void ui_test_pattern(void) {
 #endif
 }
 
+// The Vinyl-source stand-in for the detail view's circular thumbnail: the same
+// static photo the Vinyl screen shows, scaled to fit the thumbnail.
+static void show_static_vinyl_thumbnail(bool show) {
+#if !TARGET_PC
+    if (!show || !s_detail_thumbnail || !s_detail_thumbnail_mask) {
+        return;
+    }
+    lv_image_set_src(s_detail_thumbnail, &vinyl_background);
+    lv_image_set_scale(s_detail_thumbnail,
+                       (DETAIL_ARTWORK_SIZE * 256) / vinyl_background.header.w);
+    lv_obj_clear_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_invalidate(s_detail_thumbnail);
+#else
+    (void)show;
+#endif
+}
+
 void ui_set_artwork(const char *image_key) {
     // Check if image_key changed
     if (!image_key || !image_key[0]) {
         // No artwork - hide image
         if (s_last_image_key[0]) {
             lv_obj_add_flag(s_artwork_image, LV_OBJ_FLAG_HIDDEN);
-            if (s_detail_thumbnail_mask) lv_obj_add_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
+            if (s_detail_thumbnail_mask && !vinyl_client_owns_media()) {
+                lv_obj_add_flag(s_detail_thumbnail_mask, LV_OBJ_FLAG_HIDDEN);
+            }
             s_last_image_key[0] = '\0';
         }
+        // On the Vinyl source with no track, the detail view's small circular
+        // picture is the static vinyl photo rather than nothing.
+        show_static_vinyl_thumbnail(vinyl_client_owns_media());
         return;
     }
 
@@ -3232,7 +3381,10 @@ void ui_set_artwork(const char *image_key) {
     // Build artwork URL (request 360x360 to match display - no scaling needed)
     // With PSRAM enabled, we can handle the full display resolution
     char url[512];
-    if (!bridge_client_get_artwork_url(url, sizeof(url), SCREEN_SIZE, SCREEN_SIZE)) {
+    bool have_url = vinyl_client_showing()
+        ? vinyl_client_artwork_url(url, sizeof(url), SCREEN_SIZE, SCREEN_SIZE)
+        : bridge_client_get_artwork_url(url, sizeof(url), SCREEN_SIZE, SCREEN_SIZE) != NULL;
+    if (!have_url) {
         ESP_LOGW(UI_TAG, "Failed to build artwork URL");
         return;
     }
@@ -3479,6 +3631,7 @@ void ui_trigger_update(void) {
 // ============================================================================
 
 void ui_set_controls_visible(bool visible) {
+    s_controls_visible = visible;
     if (visible) {
         // Show all controls
         if (s_btn_prev) lv_obj_clear_flag(s_btn_prev, LV_OBJ_FLAG_HIDDEN);
@@ -3532,6 +3685,7 @@ void ui_set_controls_visible(bool visible) {
         if (s_artwork_image) lv_obj_set_style_img_opa(s_artwork_image, LV_OPA_COVER, 0);
         ESP_LOGI(UI_TAG, "Controls hidden (art mode)");
     }
+    apply_vinyl_transport();
 }
 
 // Battery/perf: the progress-arc interpolation timer and every marquee
@@ -3544,6 +3698,39 @@ void ui_set_controls_visible(bool visible) {
 // without disturbing anything else about the label; restoring
 // SCROLL_CIRCULAR on wake just restarts the marquee from the beginning,
 // which is unnoticeable since the screen was off anyway.
+// How often the touch controller is read while the panel is asleep (tap-to-wake latency).
+#define UI_SLEEP_TOUCH_POLL_MS 50
+
+#ifdef CONFIG_RK_PERF_LOG
+// Diagnostic for marquee problems: is the label wide enough to need scrolling, and is an
+// animation actually attached to it?
+static void debug_one_label(const char *name, lv_obj_t *label) {
+    if (!label) {
+        ESP_LOGI(UI_TAG, "label %s: NULL", name);
+        return;
+    }
+    lv_point_t size = {0, 0};
+    const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    const char *text = lv_label_get_text(label);
+    lv_text_get_size(&size, text ? text : "", font, lv_obj_get_style_text_letter_space(label, LV_PART_MAIN),
+                     lv_obj_get_style_text_line_space(label, LV_PART_MAIN), LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+    lv_anim_t *a = lv_anim_get(label, NULL);
+    ESP_LOGI(UI_TAG,
+             "label %s: mode=%d hidden=%d obj_w=%d content_w=%d text_w=%d anim=%s act=%d dur=%d start=%d end=%d text='%.40s'",
+             name, (int)lv_label_get_long_mode(label), lv_obj_has_flag(label, LV_OBJ_FLAG_HIDDEN),
+             (int)lv_obj_get_width(label), (int)lv_obj_get_content_width(label), (int)size.x,
+             a ? "yes" : "no", a ? (int)a->act_time : 0, a ? (int)a->duration : 0,
+             a ? (int)a->start_value : 0, a ? (int)a->end_value : 0, text ? text : "");
+}
+
+void ui_debug_label_state(void) {
+    debug_one_label("track", s_track_label);
+    debug_one_label("artist", s_artist_label);
+    debug_one_label("detail_title", s_detail_title_label);
+    debug_one_label("detail_artist", s_detail_artist_label);
+}
+#endif
+
 void ui_set_background_animation_paused(bool paused) {
     if (s_progress_interp_timer) {
         if (paused) {
@@ -3558,6 +3745,35 @@ void ui_set_background_animation_paused(bool paused) {
             // gaps between poll cycles.
             s_progress_base_uptime_ms = platform_millis();
             lv_timer_resume(s_progress_interp_timer);
+        }
+    }
+
+    // A sleeping panel needs neither LVGL's periodic refresh (nothing is flushed anyway, see
+    // lvgl_flush_cb) nor a 30 ms touch poll: pause the refresh timer and poll the touch
+    // controller more slowly, which is what lets the CPU stay in light sleep. A tap is still
+    // noticed within UI_SLEEP_TOUCH_POLL_MS. Restored on wake, followed by the full redraw below.
+    {
+        if (s_poll_pending_timer) {
+            if (paused) {
+                lv_timer_pause(s_poll_pending_timer);
+            } else {
+                lv_timer_resume(s_poll_pending_timer);
+            }
+        }
+        lv_display_t *disp = lv_display_get_default();
+        lv_timer_t *refr = disp ? lv_display_get_refr_timer(disp) : NULL;
+        if (refr) {
+            if (paused) {
+                lv_timer_pause(refr);
+            } else {
+                lv_timer_resume(refr);
+            }
+        }
+        for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+            lv_timer_t *read_timer = lv_indev_get_read_timer(indev);
+            if (read_timer) {
+                lv_timer_set_period(read_timer, paused ? UI_SLEEP_TOUCH_POLL_MS : LV_DEF_REFR_PERIOD);
+            }
         }
     }
 

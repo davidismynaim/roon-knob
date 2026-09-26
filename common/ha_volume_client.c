@@ -1,3 +1,4 @@
+#include "os_event.h"
 #include "ha_volume_client.h"
 
 #include "controller_presentation.h"
@@ -9,6 +10,9 @@
 #include "platform/platform_storage.h"
 #include "platform/platform_task.h"
 #include "platform/platform_time.h"
+#include "room_cfg.h"
+#include "vinyl_client.h"
+#include "voice_client.h"
 
 #include <cJSON.h>
 #include <math.h>
@@ -30,9 +34,13 @@
 #define HA_VOLUME_POLL_INTERVAL_AWAKE_CHARGING_MS 2000
 #define HA_VOLUME_POLL_INTERVAL_AWAKE_BATTERY_MS 5000
 #define HA_VOLUME_POLL_INTERVAL_SLEEPING_MS 30000
+#define HA_VOLUME_POLL_INTERVAL_VOICE_MS 1000
 #define HA_VOLUME_POLL_TASK_STACK 4096
 
 static uint32_t poll_interval_ms(void) {
+    if (voice_client_wants_fast_poll()) {
+        return HA_VOLUME_POLL_INTERVAL_VOICE_MS;  // clear the red mic promptly
+    }
     if (platform_display_is_sleeping()) {
         return HA_VOLUME_POLL_INTERVAL_SLEEPING_MS;
     }
@@ -50,6 +58,7 @@ static uint32_t poll_interval_ms(void) {
 // than that automation's 500ms - tune on real hardware once flashed.
 #define HA_VOLUME_DEBOUNCE_MS 90
 #define HA_VOLUME_FLUSH_POLL_MS 30
+#define HA_VOLUME_FLUSH_IDLE_WAIT_MS 500  // upper bound on an idle wait; new work signals the event
 #define HA_VOLUME_FLUSH_TASK_STACK 4096
 
 // common/controller_input.c's resolve_volume_ticks now passes the true
@@ -61,6 +70,8 @@ static uint32_t poll_interval_ms(void) {
 // temporary log of raw ticks against a known number of manual clicks).
 #define HA_VOLUME_TICKS_PER_CLICK 1
 
+static os_event_t s_poll_event = OS_EVENT_INITIALIZER;   // ends the wait for the next poll
+static os_event_t s_flush_event = OS_EVENT_INITIALIZER;  // new volume ticks / script / network up
 static os_mutex_t s_lock = OS_MUTEX_INITIALIZER;
 static rk_ha_cfg_t s_cfg;
 static bool s_configured;
@@ -102,19 +113,28 @@ static uint64_t s_last_tick_ms;    // when a tick last landed in the burst
 
 static void flush_task(void *arg);
 
-static float clamp_position(float value) {
+static float clamp_position(float value, float max) {
     if (value < 0.0f) {
         return 0.0f;
     }
-    if (value > 255.0f) {
-        return 255.0f;
+    if (value > max) {
+        return max;
     }
     return value;
 }
 
 static int db_to_position(float db) {
     float position = roundf((db + 127.5f) * 2.0f);
-    return (int)clamp_position(position);
+    return (int)clamp_position(position, 255.0f);
+}
+
+// Lounge's number.hifi_volume is a dB value converted to a 0-255 position
+// (db_to_position above). Dining's sensor.venu360_main_gain_dial_2 is
+// already the position itself, 0-120 (121 discrete 0.5dB steps over
+// -60..0dB - see script.venu360_gain_controller server-side; the firmware
+// doesn't need to know that mapping, only the position range it reports).
+static float room_volume_max(void) {
+    return room_cfg_get_current() == RK_ROOM_DINING ? 120.0f : 255.0f;
 }
 
 static bool snapshot_cfg(rk_ha_cfg_t *out) {
@@ -131,6 +151,7 @@ void ha_volume_client_set_network_ready(bool ready) {
     os_mutex_lock(&s_lock);
     s_network_ready = ready;
     os_mutex_unlock(&s_lock);
+    os_event_set(&s_flush_event);  // ticks queued before the network came up can go out now
 }
 
 static void set_cached_position(int position) {
@@ -149,9 +170,13 @@ static int get_cached_position(void) {
 
 static void set_cached_source(const char *source) {
     os_mutex_lock(&s_lock);
+    bool changed = !s_have_source || strcmp(s_current_source, source) != 0;
     rk_strlcpy(s_current_source, source, sizeof(s_current_source));
     s_have_source = true;
     os_mutex_unlock(&s_lock);
+    if (changed) {
+        LOGI("Source is now '%s'", source);
+    }
 }
 
 bool ha_volume_client_get_current_source(char *out, size_t len) {
@@ -188,9 +213,10 @@ void ha_volume_client_set_muted_optimistic(bool muted) {
 }
 
 static bool poll_once(const rk_ha_cfg_t *cfg) {
+    bool dining = room_cfg_get_current() == RK_ROOM_DINING;
     char url[128];
-    snprintf(url, sizeof(url), "http://%s/api/states/number.hifi_volume",
-             cfg->host);
+    snprintf(url, sizeof(url), "http://%s/api/states/%s", cfg->host,
+             dining ? "sensor.venu360_main_gain_dial_2" : "number.hifi_volume");
 
     char *resp = NULL;
     size_t resp_len = 0;
@@ -210,12 +236,14 @@ static bool poll_once(const rk_ha_cfg_t *cfg) {
     bool ok = false;
     if (cJSON_IsString(state) && state->valuestring) {
         char *end = NULL;
-        float db = strtof(state->valuestring, &end);
+        float raw = strtof(state->valuestring, &end);
         if (end != state->valuestring) {
-            int position = db_to_position(db);
+            float max = room_volume_max();
+            int position = dining ? (int)clamp_position(roundf(raw), max)
+                                   : db_to_position(raw);
             set_cached_position(position);
             controller_presentation_set_volume_range((float)position, 0.0f,
-                                                      255.0f, 1.0f);
+                                                      max, 1.0f);
             ok = true;
         }
     }
@@ -224,9 +252,10 @@ static bool poll_once(const rk_ha_cfg_t *cfg) {
 }
 
 static bool poll_source_once(const rk_ha_cfg_t *cfg) {
+    bool dining = room_cfg_get_current() == RK_ROOM_DINING;
     char url[128];
-    snprintf(url, sizeof(url),
-             "http://%s/api/states/input_select.audio_input", cfg->host);
+    snprintf(url, sizeof(url), "http://%s/api/states/%s", cfg->host,
+             dining ? "sensor.venu360_inputs" : "input_select.audio_input");
 
     char *resp = NULL;
     size_t resp_len = 0;
@@ -253,9 +282,10 @@ static bool poll_source_once(const rk_ha_cfg_t *cfg) {
 }
 
 static bool poll_mute_once(const rk_ha_cfg_t *cfg) {
+    bool dining = room_cfg_get_current() == RK_ROOM_DINING;
     char url[128];
-    snprintf(url, sizeof(url),
-             "http://%s/api/states/input_boolean.audio_mute", cfg->host);
+    snprintf(url, sizeof(url), "http://%s/api/states/%s", cfg->host,
+             dining ? "switch.venu360_main_mute" : "input_boolean.audio_mute");
 
     char *resp = NULL;
     size_t resp_len = 0;
@@ -283,6 +313,8 @@ static bool poll_mute_once(const rk_ha_cfg_t *cfg) {
     return ok;
 }
 
+static volatile bool s_poll_now;
+
 static void poll_task(void *arg) {
     (void)arg;
     while (true) {
@@ -297,9 +329,32 @@ static void poll_task(void *arg) {
             if (!poll_mute_once(&cfg)) {
                 LOGW("HA mute poll failed (host='%s')", cfg.host);
             }
+            {
+                char src[HA_CURRENT_SOURCE_MAX];
+                bool on_vinyl = ha_volume_client_get_current_source(src, sizeof(src)) &&
+                                strcmp(src, "Vinyl") == 0;
+                vinyl_client_poll(cfg.host, on_vinyl);
+            }
+            voice_client_poll(&cfg);
         }
-        platform_sleep_ms(poll_interval_ms());
+        // Block until the next poll is due; ha_volume_client_poll_now() cuts the wait short.
+        // (Was 100 ms slices: 10 wake-ups a second, all night.)
+        uint32_t interval = poll_interval_ms();
+        uint64_t wait_start = platform_millis();
+        while (!s_poll_now) {
+            uint64_t elapsed = platform_millis() - wait_start;
+            if (elapsed >= interval) {
+                break;
+            }
+            (void)os_event_wait_ms(&s_poll_event, (uint32_t)(interval - elapsed));
+        }
+        s_poll_now = false;
     }
+}
+
+void ha_volume_client_poll_now(void) {
+    s_poll_now = true;
+    os_event_set(&s_poll_event);
 }
 
 void ha_volume_client_init(void) {
@@ -369,6 +424,42 @@ static bool send_clicks(const rk_ha_cfg_t *cfg, int32_t clicks) {
     return true;
 }
 
+// script.venu360_gain_controller has no "batch of N clicks" call shape like
+// audio_voice_volume - it only accepts one {"event":"step","delta":±1} per
+// invocation (real hardware step sequence, not a value write). So a burst
+// of N clicks means N individual HTTP round trips here, not one - this
+// only runs from flush_task's background task, so the extra latency isn't
+// on the input path.
+static bool send_steps(const rk_ha_cfg_t *cfg, int32_t clicks) {
+    if (clicks == 0) {
+        return true;
+    }
+    int32_t magnitude = clicks < 0 ? -clicks : clicks;
+    int delta = clicks > 0 ? 1 : -1;
+
+    char url[128];
+    snprintf(url, sizeof(url),
+             "http://%s/api/services/script/venu360_gain_controller",
+             cfg->host);
+    char body[48];
+    snprintf(body, sizeof(body), "{\"event\":\"step\",\"delta\":%d}", delta);
+
+    bool ok = true;
+    for (int32_t i = 0; i < magnitude; i++) {
+        char *resp = NULL;
+        size_t resp_len = 0;
+        int ret =
+            platform_http_post_auth(url, cfg->token, body, &resp, &resp_len);
+        platform_http_free(resp);
+        if (ret != 0) {
+            LOGW("HA volume adjust: venu360_gain_controller step call "
+                 "failed");
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 static void flush_pending(void) {
     rk_ha_cfg_t cfg;
     os_mutex_lock(&s_lock);
@@ -388,14 +479,79 @@ static void flush_pending(void) {
     }
     int32_t clicks = ticks / HA_VOLUME_TICKS_PER_CLICK;
     if (clicks != 0) {
-        (void)send_clicks(&cfg, clicks);
+        if (room_cfg_get_current() == RK_ROOM_DINING) {
+            (void)send_steps(&cfg, clicks);
+        } else {
+            (void)send_clicks(&cfg, clicks);
+        }
+    }
+}
+
+static char s_pending_script[64];
+static ha_script_done_fn_t s_pending_script_done;
+
+bool ha_volume_client_call_script_async(const char *script_entity_id,
+                                        ha_script_done_fn_t done) {
+    if (!script_entity_id || !script_entity_id[0] ||
+        strlen(script_entity_id) >= sizeof(s_pending_script)) {
+        return false;
+    }
+    os_mutex_lock(&s_lock);
+    bool ok = s_configured && s_network_ready && s_pending_script[0] == '\0';
+    if (ok) {
+        memcpy(s_pending_script, script_entity_id, strlen(script_entity_id) + 1);
+        s_pending_script_done = done;
+    }
+    os_mutex_unlock(&s_lock);
+    if (ok) {
+        os_event_set(&s_flush_event);
+    }
+    return ok;
+}
+
+static void run_pending_script(void) {
+    char script[sizeof(s_pending_script)];
+    ha_script_done_fn_t done;
+    rk_ha_cfg_t cfg;
+    os_mutex_lock(&s_lock);
+    if (s_pending_script[0] == '\0') {
+        os_mutex_unlock(&s_lock);
+        return;
+    }
+    memcpy(script, s_pending_script, sizeof(script));
+    done = s_pending_script_done;
+    s_pending_script[0] = '\0';
+    s_pending_script_done = NULL;
+    cfg = s_cfg;
+    os_mutex_unlock(&s_lock);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s/api/services/script/turn_on", cfg.host);
+    char body[96];
+    snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", script);
+    char *resp = NULL;
+    size_t resp_len = 0;
+    int ret = platform_http_post_auth(url, cfg.token, body, &resp, &resp_len);
+    platform_http_free(resp);
+    if (done) {
+        done(ret == 0);
     }
 }
 
 static void flush_task(void *arg) {
     (void)arg;
     while (true) {
-        platform_sleep_ms(HA_VOLUME_FLUSH_POLL_MS);
+        // Wait for work. With volume ticks or a script pending, look again every
+        // HA_VOLUME_FLUSH_POLL_MS (the debounce window is measured against the clock); with
+        // nothing pending, block until new work signals s_flush_event (bounded, in case a signal
+        // were ever missed). This was an unconditional 30 ms sleep: 33 wake-ups a second forever,
+        // which alone kept the CPU from light-sleeping (issue #45).
+        os_mutex_lock(&s_lock);
+        bool work_pending = s_pending_ticks != 0 || s_pending_script[0] != '\0';
+        os_mutex_unlock(&s_lock);
+        (void)os_event_wait_ms(&s_flush_event,
+                               work_pending ? HA_VOLUME_FLUSH_POLL_MS : HA_VOLUME_FLUSH_IDLE_WAIT_MS);
+        run_pending_script();
         os_mutex_lock(&s_lock);
         bool due = s_pending_ticks != 0 &&
                    (platform_millis() - s_last_tick_ms) >=
@@ -432,10 +588,11 @@ bool ha_volume_client_adjust(int32_t ticks) {
      * debounced, so the dial still feels instantly responsive even
      * though the network write lags slightly behind a fast spin. */
     int new_position = get_cached_position() + ticks / HA_VOLUME_TICKS_PER_CLICK;
+    int max_position = (int)room_volume_max();
     if (new_position < 0) {
         new_position = 0;
-    } else if (new_position > 255) {
-        new_position = 255;
+    } else if (new_position > max_position) {
+        new_position = max_position;
     }
     set_cached_position(new_position);
     controller_presentation_show_volume_change((float)new_position, 1.0f);
@@ -444,6 +601,7 @@ bool ha_volume_client_adjust(int32_t ticks) {
     s_pending_ticks += ticks;
     s_last_tick_ms = platform_millis();
     os_mutex_unlock(&s_lock);
+    os_event_set(&s_flush_event);
     return true;
 }
 
@@ -457,7 +615,7 @@ void ha_volume_client_get_display(float *volume, float *volume_min,
         *volume_min = 0.0f;
     }
     if (volume_max) {
-        *volume_max = 255.0f;
+        *volume_max = room_volume_max();
     }
     if (volume_step) {
         *volume_step = 1.0f;
