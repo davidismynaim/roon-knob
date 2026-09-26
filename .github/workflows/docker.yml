@@ -821,7 +821,9 @@ jobs:
     name: Deploy All PR Firmware Previews
     runs-on: ubuntu-latest
     needs: [test-shared, build-idf, build-frame, build-rlcd, build-ble-off]
-    if: github.event_name == 'pull_request'
+    # Previews are published to the upstream project's GitHub Pages and verified at its custom domain
+    # (roon-knob.muness.com). A fork has neither, so the verify step waited 15 minutes and failed on every PR.
+    if: github.event_name == 'pull_request' && github.repository == 'muness/roon-knob'
     permissions:
       contents: write
       pull-requests: write
