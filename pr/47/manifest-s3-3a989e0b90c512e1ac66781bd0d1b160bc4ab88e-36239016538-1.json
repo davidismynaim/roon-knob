@@ -1,0 +1,11 @@
+{
+  "name": "HiPhi Dial Beta (PR #47 Preview)",
+  "version": "pr-47",
+  "new_install_prompt_erase": true,
+  "builds": [{"chipFamily": "ESP32-S3", "parts": [
+    {"path": "hiphi_dial_bootloader-3a989e0b90c512e1ac66781bd0d1b160bc4ab88e-36239016538-1.bin", "offset": 0},
+    {"path": "hiphi_dial_partition-table-3a989e0b90c512e1ac66781bd0d1b160bc4ab88e-36239016538-1.bin", "offset": 32768},
+    {"path": "hiphi_dial_ota_data_initial-3a989e0b90c512e1ac66781bd0d1b160bc4ab88e-36239016538-1.bin", "offset": 53248},
+    {"path": "hiphi_dial-3a989e0b90c512e1ac66781bd0d1b160bc4ab88e-36239016538-1.bin", "offset": 65536}
+  ]}]
+}
