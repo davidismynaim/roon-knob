@@ -1,5 +1,6 @@
 #include "os_event.h"
 #include "bridge_client.h"
+#include "json_string.h"
 
 #include "bridge_command_plan.h"
 #include "controller_config.h"
@@ -1112,18 +1113,9 @@ static const char *extract_json_string(const char *start, const char *key, char 
     if (*value != '"') {
         return NULL;
     }
-    const char *quote_start = value + 1;
-    const char *quote_end = strchr(quote_start, '"');
-    if (!quote_end) {
-        return NULL;
-    }
-    size_t copy_len = quote_end - quote_start;
-    if (copy_len >= len) {
-        copy_len = len - 1;
-    }
-    memcpy(out, quote_start, copy_len);
-    out[copy_len] = '\0';
-    return quote_end + 1;
+    // json_string_copy() stops at the first UNESCAPED quote and resolves \" \\ \uXXXX etc. A plain
+    // strchr for the next quote cut a title like: Down to Earth (From "WALL-E") short at the \".
+    return json_string_copy(value + 1, out, len);
 }
 
 static bool send_control_json(const char *json) {

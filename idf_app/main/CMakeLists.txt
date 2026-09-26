@@ -43,6 +43,7 @@ set(SRC_FILES
     "../../common/app_main.c"
     "../../common/bridge_command_plan.c"
     "../../common/bridge_client.c"
+    "../../common/json_string.c"
     "../../common/controller_action_router.c"
     "../../common/ha_volume_client.c"
     "../../common/ha_source_client.c"
