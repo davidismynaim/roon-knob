@@ -452,17 +452,27 @@ static void close_device_once_by_bda(const uint8_t bda[6]) {
     }
 }
 
+/* The owner task sleeps until its next deadline instead of polling every 25 ms (which kept the
+ * CPU from ever light-sleeping while the screen was off). Anything that hands it work wakes it. */
+static void wake_owner(void) {
+    if (s.owner_task) xTaskNotifyGive(s.owner_task);
+}
+
 static void enqueue_event(const service_event_t *event) {
     if (!s.events || xQueueSend(s.events, event, 0) != pdPASS) {
         ESP_LOGW(TAG, "Non-critical BLE event dropped");
+        return;
     }
+    wake_owner();
 }
 
 static void enqueue_lifecycle_event(const service_event_t *event) {
     if (!s.lifecycle_events ||
         xQueueSend(s.lifecycle_events, event, portMAX_DELAY) != pdPASS) {
         ESP_LOGE(TAG, "Could not enqueue BLE lifecycle event");
+        return;
     }
+    wake_owner();
 }
 
 static void on_sync(void) {
@@ -483,6 +493,7 @@ static void nimble_host_task(void *arg) {
     nimble_port_run();
     /* This acknowledgement is the owner task's proof that run() returned. */
     xEventGroupSetBits(s.lifecycle, HOST_EXITED_BIT);
+    wake_owner();
     vTaskDelete(NULL);
 }
 
@@ -490,6 +501,7 @@ static void nimble_stop_task(void *arg) {
     (void)arg;
     s.stop_result = nimble_port_stop();
     xEventGroupSetBits(s.lifecycle, STOP_CALL_DONE_BIT);
+    wake_owner();
     vTaskDelete(NULL);
 }
 
@@ -1334,13 +1346,38 @@ static void owner_task(void *arg) {
             log_memory("BLE service watermark");
             next_telemetry = now + pdMS_TO_TICKS(60000);
         }
-        vTaskDelay(pdMS_TO_TICKS(25));
+        /* Sleep until the earliest deadline that can actually fire (same conditions as the
+         * branches above), or until wake_owner(). While stopping, keep the short poll: the
+         * NimBLE stop/exit bits are checked by polling. */
+        const int32_t telemetry_in = (int32_t)(next_telemetry - now);
+        TickType_t wait = telemetry_in <= 0 ? 1 : (TickType_t)telemetry_in;
+        if (is_stopping()) {
+            wait = pdMS_TO_TICKS(25);
+        } else {
+            if (s.status.state == RK_BLE_HID_HOST_STATE_SCANNING) {
+                const int32_t d = (int32_t)(s.scan_deadline - now);
+                if (d <= 0) wait = 1; else if ((TickType_t)d < wait) wait = (TickType_t)d;
+            }
+            if (s.reconnect_due && s.reconnect_generation == s.operation_generation &&
+                s.status.state == RK_BLE_HID_HOST_STATE_READY) {
+                const int32_t d = (int32_t)(s.reconnect_due - now);
+                if (d <= 0) wait = 1; else if ((TickType_t)d < wait) wait = (TickType_t)d;
+            }
+            if (s.start_retry_due && s.status.state == RK_BLE_HID_HOST_STATE_ERROR) {
+                const int32_t d = (int32_t)(s.start_retry_due - now);
+                if (d <= 0) wait = 1; else if ((TickType_t)d < wait) wait = (TickType_t)d;
+            }
+        }
+        if (wait < 1) wait = 1;
+        (void)ulTaskNotifyTake(pdTRUE, wait);
     }
 }
 
 static rk_ble_hid_host_result_t enqueue_command(const command_t *command) {
     if (!s.owner_task) return RK_BLE_HID_HOST_ERR_INVALID_STATE;
-    return xQueueSend(s.commands, command, 0) == pdPASS ? RK_BLE_HID_HOST_OK : RK_BLE_HID_HOST_ERR_QUEUE_FULL;
+    if (xQueueSend(s.commands, command, 0) != pdPASS) return RK_BLE_HID_HOST_ERR_QUEUE_FULL;
+    wake_owner();
+    return RK_BLE_HID_HOST_OK;
 }
 
 rk_ble_hid_host_result_t rk_ble_hid_host_init(const rk_ble_hid_host_config_t *config) {

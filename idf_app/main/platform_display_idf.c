@@ -320,6 +320,7 @@ static void lvgl_rounder_cb(lv_event_t *e) {
 
     perf_count(PERF_LV_INVALIDATE);
     perf_add(PERF_ACC_INVALID_PX, (uint32_t)(lv_area_get_width(area) * lv_area_get_height(area)));
+    perf_trace_invalidate(area->x1, area->y1, area->x2, area->y2);
 }
 
 #if CONFIG_RK_PERF_LOG
@@ -716,6 +717,18 @@ bool platform_display_init(void) {
     ESP_ERROR_CHECK(esp_lcd_new_panel_sh8601(s_io_handle, &panel_config, &s_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel_handle));
+
+    // ESP-IDF floats every GPIO on each automatic light sleep (CONFIG_PM_SLP_DISABLE_GPIO, forced on
+    // by the GPIO reset workaround). A floating QSPI CS/clock/data line makes the SH8601 decode
+    // garbage as commands and pixels, so the screen wakes up as noise. Keep the panel's own pins,
+    // its reset line and the backlight driven through light sleep.
+    static const gpio_num_t keep_in_sleep[] = {
+        PIN_NUM_LCD_CS, PIN_NUM_LCD_PCLK, PIN_NUM_LCD_DATA0, PIN_NUM_LCD_DATA1,
+        PIN_NUM_LCD_DATA2, PIN_NUM_LCD_DATA3, PIN_NUM_LCD_RST, PIN_NUM_BK_LIGHT,
+    };
+    for (size_t i = 0; i < sizeof(keep_in_sleep) / sizeof(keep_in_sleep[0]); i++) {
+        gpio_sleep_sel_dis(keep_in_sleep[i]);
+    }
 
     // Initialize I2C bus and touch controller
     ESP_LOGI(TAG, "Initializing I2C bus");
