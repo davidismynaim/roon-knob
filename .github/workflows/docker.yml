@@ -269,6 +269,26 @@ jobs:
             common/track_title_filter.c \
             -o /tmp/test-track-title-filter
           /tmp/test-track-title-filter
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -Icommon \
+            tests/test_json_string.c \
+            common/json_string.c \
+            -o /tmp/test-json-string
+          /tmp/test-json-string
+          cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pthread \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -Iinclude \
+            tests/test_os_event.c \
+            -o /tmp/test-os-event
+          /tmp/test-os-event
+          cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pthread \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -Iinclude -Icommon \
+            tests/test_platform_task_wake_hook.c \
+            common/platform/platform_task.c \
+            -o /tmp/test-platform-task-wake-hook
+          /tmp/test-platform-task-wake-hook
           cc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
             -fsanitize=address,undefined -fno-omit-frame-pointer \
             -Icommon -Iinclude \
