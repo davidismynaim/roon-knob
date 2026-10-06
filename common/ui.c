@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -17,6 +18,7 @@
 #include "bridge_client.h"
 #include "ha_volume_client.h"
 #include "ha_mute_client.h"
+#include "ha_firetv_client.h"
 #include "vinyl_client.h"
 #include "voice_client.h"
 #include "track_title_filter.h"
@@ -198,9 +200,37 @@ static lv_obj_t *s_tv_vinyl_bg;             // Background photo (see tv_backgrou
 static lv_obj_t *s_tv_vinyl_container;      // Everything else: labels, gesture regions
 static lv_obj_t *s_tv_vinyl_volume_label;   // Hero volume number - 2x xlarge, no halo
 static lv_obj_t *s_tv_vinyl_db_label;       // dB-equivalent, above the hero number - 2x font_small, no halo
-static lv_obj_t *s_tv_mic_btn;              // TV screen's only button: single tap starts voice listening
-static lv_obj_t *s_tv_mic_icon;             // Always a mic (no play/pause concept on this screen) - red while active
+static lv_obj_t *s_tv_center_btn;           // TV screen's central button: tap = OK/select, long-press = voice (dial#54/#55)
+static lv_obj_t *s_tv_center_icon;          // Checkmark (OK) normally, red mic while voice is active - same convention as s_play_icon
 static lv_obj_t *s_tv_vinyl_volume_group;   // dB label + hero number, one block - repositioned per apply_current_screen()
+// Directional ring around s_tv_center_btn (dial#55) - UP/DOWN/LEFT/RIGHT,
+// same function as the X2's physical D-pad. Array + enum instead of 4
+// named statics since all 4 are symmetric (same size/style/show-hide
+// logic, only position and the HA command they send differ).
+typedef enum {
+    TV_DIR_UP = 0,
+    TV_DIR_DOWN,
+    TV_DIR_LEFT,
+    TV_DIR_RIGHT,
+    TV_DIR_COUNT,
+} tv_dir_t;
+static lv_obj_t *s_tv_dir_btns[TV_DIR_COUNT];
+// Tap command for each direction - file scope (not local to
+// build_tv_vinyl_layout) so the event callbacks below can look it up by
+// index too.
+static const char *const s_tv_dir_tap_command[TV_DIR_COUNT] = {
+    [TV_DIR_UP] = "UP",
+    [TV_DIR_DOWN] = "DOWN",
+    [TV_DIR_LEFT] = "LEFT",
+    [TV_DIR_RIGHT] = "RIGHT",
+};
+// Set by btn_tv_dir_long_press_cb, consumed by btn_tv_dir_event_cb: LVGL
+// fires LV_EVENT_CLICKED on *every* release regardless of whether a long
+// press already fired during that same hold (its own docs: "Called on
+// release if not scrolled (regardless to long press)") - without this,
+// releasing after a long-press on any of these 4 buttons also fired the
+// plain tap command a second time (owner-caught bug).
+static bool s_tv_dir_long_press_fired[TV_DIR_COUNT];
 typedef enum {
     DIAL_SCREEN_MUSIC = 0,
     DIAL_SCREEN_TV,
@@ -386,8 +416,12 @@ static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
 static void btn_play_long_press_cb(lv_event_t *e);
 static void refresh_play_icon(void);
-static void btn_tv_mic_event_cb(lv_event_t *e);
-static void refresh_tv_mic_icon(void);
+static void btn_tv_center_tap_cb(lv_event_t *e);
+static void btn_tv_center_long_press_cb(lv_event_t *e);
+static void refresh_tv_center_icon(void);
+static void btn_tv_dir_event_cb(lv_event_t *e);
+static void btn_tv_dir_long_press_cb(lv_event_t *e);
+static void btn_tv_dir_long_press_repeat_cb(lv_event_t *e);
 static void btn_next_event_cb(lv_event_t *e);
 static void zone_list_item_event_cb(lv_event_t *e);
 static void show_status_message(const char *message);
@@ -1908,7 +1942,7 @@ static void build_tv_vinyl_layout(void) {
     // and the dB label above it pushed the combined block off-center).
     // Default position here is dead center - the Vinyl screen's own look,
     // unchanged. apply_current_screen() nudges it up when TV is active, to
-    // clear the mic button below (see s_tv_mic_btn's own comment).
+    // clear the center button below (see s_tv_center_btn's own comment).
     s_tv_vinyl_volume_group = lv_obj_create(s_tv_vinyl_container);
     lv_obj_t *volume_group = s_tv_vinyl_volume_group;
     lv_obj_set_size(volume_group, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -1937,47 +1971,123 @@ static void build_tv_vinyl_layout(void) {
     lv_obj_set_style_text_color(s_tv_vinyl_volume_label, lv_color_hex(0xfafafa), 0);
     lv_label_set_text(s_tv_vinyl_volume_label, "--");
 
-    // TV screen's central button. Long-press invokes voice (same
-    // long-press-for-mic convention as Music's center play button, see
-    // btn_play_long_press_cb) - short tap is deliberately unbound for now,
-    // reserved for the upcoming OK/select action (dial#55) once the TV
-    // screen grows a directional pad around this same button. Created
-    // last so it draws above mute_region/source_region and wins first
-    // claim on presses within its own bounds, same reasoning as those two
-    // regions' own comment above - the rest of the top-two-thirds mute
-    // zone and the bottom-third source zone are untouched. Same size/
-    // style/position as Music's center play button (TRANSPORT_BTN_SIZE,
-    // style_button_primary, dead center) so it reads as the same kind of
-    // control. Hidden by default - apply_current_screen() shows it only
-    // for DIAL_SCREEN_TV, not the static Vinyl screen this container is
-    // also used for.
-#define TV_MIC_BTN_SIZE 88
-    s_tv_mic_btn = lv_btn_create(s_tv_vinyl_container);
-    lv_obj_set_size(s_tv_mic_btn, TV_MIC_BTN_SIZE, TV_MIC_BTN_SIZE);
-    lv_obj_add_style(s_tv_mic_btn, &style_button_primary, 0);
-    lv_obj_add_event_cb(s_tv_mic_btn, btn_tv_mic_event_cb, LV_EVENT_LONG_PRESSED, NULL);
-    lv_obj_align(s_tv_mic_btn, LV_ALIGN_CENTER, 0, 0);
+    // TV screen's central button: tap sends the X2's OK/Enter function
+    // (ha_firetv_client_send("OK"), dial#54/#55), long-press invokes voice
+    // (same long-press-for-mic convention as Music's center play button,
+    // see btn_play_long_press_cb). Created last so it draws above
+    // mute_region/source_region and wins first claim on presses within
+    // its own bounds, same reasoning as those two regions' own comment
+    // above - the rest of the top-two-thirds mute zone and the
+    // bottom-third source zone are untouched. Same size/style/position as
+    // Music's center play button (TRANSPORT_BTN_SIZE, style_button_primary,
+    // dead center) so it reads as the same kind of control. Hidden by
+    // default - apply_current_screen() shows it only for DIAL_SCREEN_TV,
+    // not the static Vinyl screen this container is also used for.
+#define TV_CENTER_BTN_SIZE 88
+    s_tv_center_btn = lv_btn_create(s_tv_vinyl_container);
+    lv_obj_set_size(s_tv_center_btn, TV_CENTER_BTN_SIZE, TV_CENTER_BTN_SIZE);
+    lv_obj_add_style(s_tv_center_btn, &style_button_primary, 0);
+    lv_obj_add_event_cb(s_tv_center_btn, btn_tv_center_tap_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_tv_center_btn, btn_tv_center_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_align(s_tv_center_btn, LV_ALIGN_CENTER, 0, 0);
     // Same semi-transparent treatment as Music's own transport buttons
     // (style_button_primary alone is fully opaque) - owner feedback: it
     // sits over the volume readout, so the numerals need to show through.
-    lv_obj_set_style_bg_color(s_tv_mic_btn, lv_color_hex(0x000000), LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(s_tv_mic_btn, LV_OPA_60, LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(s_tv_mic_btn, lv_color_hex(0x3c3c3c), LV_STATE_PRESSED);
-    lv_obj_set_style_border_color(s_tv_mic_btn, lv_color_hex(0x5a9fd4), LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(s_tv_mic_btn, lv_color_hex(0x7bb9e8), LV_STATE_PRESSED);
-    lv_obj_add_flag(s_tv_mic_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_color(s_tv_center_btn, lv_color_hex(0x000000), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(s_tv_center_btn, LV_OPA_60, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(s_tv_center_btn, lv_color_hex(0x3c3c3c), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(s_tv_center_btn, lv_color_hex(0x5a9fd4), LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(s_tv_center_btn, lv_color_hex(0x7bb9e8), LV_STATE_PRESSED);
+    lv_obj_add_flag(s_tv_center_btn, LV_OBJ_FLAG_HIDDEN);
 
-    s_tv_mic_icon = lv_label_create(s_tv_mic_btn);
+    s_tv_center_icon = lv_label_create(s_tv_center_btn);
 #if !TARGET_PC
-    lv_label_set_text(s_tv_mic_icon, ICON_MIC);
-    lv_obj_set_style_text_font(s_tv_mic_icon, font_icon_normal(), 0);
+    lv_label_set_text(s_tv_center_icon, ICON_CHECK);
+    lv_obj_set_style_text_font(s_tv_center_icon, font_icon_normal(), 0);
 #else
-    lv_label_set_text(s_tv_mic_icon, LV_SYMBOL_AUDIO);
-    lv_obj_set_style_text_font(s_tv_mic_icon, &lv_font_montserrat_28, 0);
+    lv_label_set_text(s_tv_center_icon, LV_SYMBOL_OK);
+    lv_obj_set_style_text_font(s_tv_center_icon, &lv_font_montserrat_28, 0);
 #endif
-    lv_obj_add_style(s_tv_mic_icon, &style_button_label, 0);
-    lv_obj_center(s_tv_mic_icon);
-#undef TV_MIC_BTN_SIZE
+    lv_obj_add_style(s_tv_center_icon, &style_button_label, 0);
+    lv_obj_center(s_tv_center_icon);
+#undef TV_CENTER_BTN_SIZE
+
+    // Directional ring (dial#55): 4 triangle markers at the compass points
+    // around the central button, same function as the X2's physical
+    // D-pad (ha_firetv_client_send("UP"/"DOWN"/"LEFT"/"RIGHT")).
+    // keyboard_arrow_* glyphs read as solid "little triangles" pointing in
+    // their direction (owner spec), unlike chevron_left/right used
+    // elsewhere in this file, which are outline brackets. Same size as
+    // the central button (owner feedback - initially smaller, didn't
+    // read as the same kind of control). Radius picked so the markers
+    // clear the central button's own 44px half-size with a visible gap,
+    // and stay inside the 180px screen half-size for the round bezel: 44
+    // (center btn) + 20 (gap) + 44 (half of this now-88px marker) = 108.
+    //
+    // Each sits inside mute_region (top two-thirds) or source_region
+    // (bottom third) underneath - created later, same as the central
+    // button, so it wins first claim on any press in its own bounds,
+    // including long-press. UP/DOWN have nothing of their own to do on
+    // long-press, so they forward to whichever region they physically sit
+    // over (btn_tv_dir_long_press_cb below) - otherwise a long-press here
+    // would be silently swallowed instead of still muting/opening the
+    // source picker (owner feedback: this must keep working everywhere in
+    // that zone, not just outside these buttons). LEFT/RIGHT are the
+    // exception: their long-press is repurposed for Fire TV's seek/scrub
+    // mode (owner spec - "std feature on firestick"), not muting - since
+    // they already win first claim on any press in their bounds, this
+    // also means mute is *never* reachable through them (not a dead zone
+    // carved out of mute_region's geometry, just this button's own choice
+    // of what to do with a press it already owns), fulfilling the "avoid
+    // those areas firing mute" ask without having to touch mute_region at
+    // all. LEFT/RIGHT also get LV_EVENT_LONG_PRESSED_REPEAT, so holding
+    // scrubs continuously instead of nudging once per press.
+#define TV_DIR_BTN_SIZE 88
+#define TV_DIR_BTN_RADIUS 108
+    static const struct {
+        const char *icon;
+        const char *pc_symbol;
+        int dx, dy;
+    } dir_specs[TV_DIR_COUNT] = {
+        [TV_DIR_UP] = {ICON_ARROW_UP, LV_SYMBOL_UP, 0, -TV_DIR_BTN_RADIUS},
+        [TV_DIR_DOWN] = {ICON_ARROW_DOWN, LV_SYMBOL_DOWN, 0, TV_DIR_BTN_RADIUS},
+        [TV_DIR_LEFT] = {ICON_ARROW_LEFT, LV_SYMBOL_LEFT, -TV_DIR_BTN_RADIUS, 0},
+        [TV_DIR_RIGHT] = {ICON_ARROW_RIGHT, LV_SYMBOL_RIGHT, TV_DIR_BTN_RADIUS, 0},
+    };
+    for (int i = 0; i < TV_DIR_COUNT; i++) {
+        lv_obj_t *btn = lv_btn_create(s_tv_vinyl_container);
+        s_tv_dir_btns[i] = btn;
+        lv_obj_set_size(btn, TV_DIR_BTN_SIZE, TV_DIR_BTN_SIZE);
+        lv_obj_add_style(btn, &style_button_primary, 0);
+        lv_obj_align(btn, LV_ALIGN_CENTER, dir_specs[i].dx, dir_specs[i].dy);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x000000), LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_40, LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x3c3c3c), LV_STATE_PRESSED);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x5a9fd4), LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x7bb9e8), LV_STATE_PRESSED);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_event_cb(btn, btn_tv_dir_event_cb, LV_EVENT_CLICKED,
+                             (void *)(intptr_t)i);
+        lv_obj_add_event_cb(btn, btn_tv_dir_long_press_cb,
+                             LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);
+        if (i == TV_DIR_LEFT || i == TV_DIR_RIGHT) {
+            lv_obj_add_event_cb(btn, btn_tv_dir_long_press_repeat_cb,
+                                 LV_EVENT_LONG_PRESSED_REPEAT, (void *)(intptr_t)i);
+        }
+
+        lv_obj_t *icon = lv_label_create(btn);
+#if !TARGET_PC
+        lv_label_set_text(icon, dir_specs[i].icon);
+        lv_obj_set_style_text_font(icon, font_icon_normal(), 0);
+#else
+        lv_label_set_text(icon, dir_specs[i].pc_symbol);
+        lv_obj_set_style_text_font(icon, &lv_font_montserrat_28, 0);
+#endif
+        lv_obj_add_style(icon, &style_button_label, 0);
+        lv_obj_center(icon);
+    }
+#undef TV_DIR_BTN_SIZE
+#undef TV_DIR_BTN_RADIUS
 }
 
 // Full-screen mute state (owner direction: same slice as TV/Vinyl, shown
@@ -2089,27 +2199,32 @@ static void refresh_play_icon(void) {
 #endif
 }
 
-// Always a mic (TV has no play/pause concept to also represent) - just the
-// color toggles, same red as refresh_play_icon()'s. PC target shows a
-// static icon, matching refresh_play_icon()'s own PC simplification of not
-// reflecting voice-active state there.
-static void refresh_tv_mic_icon(void) {
-    if (!s_tv_mic_icon) {
+// Checkmark (OK) normally - this button's short-tap action - swapping to
+// a red mic while voice is active, exactly the same convention as
+// refresh_play_icon() above (that function's own comment explains why: a
+// permanent mic glyph would misrepresent the tap action, which is OK/
+// select, not voice - voice is the hidden long-press, same as Music's
+// play button). PC target shows a static icon, matching refresh_play_icon()'s
+// own PC simplification of not reflecting voice-active state there.
+static void refresh_tv_center_icon(void) {
+    if (!s_tv_center_icon) {
         return;
     }
 #if !TARGET_PC
     if (s_voice_active) {
-        lv_obj_set_style_text_color(s_tv_mic_icon, lv_color_hex(0xff3b30), 0);
-    } else {
-        lv_obj_remove_local_style_prop(s_tv_mic_icon, LV_STYLE_TEXT_COLOR, 0);
+        lv_label_set_text(s_tv_center_icon, ICON_MIC);
+        lv_obj_set_style_text_color(s_tv_center_icon, lv_color_hex(0xff3b30), 0);
+        return;
     }
+    lv_obj_remove_local_style_prop(s_tv_center_icon, LV_STYLE_TEXT_COLOR, 0);
+    lv_label_set_text(s_tv_center_icon, ICON_CHECK);
 #endif
 }
 
 void ui_set_voice_active(bool active) {
     s_voice_active = active;
     refresh_play_icon();
-    refresh_tv_mic_icon();
+    refresh_tv_center_icon();
     apply_vinyl_transport();
 }
 
@@ -2123,15 +2238,114 @@ static void btn_play_long_press_cb(lv_event_t *e) {
     }
 }
 
-static void btn_tv_mic_event_cb(lv_event_t *e) {
+// Set by btn_tv_center_long_press_cb, consumed by btn_tv_center_tap_cb -
+// same LVGL CLICKED-fires-on-every-release quirk as s_tv_dir_long_press_fired
+// above, just for this one button.
+static bool s_tv_center_long_press_fired;
+
+static void btn_tv_center_tap_cb(lv_event_t *e) {
     (void)e;
-    // Long-press only (see the button's own creation comment) - a short
-    // tap here is unbound for now, reserved for the upcoming OK/select
-    // action (dial#55).
+    if (s_tv_center_long_press_fired) {
+        s_tv_center_long_press_fired = false;
+        return;
+    }
+    // Short tap: OK/select, same as the X2's physical Enter button
+    // (dial#54/#55). Haptic fires immediately, before the HA call, same
+    // convention as btn_prev/next_event_cb - ha_firetv_client_send blocks
+    // on a network round trip, so gating the pulse on its result (as this
+    // first read) made the buzz noticeably trail the on-screen press
+    // (owner feedback).
+#if !TARGET_PC
+    haptic_driver_pulse();
+#endif
+    (void)ha_firetv_client_send("OK");
+}
+
+static void btn_tv_center_long_press_cb(lv_event_t *e) {
+    (void)e;
+    s_tv_center_long_press_fired = true;
+    // Long-press: voice, same convention as Music's center play button
+    // (btn_play_long_press_cb) - does nothing if HA isn't configured or a
+    // voice interaction is already showing.
     if (voice_client_request_listen()) {
 #if !TARGET_PC
         haptic_driver_pulse();
 #endif
+    }
+}
+
+static void btn_tv_dir_event_cb(lv_event_t *e) {
+    // user_data is the tv_dir_t index set at creation (build_tv_vinyl_layout's
+    // loop) - one callback for all 4 directions rather than 4 near-identical
+    // ones.
+    tv_dir_t dir = (tv_dir_t)(intptr_t)lv_event_get_user_data(e);
+    if (dir < 0 || dir >= TV_DIR_COUNT) {
+        return;
+    }
+    if (s_tv_dir_long_press_fired[dir]) {
+        // This release follows a long-press that already did its own
+        // thing (mute/source-picker/seek-hold below) - see
+        // s_tv_dir_long_press_fired's own comment for why this guard is
+        // needed at all.
+        s_tv_dir_long_press_fired[dir] = false;
+        return;
+    }
+    // Haptic before the HA call, same reasoning as btn_tv_center_tap_cb's
+    // own comment (ha_firetv_client_send blocks on a network round trip).
+#if !TARGET_PC
+    haptic_driver_pulse();
+#endif
+    (void)ha_firetv_client_send(s_tv_dir_tap_command[dir]);
+}
+
+static void btn_tv_dir_long_press_cb(lv_event_t *e) {
+    tv_dir_t dir = (tv_dir_t)(intptr_t)lv_event_get_user_data(e);
+    if (dir < 0 || dir >= TV_DIR_COUNT) {
+        return;
+    }
+    s_tv_dir_long_press_fired[dir] = true;
+    // UP/DOWN forward to whichever region (mute/source) they physically
+    // sit over - both callbacks already ignore their event argument, safe
+    // to call directly. LEFT/RIGHT are repurposed for Fire TV's seek/
+    // scrub mode instead (owner spec) - see this button's own creation
+    // comment in build_tv_vinyl_layout for why that doesn't need any
+    // change to mute_region/source_region themselves.
+    switch (dir) {
+    case TV_DIR_UP:
+        mute_region_long_press_cb(e);
+        break;
+    case TV_DIR_DOWN:
+        source_region_long_press_cb(e);
+        break;
+    case TV_DIR_LEFT:
+#if !TARGET_PC
+        haptic_driver_pulse();
+#endif
+        (void)ha_firetv_client_send("LEFT_HOLD");
+        break;
+    case TV_DIR_RIGHT:
+#if !TARGET_PC
+        haptic_driver_pulse();
+#endif
+        (void)ha_firetv_client_send("RIGHT_HOLD");
+        break;
+    default:
+        break;
+    }
+}
+
+static void btn_tv_dir_long_press_repeat_cb(lv_event_t *e) {
+    // LEFT/RIGHT only (see build_tv_vinyl_layout's registration) - resends
+    // the seek-hold command every LVGL long-press-repeat tick so holding
+    // the button scrubs continuously instead of nudging once. No haptic
+    // here (btn_tv_dir_long_press_cb already pulsed once on the initial
+    // long-press) - a pulse every repeat tick would just buzz the whole
+    // time it's held.
+    tv_dir_t dir = (tv_dir_t)(intptr_t)lv_event_get_user_data(e);
+    if (dir == TV_DIR_LEFT) {
+        (void)ha_firetv_client_send("LEFT_HOLD");
+    } else if (dir == TV_DIR_RIGHT) {
+        (void)ha_firetv_client_send("RIGHT_HOLD");
     }
 }
 
@@ -2576,19 +2790,30 @@ static void apply_current_screen(void) {
 #endif
         }
     }
-    // Mic button: TV only, not the static Vinyl screen this container is
-    // also used for - Vinyl's look stays exactly as it was. Volume readout
-    // moves up to clear it on TV, same dead-center spot as before on Vinyl.
-    if (s_tv_mic_btn) {
+    // Central button + directional ring: TV only, not the static Vinyl
+    // screen this container is also used for - Vinyl's look stays exactly
+    // as it was. Volume readout moves up to clear the central button on
+    // TV, same dead-center spot as before on Vinyl.
+    if (s_tv_center_btn) {
         if (tv) {
-            lv_obj_remove_flag(s_tv_mic_btn, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_tv_center_btn, LV_OBJ_FLAG_HIDDEN);
         } else {
-            lv_obj_add_flag(s_tv_mic_btn, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_tv_center_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    for (int i = 0; i < TV_DIR_COUNT; i++) {
+        if (!s_tv_dir_btns[i]) {
+            continue;
+        }
+        if (tv) {
+            lv_obj_remove_flag(s_tv_dir_btns[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_tv_dir_btns[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
     if (s_tv_vinyl_volume_group) {
         if (tv) {
-            // 44px (half of the 88px mic button) + a 30px/3mm gap, same
+            // 44px (half of the 88px center button) + a 30px/3mm gap, same
             // convention as Music's own volume-above-transport spacing -
             // a starting point, may want visual tuning once flashed.
             lv_obj_align(s_tv_vinyl_volume_group, LV_ALIGN_CENTER, 0, -74);
