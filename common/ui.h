@@ -97,6 +97,20 @@ void ui_show_track_feedback(bool next);
 // indicators for no reason. See platform_display_idf.c's swipe handling.
 bool ui_is_music_screen(void);
 
+// True only on the TV screen (not Music or the static Vinyl screen) -
+// gates the Fire TV swipe gestures (Home/Menu/Back, streaming-mode
+// switch) added for dial#56, same role as ui_is_music_screen above plays
+// for the Music-only swipe set.
+bool ui_is_tv_screen(void);
+
+// Streaming-platforms screen (dial#55-57): a placeholder overlay for now
+// (dial#57 fills in the real content - 4 perimeter app buttons, rotary
+// repurposed for fast-forward/rewind) entered via swipe-down from the TV
+// screen and exited via swipe-up, both handled in
+// platform_display_idf.c's swipe gesture code - same "platform decides
+// when, ui.c just shows/hides" split as ui_set_detail_mode above.
+void ui_set_tv_streaming_mode(bool active);
+
 // Detail screen's seek-jog: called with the raw accelerated encoder tick
 // delta while CONTROLLER_INTERACTION_CONTEXT_SEEK is active (see
 // controller_presentation_seek_adjust). Updates a local preview only (arc

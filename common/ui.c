@@ -245,6 +245,16 @@ static dial_screen_t s_current_screen = DIAL_SCREEN_MUSIC;
 static lv_obj_t *s_mute_overlay;
 static bool s_mute_overlay_visible = false;  // Avoid redundant show/hide calls every poll cycle
 
+// Streaming-platforms screen (dial#55-57) - placeholder content only for
+// now (dial#57 replaces s_tv_streaming_label with the real 4 perimeter
+// app buttons and repurposes the rotary encoder while this is up).
+// Entered/exited by platform_display_idf.c's swipe-down/up handling on
+// the TV screen (dial#56), same "platform decides when, ui.c just
+// shows/hides" split as the detail screen below. Full-screen child of
+// s_artwork_container, same reasoning as s_mute_overlay above.
+static lv_obj_t *s_tv_streaming_overlay;
+static lv_obj_t *s_tv_streaming_label;
+
 // Detail info screen (build_detail_overlay) - a third content state, entered
 // by a second swipe-down while controls are already showing, exited by
 // swiping up. Full-screen child of s_artwork_container (same parent mute
@@ -402,6 +412,7 @@ static inline const lv_font_t *font_large_icon(void) { return &lv_font_montserra
 static void apply_state(const struct ui_state *state);
 static void build_layout(void);
 static void build_detail_overlay(void);
+static void build_tv_streaming_overlay(void);
 static void poll_pending(lv_timer_t *timer);
 static void set_status_dot(bool online);
 static void mute_region_long_press_cb(lv_event_t *e);
@@ -1475,6 +1486,7 @@ static void build_layout(void) {
 
     build_mute_overlay();
     build_detail_overlay();
+    build_tv_streaming_overlay();
     build_playback_icon_overlay();
 }
 
@@ -2129,6 +2141,30 @@ static void build_mute_overlay(void) {
     lv_obj_set_style_text_color(icon, lv_color_hex(0xff3333), 0);
     lv_obj_center(icon);  // True center - owner feedback: was offset high, and "MUTED" text (removed) isn't needed
 #endif
+}
+
+// Streaming-platforms screen (dial#56) - placeholder only, see this
+// overlay's own declaration comment above for what dial#57 replaces here.
+// CLICKABLE for the same reason as s_mute_overlay: without it, a tap
+// landing in this screen's bounds would fall through to the TV screen's
+// own center/directional buttons underneath, firing an unintended Fire
+// TV command while supposedly on a different screen.
+static void build_tv_streaming_overlay(void) {
+    s_tv_streaming_overlay = lv_obj_create(s_artwork_container);
+    lv_obj_set_size(s_tv_streaming_overlay, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_center(s_tv_streaming_overlay);
+    lv_obj_set_style_bg_color(s_tv_streaming_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_tv_streaming_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_tv_streaming_overlay, 0, 0);
+    lv_obj_set_style_radius(s_tv_streaming_overlay, 0, 0);
+    lv_obj_add_flag(s_tv_streaming_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_tv_streaming_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    s_tv_streaming_label = lv_label_create(s_tv_streaming_overlay);
+    lv_label_set_text(s_tv_streaming_label, "Streaming");
+    lv_obj_set_style_text_font(s_tv_streaming_label, font_large(), 0);
+    lv_obj_set_style_text_color(s_tv_streaming_label, lv_color_hex(0xfafafa), 0);
+    lv_obj_center(s_tv_streaming_label);
 }
 
 // ============================================================================
@@ -2811,6 +2847,15 @@ static void apply_current_screen(void) {
             lv_obj_add_flag(s_tv_dir_btns[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
+    // Force the streaming-platforms screen closed if the input source
+    // changes away from TV while it's up (dial picker, HA, voice - any
+    // path other than the TV screen's own swipe-up) - otherwise it would
+    // stay on top of whichever screen just became active underneath, with
+    // no swipe gesture able to reach it any more (platform_display_idf.c's
+    // swipe handling for it is itself gated on being on the TV screen).
+    if (!tv) {
+        ui_set_tv_streaming_mode(false);
+    }
     if (s_tv_vinyl_volume_group) {
         if (tv) {
             // 44px (half of the 88px center button) + a 30px/3mm gap, same
@@ -2840,6 +2885,21 @@ static void apply_current_screen(void) {
 
 bool ui_is_music_screen(void) {
     return s_current_screen == DIAL_SCREEN_MUSIC;
+}
+
+bool ui_is_tv_screen(void) {
+    return s_current_screen == DIAL_SCREEN_TV;
+}
+
+void ui_set_tv_streaming_mode(bool active) {
+    if (!s_tv_streaming_overlay) {
+        return;
+    }
+    if (active) {
+        lv_obj_remove_flag(s_tv_streaming_overlay, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_tv_streaming_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 // Shows/hides the full-screen mute state based on the polled
