@@ -48,6 +48,7 @@ set(SRC_FILES
     "../../common/ha_volume_client.c"
     "../../common/ha_source_client.c"
     "../../common/ha_mute_client.c"
+    "../../common/ha_firetv_client.c"
     "../../common/source_picker_client.c"
     "../../common/vinyl_client.c"
     "../../common/voice_client.c"

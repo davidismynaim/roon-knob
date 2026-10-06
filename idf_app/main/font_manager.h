@@ -87,3 +87,12 @@ const lv_font_t *font_manager_get_lucide_battery(void);
 // Navigation
 #define ICON_ARROW_BACK     "\xEE\x97\x84"  // U+E5C4
 #define ICON_CHEVRON_LEFT   "\xEE\x97\x8B"  // U+E5CB
+
+// Dial-driven Fire TV directional ring (roon-knob dial#55) - keyboard_arrow_*,
+// a consistent 4-glyph family (unlike chevron_left/right above, which are
+// outline brackets, not the solid "little triangle" markers the owner
+// asked for).
+#define ICON_ARROW_UP       "\xEE\x8C\x96"  // U+E316 (keyboard_arrow_up)
+#define ICON_ARROW_DOWN     "\xEE\x8C\x93"  // U+E313 (keyboard_arrow_down)
+#define ICON_ARROW_LEFT     "\xEE\x8C\x94"  // U+E314 (keyboard_arrow_left)
+#define ICON_ARROW_RIGHT    "\xEE\x8C\x95"  // U+E315 (keyboard_arrow_right)
