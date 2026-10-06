@@ -4,6 +4,7 @@
 #include "bridge_client.h"
 #include "battery.h"
 #include "controller_input.h"
+#include "ha_firetv_client.h"
 #include "haptic_driver.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"
@@ -83,6 +84,23 @@ static volatile bool s_pending_exit_detail_mode = false;
 // LVGL widget changes these flags defer).
 static volatile bool s_pending_detail_pause = false;
 static volatile bool s_pending_detail_play = false;
+// TV screen swipe gestures (dial#56) - Home/Menu/Back are plain
+// fire-and-forget HA calls, deferred the same way as everything else
+// here because ha_firetv_client_send() blocks on a network round trip;
+// firing it straight from this touch callback would stall the next
+// indev read for however long that takes. s_tv_streaming_mode_active
+// mirrors s_detail_mode_active above - tracked locally so this file's
+// own swipe branching knows whether a swipe-up on the TV screen means
+// "Home" or "leave the streaming-platforms screen" (dial#57 owns that
+// screen's real content; the swipe-down/up navigation in and out of it
+// is built here since an entry gesture with no way back isn't something
+// to ship on its own).
+static bool s_tv_streaming_mode_active = false;
+static volatile bool s_pending_tv_home = false;
+static volatile bool s_pending_tv_menu = false;
+static volatile bool s_pending_tv_back = false;
+static volatile bool s_pending_tv_streaming_enter = false;
+static volatile bool s_pending_tv_streaming_exit = false;
 static uint16_t s_current_rotation = 0;  // Track rotation for swipe direction transform
 
 // Double-tap detection for art mode toggle
@@ -648,6 +666,46 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                     }
                 }
             }
+            // TV screen swipe gestures (dial#56) - a separate, mutually
+            // exclusive block from the Music-screen one above rather than
+            // folded into it, same reasoning as that block's own comment:
+            // these mean something different here and shouldn't interact
+            // with art mode/detail-mode state that has no equivalent on
+            // this screen.
+            else if (elapsed < SWIPE_MAX_TIME_MS && ui_is_tv_screen()) {
+                int16_t dx = data->point.x - s_touch_start_x;
+                int16_t dy = data->point.y - s_touch_start_y;
+
+                if (s_current_rotation == 180) {
+                    dy = -dy;
+                    dx = -dx;
+                }
+
+                if (s_tv_streaming_mode_active) {
+                    // Only swipe up means anything here - return to the
+                    // main TV screen (dial#57's own content has no other
+                    // swipe vocabulary defined yet; taps on its perimeter
+                    // buttons are a separate, non-swipe input path).
+                    if (dy < -SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
+                        ESP_LOGI(TAG, "TV streaming screen: swipe up detected - queueing return to TV screen");
+                        s_pending_tv_streaming_exit = true;
+                    }
+                } else if (dy < -SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
+                    ESP_LOGI(TAG, "TV screen: swipe up detected - queueing Home");
+                    s_pending_tv_home = true;
+                } else if (dy > SWIPE_MIN_DISTANCE && abs(dy) > abs(dx)) {
+                    ESP_LOGI(TAG, "TV screen: swipe down detected - queueing streaming screen");
+                    s_pending_tv_streaming_enter = true;
+                } else if (dx > SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
+                    // left-to-right (owner spec) - Menu
+                    ESP_LOGI(TAG, "TV screen: swipe left-to-right detected - queueing Menu");
+                    s_pending_tv_menu = true;
+                } else if (dx < -SWIPE_MIN_DISTANCE && abs(dx) > abs(dy)) {
+                    // right-to-left (owner spec) - Back
+                    ESP_LOGI(TAG, "TV screen: swipe right-to-left detected - queueing Back");
+                    s_pending_tv_back = true;
+                }
+            }
             s_touch_tracking = false;
         }
     }
@@ -930,6 +988,38 @@ void platform_display_process_pending(void) {
             controller_command_make(CONTROLLER_COMMAND_TOGGLE_PLAYBACK));
         (void)controller_input_dispatch_action(&action);
         }
+    }
+    // Process deferred TV screen swipe gestures (dial#56). Haptic fires
+    // here, immediately, rather than being gated on ha_firetv_client_send's
+    // result - same reasoning as common/ui.c's btn_tv_center_tap_cb (that
+    // call blocks on a network round trip; gating the pulse on it made the
+    // buzz noticeably trail the swipe).
+    if (s_pending_tv_home) {
+        s_pending_tv_home = false;
+        haptic_driver_pulse();
+        (void)ha_firetv_client_send("HOME");
+    }
+    if (s_pending_tv_menu) {
+        s_pending_tv_menu = false;
+        haptic_driver_pulse();
+        (void)ha_firetv_client_send("MENU");
+    }
+    if (s_pending_tv_back) {
+        s_pending_tv_back = false;
+        haptic_driver_pulse();
+        (void)ha_firetv_client_send("BACK");
+    }
+    if (s_pending_tv_streaming_enter) {
+        s_pending_tv_streaming_enter = false;
+        s_tv_streaming_mode_active = true;
+        haptic_driver_pulse();
+        ui_set_tv_streaming_mode(true);
+    }
+    if (s_pending_tv_streaming_exit) {
+        s_pending_tv_streaming_exit = false;
+        s_tv_streaming_mode_active = false;
+        haptic_driver_pulse();
+        ui_set_tv_streaming_mode(false);
     }
     // Process deferred timer-triggered state changes
     display_process_pending();
