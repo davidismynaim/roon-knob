@@ -19,6 +19,7 @@
 #include "bridge_client.h"
 #include "controller_action_router.h"
 #include "controller_config.h"
+#include "ha_firetv_client.h"
 #include "ha_mute_client.h"
 #include "controller_view_compat.h"
 #include "vinyl_client.h"
@@ -482,6 +483,35 @@ static void ui_loop_task(void *arg) {
     }
 }
 
+// Rotary-encoder repurposing on the streaming-platforms screen (dial#57):
+// while it's up, clockwise/anticlockwise (positive/negative steps, same
+// sign convention the volume override already uses) scrub the Fire TV
+// forward/back instead of adjusting volume - registered in place of
+// ha_volume_client_adjust below so every other screen's encoder behavior
+// is completely unchanged. Debounced to one ADB call per
+// TV_STREAMING_SEEK_DEBOUNCE_MS: FAST_FORWARD/REWIND are discrete
+// "jump" keyevents in most video apps, not a continuous scrub, so one
+// call per raw tick would flood ADB during a fast spin - the dial#54
+// script's own mode:queued cap was always meant as a backstop for this,
+// not the primary fix.
+#define TV_STREAMING_SEEK_DEBOUNCE_MS 250
+static uint64_t s_last_tv_seek_send_ms;
+
+static bool dial_volume_or_tv_seek(int32_t steps) {
+    if (!ui_is_tv_streaming_mode_active()) {
+        return ha_volume_client_adjust(steps);
+    }
+    if (steps == 0) {
+        return true;
+    }
+    uint64_t now = platform_millis();
+    if (now - s_last_tv_seek_send_ms < TV_STREAMING_SEEK_DEBOUNCE_MS) {
+        return true;  // swallow extra ticks within the debounce window
+    }
+    s_last_tv_seek_send_ms = now;
+    return ha_firetv_client_send(steps > 0 ? "FAST_FORWARD" : "REWIND");
+}
+
 void app_main(void) {
     ESP_LOGI(TAG, "HiPhi Dial starting...");
 
@@ -581,7 +611,7 @@ void app_main(void) {
     // Direct-to-Home-Assistant volume backend (Dial-only; see
     // docs/meta/decisions/2026-09-14_DESIGN_HYBRID_DIAL_UI.md). No-ops if
     // host/token aren't configured yet via the device's config page.
-    controller_action_router_set_volume_override(ha_volume_client_adjust);
+    controller_action_router_set_volume_override(dial_volume_or_tv_seek);
     ha_volume_client_init();
 
     // Fixed Music/TV/Vinyl source picker in place of the dynamic Roon

@@ -88,14 +88,14 @@ static volatile bool s_pending_detail_play = false;
 // fire-and-forget HA calls, deferred the same way as everything else
 // here because ha_firetv_client_send() blocks on a network round trip;
 // firing it straight from this touch callback would stall the next
-// indev read for however long that takes. s_tv_streaming_mode_active
-// mirrors s_detail_mode_active above - tracked locally so this file's
-// own swipe branching knows whether a swipe-up on the TV screen means
-// "Home" or "leave the streaming-platforms screen" (dial#57 owns that
-// screen's real content; the swipe-down/up navigation in and out of it
-// is built here since an entry gesture with no way back isn't something
-// to ship on its own).
-static bool s_tv_streaming_mode_active = false;
+// indev read for however long that takes. Whether a swipe-up on the TV
+// screen means "Home" or "leave the streaming-platforms screen" is
+// decided by ui_is_tv_streaming_mode_active() (common/ui.c) - unlike
+// s_detail_mode_active above, this isn't tracked as a second local copy,
+// since that overlay's own HIDDEN flag is already the real answer and a
+// separate copy here could drift from it (e.g. common/ui.c's
+// apply_current_screen() force-closing the overlay on an input-source
+// change this file wouldn't otherwise know about).
 static volatile bool s_pending_tv_home = false;
 static volatile bool s_pending_tv_menu = false;
 static volatile bool s_pending_tv_back = false;
@@ -681,7 +681,7 @@ static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
                     dx = -dx;
                 }
 
-                if (s_tv_streaming_mode_active) {
+                if (ui_is_tv_streaming_mode_active()) {
                     // Only swipe up means anything here - return to the
                     // main TV screen (dial#57's own content has no other
                     // swipe vocabulary defined yet; taps on its perimeter
@@ -1011,13 +1011,11 @@ void platform_display_process_pending(void) {
     }
     if (s_pending_tv_streaming_enter) {
         s_pending_tv_streaming_enter = false;
-        s_tv_streaming_mode_active = true;
         haptic_driver_pulse();
         ui_set_tv_streaming_mode(true);
     }
     if (s_pending_tv_streaming_exit) {
         s_pending_tv_streaming_exit = false;
-        s_tv_streaming_mode_active = false;
         haptic_driver_pulse();
         ui_set_tv_streaming_mode(false);
     }
