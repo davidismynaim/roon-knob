@@ -198,6 +198,9 @@ static lv_obj_t *s_tv_vinyl_bg;             // Background photo (see tv_backgrou
 static lv_obj_t *s_tv_vinyl_container;      // Everything else: labels, gesture regions
 static lv_obj_t *s_tv_vinyl_volume_label;   // Hero volume number - 2x xlarge, no halo
 static lv_obj_t *s_tv_vinyl_db_label;       // dB-equivalent, above the hero number - 2x font_small, no halo
+static lv_obj_t *s_tv_mic_btn;              // TV screen's only button: single tap starts voice listening
+static lv_obj_t *s_tv_mic_icon;             // Always a mic (no play/pause concept on this screen) - red while active
+static lv_obj_t *s_tv_vinyl_volume_group;   // dB label + hero number, one block - repositioned per apply_current_screen()
 typedef enum {
     DIAL_SCREEN_MUSIC = 0,
     DIAL_SCREEN_TV,
@@ -383,6 +386,8 @@ static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
 static void btn_play_long_press_cb(lv_event_t *e);
 static void refresh_play_icon(void);
+static void btn_tv_mic_event_cb(lv_event_t *e);
+static void refresh_tv_mic_icon(void);
 static void btn_next_event_cb(lv_event_t *e);
 static void zone_list_item_event_cb(lv_event_t *e);
 static void show_status_message(const char *message);
@@ -1901,7 +1906,11 @@ static void build_tv_vinyl_layout(void) {
     // column so the *pair* is centered as one block (owner feedback: with
     // each positioned independently, the hero number alone was centered
     // and the dB label above it pushed the combined block off-center).
-    lv_obj_t *volume_group = lv_obj_create(s_tv_vinyl_container);
+    // Default position here is dead center - the Vinyl screen's own look,
+    // unchanged. apply_current_screen() nudges it up when TV is active, to
+    // clear the mic button below (see s_tv_mic_btn's own comment).
+    s_tv_vinyl_volume_group = lv_obj_create(s_tv_vinyl_container);
+    lv_obj_t *volume_group = s_tv_vinyl_volume_group;
     lv_obj_set_size(volume_group, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(volume_group, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(volume_group, 0, 0);
@@ -1927,6 +1936,48 @@ static void build_tv_vinyl_layout(void) {
     lv_obj_set_style_text_font(s_tv_vinyl_volume_label, font_xxlarge(), 0);
     lv_obj_set_style_text_color(s_tv_vinyl_volume_label, lv_color_hex(0xfafafa), 0);
     lv_label_set_text(s_tv_vinyl_volume_label, "--");
+
+    // TV screen's central button. Long-press invokes voice (same
+    // long-press-for-mic convention as Music's center play button, see
+    // btn_play_long_press_cb) - short tap is deliberately unbound for now,
+    // reserved for the upcoming OK/select action (dial#55) once the TV
+    // screen grows a directional pad around this same button. Created
+    // last so it draws above mute_region/source_region and wins first
+    // claim on presses within its own bounds, same reasoning as those two
+    // regions' own comment above - the rest of the top-two-thirds mute
+    // zone and the bottom-third source zone are untouched. Same size/
+    // style/position as Music's center play button (TRANSPORT_BTN_SIZE,
+    // style_button_primary, dead center) so it reads as the same kind of
+    // control. Hidden by default - apply_current_screen() shows it only
+    // for DIAL_SCREEN_TV, not the static Vinyl screen this container is
+    // also used for.
+#define TV_MIC_BTN_SIZE 88
+    s_tv_mic_btn = lv_btn_create(s_tv_vinyl_container);
+    lv_obj_set_size(s_tv_mic_btn, TV_MIC_BTN_SIZE, TV_MIC_BTN_SIZE);
+    lv_obj_add_style(s_tv_mic_btn, &style_button_primary, 0);
+    lv_obj_add_event_cb(s_tv_mic_btn, btn_tv_mic_event_cb, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_align(s_tv_mic_btn, LV_ALIGN_CENTER, 0, 0);
+    // Same semi-transparent treatment as Music's own transport buttons
+    // (style_button_primary alone is fully opaque) - owner feedback: it
+    // sits over the volume readout, so the numerals need to show through.
+    lv_obj_set_style_bg_color(s_tv_mic_btn, lv_color_hex(0x000000), LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(s_tv_mic_btn, LV_OPA_60, LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(s_tv_mic_btn, lv_color_hex(0x3c3c3c), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(s_tv_mic_btn, lv_color_hex(0x5a9fd4), LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(s_tv_mic_btn, lv_color_hex(0x7bb9e8), LV_STATE_PRESSED);
+    lv_obj_add_flag(s_tv_mic_btn, LV_OBJ_FLAG_HIDDEN);
+
+    s_tv_mic_icon = lv_label_create(s_tv_mic_btn);
+#if !TARGET_PC
+    lv_label_set_text(s_tv_mic_icon, ICON_MIC);
+    lv_obj_set_style_text_font(s_tv_mic_icon, font_icon_normal(), 0);
+#else
+    lv_label_set_text(s_tv_mic_icon, LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_font(s_tv_mic_icon, &lv_font_montserrat_28, 0);
+#endif
+    lv_obj_add_style(s_tv_mic_icon, &style_button_label, 0);
+    lv_obj_center(s_tv_mic_icon);
+#undef TV_MIC_BTN_SIZE
 }
 
 // Full-screen mute state (owner direction: same slice as TV/Vinyl, shown
@@ -2038,15 +2089,45 @@ static void refresh_play_icon(void) {
 #endif
 }
 
+// Always a mic (TV has no play/pause concept to also represent) - just the
+// color toggles, same red as refresh_play_icon()'s. PC target shows a
+// static icon, matching refresh_play_icon()'s own PC simplification of not
+// reflecting voice-active state there.
+static void refresh_tv_mic_icon(void) {
+    if (!s_tv_mic_icon) {
+        return;
+    }
+#if !TARGET_PC
+    if (s_voice_active) {
+        lv_obj_set_style_text_color(s_tv_mic_icon, lv_color_hex(0xff3b30), 0);
+    } else {
+        lv_obj_remove_local_style_prop(s_tv_mic_icon, LV_STYLE_TEXT_COLOR, 0);
+    }
+#endif
+}
+
 void ui_set_voice_active(bool active) {
     s_voice_active = active;
     refresh_play_icon();
+    refresh_tv_mic_icon();
     apply_vinyl_transport();
 }
 
 static void btn_play_long_press_cb(lv_event_t *e) {
     (void)e;
     // Does nothing if HA isn't configured or a voice interaction is already showing.
+    if (voice_client_request_listen()) {
+#if !TARGET_PC
+        haptic_driver_pulse();
+#endif
+    }
+}
+
+static void btn_tv_mic_event_cb(lv_event_t *e) {
+    (void)e;
+    // Long-press only (see the button's own creation comment) - a short
+    // tap here is unbound for now, reserved for the upcoming OK/select
+    // action (dial#55).
     if (voice_client_request_listen()) {
 #if !TARGET_PC
         haptic_driver_pulse();
@@ -2467,6 +2548,7 @@ static void apply_current_screen(void) {
              (int)s_current_screen, (int)new_screen, source, (int)vinyl_client_content_ready());
     s_current_screen = new_screen;
     bool music = (new_screen == DIAL_SCREEN_MUSIC);
+    bool tv = (new_screen == DIAL_SCREEN_TV);
 
     if (s_ui_container) {
         if (music) {
@@ -2492,6 +2574,26 @@ static void apply_current_screen(void) {
                                                  ? &tv_background
                                                  : &vinyl_background);
 #endif
+        }
+    }
+    // Mic button: TV only, not the static Vinyl screen this container is
+    // also used for - Vinyl's look stays exactly as it was. Volume readout
+    // moves up to clear it on TV, same dead-center spot as before on Vinyl.
+    if (s_tv_mic_btn) {
+        if (tv) {
+            lv_obj_remove_flag(s_tv_mic_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_tv_mic_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (s_tv_vinyl_volume_group) {
+        if (tv) {
+            // 44px (half of the 88px mic button) + a 30px/3mm gap, same
+            // convention as Music's own volume-above-transport spacing -
+            // a starting point, may want visual tuning once flashed.
+            lv_obj_align(s_tv_vinyl_volume_group, LV_ALIGN_CENTER, 0, -74);
+        } else {
+            lv_obj_center(s_tv_vinyl_volume_group);
         }
     }
     // The progress arc moved out of s_ui_container (see its own creation
