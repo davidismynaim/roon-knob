@@ -111,6 +111,14 @@ bool ui_is_tv_screen(void);
 // when, ui.c just shows/hides" split as ui_set_detail_mode above.
 void ui_set_tv_streaming_mode(bool active);
 
+// True while the streaming-platforms screen's overlay is actually shown -
+// the single source of truth both platform_display_idf.c's swipe
+// branching and main_idf.c's rotary-encoder repurposing (clockwise =
+// fast-forward, anticlockwise = rewind, dial#57) read, instead of either
+// keeping its own separately-tracked copy that could drift out of sync
+// with what's really on screen.
+bool ui_is_tv_streaming_mode_active(void);
+
 // Detail screen's seek-jog: called with the raw accelerated encoder tick
 // delta while CONTROLLER_INTERACTION_CONTEXT_SEEK is active (see
 // controller_presentation_seek_adjust). Updates a local preview only (arc
