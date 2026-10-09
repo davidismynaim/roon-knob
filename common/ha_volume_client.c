@@ -180,6 +180,43 @@ static int get_cached_position(void) {
     return position;
 }
 
+// Dining's server-side script.venu360_gain_controller (packages/venu360.yaml)
+// halves its step resolution below -30dB (position 60, where dB =
+// position/2 - 60): each individual {"event":"step"} call there moves the
+// position by 2 units (1dB) when the CURRENT position is below 60, by 1
+// unit (0.5dB) at/above it - and treats position 60 itself as the quieter
+// regime only when stepping further down (delta<0), so crossing the
+// boundary downward lands exactly on a whole-dB value, not a half. Real
+// writes already get this right: send_steps() below replays one HTTP call
+// per click against that same script, in order, so it naturally applies
+// whatever increment is correct at each click's own current position.
+// This mirrors that identical per-click, boundary-aware computation here
+// purely for the optimistic local display (see ha_volume_client_adjust):
+// a flat ticks-to-position formula under-predicts the real move whenever
+// any click in the burst falls below -30dB, showing e.g. -42.5dB
+// immediately after 5 quietening clicks from -40dB when the amp will
+// actually land on -45dB (confirmed live 9 October - this is that fix).
+// A loop, not a single formula, because a fast burst can cross the -30dB
+// boundary partway through, changing the increment mid-burst. Clamping
+// per-click (not just once at the end) matches the script's own
+// per-call clamp, so a burst that would overshoot pins at the boundary
+// instead of overshooting and settling back.
+static int dining_step_position(int position, int clicks) {
+    int magnitude = clicks < 0 ? -clicks : clicks;
+    int step_dir = clicks > 0 ? 1 : -1;
+    for (int i = 0; i < magnitude; i++) {
+        int increment =
+            (position < 60 || (position == 60 && step_dir < 0)) ? 2 : 1;
+        position += step_dir * increment;
+        if (position < 0) {
+            position = 0;
+        } else if (position > 120) {
+            position = 120;
+        }
+    }
+    return position;
+}
+
 static void set_cached_source(const char *source) {
     os_mutex_lock(&s_lock);
     bool changed = !s_have_source || strcmp(s_current_source, source) != 0;
@@ -598,8 +635,17 @@ bool ha_volume_client_adjust(int32_t ticks) {
      * tick count (matching the eventual click count 1:1 while
      * HA_VOLUME_TICKS_PER_CLICK stays 1) - only the actual HA call is
      * debounced, so the dial still feels instantly responsive even
-     * though the network write lags slightly behind a fast spin. */
-    int new_position = get_cached_position() + ticks / HA_VOLUME_TICKS_PER_CLICK;
+     * though the network write lags slightly behind a fast spin.
+     * Dining's real step size depends on the current position (see
+     * dining_step_position above) - the flat formula below is only
+     * correct for Lounge's uniform number.hifi_volume range. */
+    int clicks = ticks / HA_VOLUME_TICKS_PER_CLICK;
+    int new_position;
+    if (room_cfg_get_current() == RK_ROOM_DINING) {
+        new_position = dining_step_position(get_cached_position(), clicks);
+    } else {
+        new_position = get_cached_position() + clicks;
+    }
     int max_position = (int)room_volume_max();
     if (new_position < 0) {
         new_position = 0;
