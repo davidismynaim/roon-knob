@@ -129,10 +129,22 @@ static int db_to_position(float db) {
 }
 
 // Lounge's number.hifi_volume is a dB value converted to a 0-255 position
-// (db_to_position above). Dining's sensor.venu360_main_gain_dial_2 is
+// (db_to_position above). Dining's input_number.venu360_target_steps is
 // already the position itself, 0-120 (121 discrete 0.5dB steps over
 // -60..0dB - see script.venu360_gain_controller server-side; the firmware
 // doesn't need to know that mapping, only the position range it reports).
+//
+// Dining polls the REQUESTED position (input_number.venu360_target_steps,
+// the same optimistic value the HA dashboard slider is bound to), not the
+// hardware-confirmed sensor.venu360_main_gain_dial_2 (fixed 9 October): the
+// confirmed sensor only updates after a full write -> amp-settle ->
+// bridge-poll round trip (scan_interval 2s server-side), so turning the
+// encoder a few clicks fast left the dial frozen through the whole burst
+// then jumping once a poll finally caught up, while the dashboard (reading
+// the optimistic value) looked smooth the whole time. Trade-off accepted:
+// the dial can now show a value that gets silently reverted if the amp
+// write fails validation - the exact same trade-off the dashboard already
+// lives with, not a new one introduced here.
 static float room_volume_max(void) {
     return room_cfg_get_current() == RK_ROOM_DINING ? 120.0f : 255.0f;
 }
@@ -216,7 +228,7 @@ static bool poll_once(const rk_ha_cfg_t *cfg) {
     bool dining = room_cfg_get_current() == RK_ROOM_DINING;
     char url[128];
     snprintf(url, sizeof(url), "http://%s/api/states/%s", cfg->host,
-             dining ? "sensor.venu360_main_gain_dial_2" : "number.hifi_volume");
+             dining ? "input_number.venu360_target_steps" : "number.hifi_volume");
 
     char *resp = NULL;
     size_t resp_len = 0;
