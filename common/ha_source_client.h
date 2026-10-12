@@ -20,7 +20,7 @@ extern "C" {
 bool ha_source_client_select(const char *option);
 
 // Powers off the Lounge system by setting select.x2_hub_activity to
-// "Powered Off" directly (roon-knob#63) - a different entity/service than
+// "Powered Off" directly (dial#63) - a different entity/service than
 // ha_source_client_select above, since "Powered Off" isn't a valid
 // input_select.audio_input option at all (see .storage/input_select's own
 // configured options - just Music/TV/Vinyl). Lounge only, same as the

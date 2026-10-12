@@ -43,7 +43,7 @@ TEXT_RANGES="0x20-0x7F,0xA0-0xFF,0x100-0x17F,0x180-0x24F,0x370-0x3FF,0x400-0x4FF
 # - Misc: download f090, refresh e5d5, home e88a, search e8b6
 # - Dial directional ring (dial#55): keyboard_arrow_down e313,
 #   keyboard_arrow_left e314, keyboard_arrow_right e315, keyboard_arrow_up e316
-# - Power (roon-knob#63): power_settings_new e8ac - Activity picker's new
+# - Power (dial#63): power_settings_new e8ac - Activity picker's new
 #   "Power off" entry and its full-screen overlay icon
 ICON_RANGES="0xE000,0xE002,0xE019,0xE029,0xE034,0xE037,0xE044-0xE045,0xE04D-0xE050,0xE1A3,0xE1A7,0xE307,0xE313-0xE316,0xE32D,0xE333,0xE405,0xE5C4,0xE5CA-0xE5CD,0xE5D5,0xE63E,0xE648,0xE88A,0xE88E,0xE8B6,0xE8B8,0xE8AC,0xF090"
 
@@ -156,7 +156,7 @@ done
 # mute redesign: black background, large centered red icon, no text),
 # pause/play/skip_next/skip_previous (transient confirmation overlay,
 # common/ui.c's ui_show_playback_feedback/ui_show_track_feedback), and
-# power_settings_new (roon-knob#63's Power Off overlay - same black
+# power_settings_new (dial#63's Power Off overlay - same black
 # background/large centered red icon treatment as mute).
 echo "Converting large icon font (140px)..."
 echo "  - material_icons_140.c"

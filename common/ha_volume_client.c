@@ -108,7 +108,7 @@ static bool s_have_source;
  * the HA dashboard). */
 static bool s_muted;
 
-/* select.x2_hub_activity's "Powered Off" state (roon-knob#63), polled
+/* select.x2_hub_activity's "Powered Off" state (dial#63), polled
  * separately from s_current_source above: input_select.audio_input has no
  * "Powered Off" option at all and goes stale across a power cycle (see
  * audio_x2_activity_display_sync's own comment in automations.yaml), so it
@@ -382,7 +382,7 @@ static bool poll_source_once(const rk_ha_cfg_t *cfg) {
     return ok;
 }
 
-// roon-knob#63 - see s_powered_off's own comment for why this polls a
+// dial#63 - see s_powered_off's own comment for why this polls a
 // different entity than poll_source_once above. Dining has no X2 hub at
 // all, so this is a trivial no-op success there, same shape as every
 // other Dining-vs-Lounge branch in this file just choosing a different

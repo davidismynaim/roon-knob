@@ -81,7 +81,7 @@ void ha_volume_client_set_current_source_optimistic(const char *source);
 // Off; always false there). Polled separately from
 // ha_volume_client_get_current_source()'s input_select.audio_input, since
 // that entity has no "Powered Off" option and goes stale across a power
-// cycle (roon-knob#63: the dial had no way to learn that the X2 remote's
+// cycle (dial#63: the dial had no way to learn that the X2 remote's
 // own physical power button had been pressed). Returns false until the
 // first successful poll.
 bool ha_volume_client_is_powered_off(void);

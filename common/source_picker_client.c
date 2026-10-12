@@ -20,7 +20,7 @@
 // whole array pair, per the owner's direction to hardcode both rooms'
 // behavior rather than build a lookup/config abstraction.
 //
-// "Power off" (roon-knob#63) is Lounge only - Dining has no X2 hub and no
+// "Power off" (dial#63) is Lounge only - Dining has no X2 hub and no
 // concept of Off at all (owner's own direction) - so it's a sixth Lounge
 // entry with no Dining equivalent, same as TV already is.
 static const char *s_names_lounge[] = {"Back", "Music", "TV", "Vinyl",
@@ -57,7 +57,7 @@ bool source_picker_open(void) {
      * the highlight is only ever stale by up to one poll interval, not
      * permanently wrong. Falls back to Back (index 0) if never
      * successfully polled yet or the value doesn't match one of the
-     * known options. Powered-off (roon-knob#63, Lounge only) is checked
+     * known options. Powered-off (dial#63, Lounge only) is checked
      * separately - ha_volume_client_get_current_source() can never report
      * it (see that function's own header comment on why), so the loop
      * below would never highlight Power Off on its own even though its id

@@ -82,7 +82,7 @@ const lv_font_t *font_manager_get_lucide_battery(void);
 #define ICON_DOWNLOAD       "\xEF\x82\x90"  // U+F090
 #define ICON_REFRESH        "\xEE\x97\x95"  // U+E5D5
 #define ICON_HOME           "\xEE\xA2\x8A"  // U+E88A
-#define ICON_POWER          "\xEE\xA2\xAC"  // U+E8AC (power_settings_new) - Activity picker's Power off entry/overlay (roon-knob#63)
+#define ICON_POWER          "\xEE\xA2\xAC"  // U+E8AC (power_settings_new) - Activity picker's Power off entry/overlay (dial#63)
 #define ICON_SEARCH         "\xEE\xA2\xB6"  // U+E8B6
 
 // Navigation

@@ -245,7 +245,7 @@ static dial_screen_t s_current_screen = DIAL_SCREEN_MUSIC;
 static lv_obj_t *s_mute_overlay;
 static bool s_mute_overlay_visible = false;  // Avoid redundant show/hide calls every poll cycle
 
-// Full-screen "Power Off" state (roon-knob#63) - same black-background,
+// Full-screen "Power Off" state (dial#63) - same black-background,
 // large-centered-red-icon treatment as s_mute_overlay above, and the same
 // reasoning for why: a single global state (ha_volume_client_is_powered_off,
 // polling select.x2_hub_activity), not per-screen, so it layers on top of
@@ -2195,7 +2195,7 @@ static void build_mute_overlay(void) {
 #endif
 }
 
-// Full-screen "Power Off" state (roon-knob#63) - same black
+// Full-screen "Power Off" state (dial#63) - same black
 // background/large centered red icon treatment as build_mute_overlay()
 // above, for the same AMOLED-current reasoning. Long-press reopens the
 // Activity picker (source_region_long_press_cb, the same callback the
@@ -3117,7 +3117,7 @@ static void apply_mute_overlay(void) {
     }
 }
 
-// Shows/hides the full-screen Power Off state (roon-knob#63) based on the
+// Shows/hides the full-screen Power Off state (dial#63) based on the
 // polled select.x2_hub_activity value (ha_volume_client_is_powered_off) -
 // same optimistic-then-reconciled shape as apply_mute_overlay above.
 // Called after it in poll_pending() so that if both happen to be visible

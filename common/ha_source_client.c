@@ -52,7 +52,7 @@ bool ha_source_client_select(const char *option) {
         return false;
     }
 
-    // roon-knob#63: also tell the X2 hub directly, Lounge only. The write
+    // dial#63: also tell the X2 hub directly, Lounge only. The write
     // above is a no-op in HA's eyes (no state-changed event at all) when
     // `option` already matches input_select.audio_input's current value -
     // which is exactly what happens re-picking the activity you were on
