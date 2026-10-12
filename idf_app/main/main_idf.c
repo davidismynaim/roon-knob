@@ -37,7 +37,6 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -497,38 +496,29 @@ static void ui_loop_task(void *arg) {
 // flood the TV during a fast spin - the dial#54 script's own mode:queued
 // cap was always meant as a backstop for this, not the primary fix.
 //
-// Owner report, 12 October 2026: every tick used to send a fresh
-// FAST_FORWARD/REWIND unconditionally, with no notion of a current speed
-// - repeated clockwise ticks kept sending FAST_FORWARD past whatever
-// speed the TV app's own on-screen indicator had reached (2x/3x/4x),
-// which made its internal state wrap back down to a lower speed instead
-// of staying at its max. s_tv_seek_level now tracks that speed locally
-// (-3..+3, 0 = normal playback, +/-N = forward/reverse notch N+1) so a
-// tick that would push past either end is simply swallowed - clockwise
-// clamps at +3 (4x forward) and stays there, anticlockwise at -3 (4x
-// reverse).
+// Owner report, 12 October 2026: every tick sends a fresh FAST_FORWARD/
+// REWIND unconditionally, with no notion of a current speed - repeated
+// clockwise ticks keep sending FAST_FORWARD past whatever speed the TV
+// app's own on-screen indicator has reached, so it cycles 2x/3x/4x/2x/
+// 3x/4x/... rather than stopping at 4x. Confirmed via aiowebostv's own
+// source (fast_forward()/rewind() take no parameters at all - webOS has
+// no discrete "set speed to Nx" primitive, only these two directionless
+// nudges) and via live testing directly on the X2 remote's own identical
+// Fast Forward button (same wrapping cycle, no dial involved at all) that
+// this is the TV app's own native behaviour, not something introduced by
+// this code.
 //
-// A first attempt tried stepping down *within* one direction (e.g. 4x
-// forward back to 3x forward) by sending the OPPOSITE command, on the
-// theory that the TV app's own player would treat "press the other
-// scrub button mid-scrub" as "slow down" before "reverse". Confirmed
-// live the same day: wrong - it reverses immediately instead, and the
-// reverse side only ever reached -3x, not -4x, because the desync between
-// our tracked level and the TV's real (now-reversed) state compounded
-// with every further tick. FAST_FORWARD/REWIND have no "slow down"
-// primitive at all - each only reliably means "go faster from whatever
-// baseline you're at", confirmed by the clockwise clamp test actually
-// working. So reducing |level| (including crossing through 0) now resets
-// to normal via "PLAY" (webOS media.controls/play, a real distinct
-// primitive - see tv_dial_command) and rebuilds back up to the new
-// target from that known baseline, rather than trying to decrement in
-// place. Increasing |level| still sends a single incremental press,
-// since that's the one direction already proven to work.
+// Two attempts at clamping it in firmware were tried and both made
+// things worse, not better: sending the opposite command to "step down"
+// actually reverses immediately rather than slowing down, and resetting
+// via "PLAY" then rebuilding up to a target speed proved unreliable in
+// practice (webOS commands are fire-and-forget with no acknowledgement,
+// so there's no way to confirm PLAY actually landed before the rebuild
+// presses follow). Owner's own call, 12 October 2026: given no reliable
+// fix exists with the available primitives, revert to the simple,
+// predictable version - every tick just sends the direction it's given.
 #define TV_STREAMING_SEEK_DEBOUNCE_MS 250
-#define TV_STREAMING_SEEK_MAX_LEVEL 3  // 3 clicks past normal = 4x (2x, 3x, 4x)
-#define TV_STREAMING_SEEK_REBUILD_GAP_MS 200  // spacing between rebuild presses - the clockwise clamp test confirmed presses at least this far apart register as discrete steps; back-to-back may not
 static uint64_t s_last_tv_seek_send_ms;
-static int s_tv_seek_level;  // -3..+3, 0 = normal playback
 
 static bool dial_volume_or_tv_seek(int32_t steps) {
     if (!ui_is_tv_streaming_mode_active()) {
@@ -541,34 +531,8 @@ static bool dial_volume_or_tv_seek(int32_t steps) {
     if (now - s_last_tv_seek_send_ms < TV_STREAMING_SEEK_DEBOUNCE_MS) {
         return true;  // swallow extra ticks within the debounce window
     }
-    int direction = steps > 0 ? 1 : -1;
-    int new_level = s_tv_seek_level + direction;
-    if (new_level > TV_STREAMING_SEEK_MAX_LEVEL) new_level = TV_STREAMING_SEEK_MAX_LEVEL;
-    if (new_level < -TV_STREAMING_SEEK_MAX_LEVEL) new_level = -TV_STREAMING_SEEK_MAX_LEVEL;
-    if (new_level == s_tv_seek_level) {
-        return true;  // already clamped at this end - nothing to send
-    }
-    bool increasing_magnitude = abs(new_level) > abs(s_tv_seek_level);
-    s_tv_seek_level = new_level;
     s_last_tv_seek_send_ms = now;
-
-    if (increasing_magnitude) {
-        // Single press builds on the TV's own current speed state -
-        // confirmed to work by the clockwise clamp test.
-        return ha_tv_remote_client_send(new_level > 0 ? "FAST_FORWARD" : "REWIND");
-    }
-    // Reducing magnitude (including landing on/crossing 0): no "slow
-    // down" primitive exists - reset to normal, then rebuild exactly
-    // abs(new_level) presses up from that known baseline.
-    bool ok = ha_tv_remote_client_send("PLAY");
-    if (new_level != 0) {
-        const char *rebuild_command = new_level > 0 ? "FAST_FORWARD" : "REWIND";
-        for (int i = 0; i < abs(new_level); i++) {
-            vTaskDelay(pdMS_TO_TICKS(TV_STREAMING_SEEK_REBUILD_GAP_MS));
-            ok = ha_tv_remote_client_send(rebuild_command) && ok;
-        }
-    }
-    return ok;
+    return ha_tv_remote_client_send(steps > 0 ? "FAST_FORWARD" : "REWIND");
 }
 
 void app_main(void) {
