@@ -70,9 +70,27 @@ bool ha_volume_client_get_current_source(char *out, size_t len);
 // Optimistic local override for the source ha_volume_client_get_current_source()
 // returns, so picking Music/TV/Vinyl from this dial's own source picker
 // switches screens immediately rather than waiting up to one poll
-// interval - the next actual poll then confirms it. Not for use outside
-// source_picker_client.c.
+// interval - the next actual poll then confirms it. Also clears the
+// powered-off flag below (see ha_volume_client_is_powered_off) - picking a
+// real activity always means the system isn't off anymore, even before the
+// next poll confirms it. Not for use outside source_picker_client.c.
 void ha_volume_client_set_current_source_optimistic(const char *source);
+
+// True if select.x2_hub_activity was "Powered Off" as of the last
+// successful poll (Lounge only - Dining has no X2 hub and no concept of
+// Off; always false there). Polled separately from
+// ha_volume_client_get_current_source()'s input_select.audio_input, since
+// that entity has no "Powered Off" option and goes stale across a power
+// cycle (roon-knob#63: the dial had no way to learn that the X2 remote's
+// own physical power button had been pressed). Returns false until the
+// first successful poll.
+bool ha_volume_client_is_powered_off(void);
+
+// Optimistic local override for the flag above, so picking "Power off"
+// from this dial's own Activity picker shows the full-screen Off overlay
+// immediately rather than waiting up to one poll interval. Not for use
+// outside source_picker_client.c.
+void ha_volume_client_set_powered_off_optimistic(bool off);
 
 // True if input_boolean.audio_mute was "on" as of the last successful
 // poll - piggybacking on the same cycle/gate as volume and source above,

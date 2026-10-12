@@ -10,6 +10,7 @@
 
 #define SOURCE_ID_BACK "__back__"
 #define SOURCE_ID_SETTINGS "__settings__"
+#define SOURCE_ID_POWER_OFF "__power_off__"
 
 // Display label vs. wire value are already separate arrays here, which is
 // exactly what Dining needs: it shows the same "Music" label as Lounge
@@ -18,11 +19,15 @@
 // array, not a special-cased entry in the shared one. One flag picks the
 // whole array pair, per the owner's direction to hardcode both rooms'
 // behavior rather than build a lookup/config abstraction.
+//
+// "Power off" (roon-knob#63) is Lounge only - Dining has no X2 hub and no
+// concept of Off at all (owner's own direction) - so it's a sixth Lounge
+// entry with no Dining equivalent, same as TV already is.
 static const char *s_names_lounge[] = {"Back", "Music", "TV", "Vinyl",
-                                       "Settings"};
+                                       "Power off", "Settings"};
 static const char *s_ids_lounge[] = {SOURCE_ID_BACK, "Music", "TV", "Vinyl",
-                                     SOURCE_ID_SETTINGS};
-#define SOURCE_COUNT_LOUNGE 5
+                                     SOURCE_ID_POWER_OFF, SOURCE_ID_SETTINGS};
+#define SOURCE_COUNT_LOUNGE 6
 
 static const char *s_names_dining[] = {"Back", "Music", "Vinyl", "Settings"};
 static const char *s_ids_dining[] = {SOURCE_ID_BACK, "Digital", "Vinyl",
@@ -52,18 +57,31 @@ bool source_picker_open(void) {
      * the highlight is only ever stale by up to one poll interval, not
      * permanently wrong. Falls back to Back (index 0) if never
      * successfully polled yet or the value doesn't match one of the
-     * known options. */
+     * known options. Powered-off (roon-knob#63, Lounge only) is checked
+     * separately - ha_volume_client_get_current_source() can never report
+     * it (see that function's own header comment on why), so the loop
+     * below would never highlight Power Off on its own even though its id
+     * is in the Lounge array. */
     const char **names = current_names();
     const char **ids = current_ids();
     int count = current_count();
 
     int selected = 0;
-    char current[16] = {0};
-    if (ha_volume_client_get_current_source(current, sizeof(current))) {
+    if (ha_volume_client_is_powered_off()) {
         for (int i = 1; i < count - 1; ++i) {
-            if (strcmp(ids[i], current) == 0) {
+            if (strcmp(ids[i], SOURCE_ID_POWER_OFF) == 0) {
                 selected = i;
                 break;
+            }
+        }
+    } else {
+        char current[16] = {0};
+        if (ha_volume_client_get_current_source(current, sizeof(current))) {
+            for (int i = 1; i < count - 1; ++i) {
+                if (strcmp(ids[i], current) == 0) {
+                    selected = i;
+                    break;
+                }
             }
         }
     }
@@ -89,6 +107,21 @@ bool source_picker_select(void) {
         controller_presentation_show_settings();
         return controller_input_set_context(
             CONTROLLER_INTERACTION_CONTEXT_SETTINGS_RECOVERY);
+    }
+
+    if (strcmp(selected_id, SOURCE_ID_POWER_OFF) == 0) {
+        /* Different entity/service than Music/TV/Vinyl below - see
+         * ha_source_client_power_off's own header comment. common/ui.c's
+         * apply_power_off_overlay() shows the full-screen Off state based
+         * on ha_volume_client_is_powered_off() - set optimistically here
+         * for the same instant-feedback reason as the Music/TV/Vinyl path. */
+        bool ok = ha_source_client_power_off();
+        if (ok) {
+            ha_volume_client_set_powered_off_optimistic(true);
+        }
+        controller_presentation_hide_zone_picker();
+        (void)controller_input_set_context(CONTROLLER_INTERACTION_CONTEXT_MEDIA);
+        return ok;
     }
 
     /* Music/TV/Vinyl. common/ui.c's apply_current_screen() switches to the

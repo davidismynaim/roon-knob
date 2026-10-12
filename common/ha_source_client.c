@@ -53,3 +53,28 @@ bool ha_source_client_select(const char *option) {
     }
     return true;
 }
+
+bool ha_source_client_power_off(void) {
+    rk_ha_cfg_t cfg;
+    if (!platform_storage_read_ha(&cfg) || !rk_ha_cfg_is_valid(&cfg)) {
+        LOGW("Power off: HA not configured (set host/token in the device's "
+             "config page)");
+        return false;
+    }
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s/api/services/select/select_option",
+             cfg.host);
+    static const char *const body =
+        "{\"entity_id\":\"select.x2_hub_activity\",\"option\":\"Powered Off\"}";
+
+    char *resp = NULL;
+    size_t resp_len = 0;
+    int ret = platform_http_post_auth(url, cfg.token, body, &resp, &resp_len);
+    platform_http_free(resp);
+    if (ret != 0) {
+        LOGW("Power off: HA call failed");
+        return false;
+    }
+    return true;
+}

@@ -108,6 +108,19 @@ static bool s_have_source;
  * the HA dashboard). */
 static bool s_muted;
 
+/* select.x2_hub_activity's "Powered Off" state (roon-knob#63), polled
+ * separately from s_current_source above: input_select.audio_input has no
+ * "Powered Off" option at all and goes stale across a power cycle (see
+ * audio_x2_activity_display_sync's own comment in automations.yaml), so it
+ * can never report this. select.x2_hub_activity is the X2 hub's own
+ * authoritative activity, kept in sync with input_select.audio_input by
+ * that same HA automation - polling it here is how the dial learns about
+ * a power-off triggered from ANY source (the X2 remote's own power button,
+ * HA dashboard, voice), not just this dial's picker. Lounge only - Dining
+ * has no X2 hub and poll_activity_once() below no-ops there. */
+static bool s_powered_off;
+static bool s_have_powered_off;
+
 static int32_t s_pending_ticks;    // accumulated, not-yet-sent raw ticks
 static uint64_t s_last_tick_ms;    // when a tick last landed in the burst
 
@@ -246,6 +259,29 @@ void ha_volume_client_set_current_source_optimistic(const char *source) {
         return;
     }
     set_cached_source(source);
+    // Picking a real activity always means the system isn't off anymore,
+    // even before the next poll_activity_once() confirms it - otherwise
+    // the Off overlay would keep showing for up to one poll interval after
+    // picking Music/TV/Vinyl to turn things back on.
+    ha_volume_client_set_powered_off_optimistic(false);
+}
+
+bool ha_volume_client_is_powered_off(void) {
+    os_mutex_lock(&s_lock);
+    bool off = s_have_powered_off && s_powered_off;
+    os_mutex_unlock(&s_lock);
+    return off;
+}
+
+void ha_volume_client_set_powered_off_optimistic(bool off) {
+    os_mutex_lock(&s_lock);
+    bool changed = !s_have_powered_off || s_powered_off != off;
+    s_powered_off = off;
+    s_have_powered_off = true;
+    os_mutex_unlock(&s_lock);
+    if (changed) {
+        LOGI("Powered off is now %s", off ? "true" : "false");
+    }
 }
 
 bool ha_volume_client_get_muted(void) {
@@ -330,6 +366,51 @@ static bool poll_source_once(const rk_ha_cfg_t *cfg) {
     return ok;
 }
 
+// roon-knob#63 - see s_powered_off's own comment for why this polls a
+// different entity than poll_source_once above. Dining has no X2 hub at
+// all, so this is a trivial no-op success there, same shape as every
+// other Dining-vs-Lounge branch in this file just choosing a different
+// entity - except here there's genuinely nothing to poll instead.
+static bool poll_activity_once(const rk_ha_cfg_t *cfg) {
+    if (room_cfg_get_current() == RK_ROOM_DINING) {
+        return true;
+    }
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s/api/states/select.x2_hub_activity", cfg->host);
+
+    char *resp = NULL;
+    size_t resp_len = 0;
+    int ret = platform_http_get_auth(url, cfg->token, &resp, &resp_len);
+    if (ret != 0 || !resp) {
+        platform_http_free(resp);
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(resp);
+    platform_http_free(resp);
+    if (!root) {
+        return false;
+    }
+
+    cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    bool ok = false;
+    if (cJSON_IsString(state) && state->valuestring) {
+        os_mutex_lock(&s_lock);
+        bool off = strcmp(state->valuestring, "Powered Off") == 0;
+        bool changed = !s_have_powered_off || s_powered_off != off;
+        s_powered_off = off;
+        s_have_powered_off = true;
+        os_mutex_unlock(&s_lock);
+        if (changed) {
+            LOGI("Powered off is now %s", off ? "true" : "false");
+        }
+        ok = true;
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
 static bool poll_mute_once(const rk_ha_cfg_t *cfg) {
     bool dining = room_cfg_get_current() == RK_ROOM_DINING;
     char url[128];
@@ -374,6 +455,9 @@ static void poll_task(void *arg) {
             }
             if (!poll_source_once(&cfg)) {
                 LOGW("HA source poll failed (host='%s')", cfg.host);
+            }
+            if (!poll_activity_once(&cfg)) {
+                LOGW("HA activity poll failed (host='%s')", cfg.host);
             }
             if (!poll_mute_once(&cfg)) {
                 LOGW("HA mute poll failed (host='%s')", cfg.host);
