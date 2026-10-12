@@ -16,8 +16,10 @@ extern "C" {
 #endif
 
 // Sends `command` (one of "OK", "UP", "DOWN", "LEFT", "RIGHT", "HOME",
-// "MENU", "BACK", "FAST_FORWARD", "REWIND" - see scripts.yaml's
-// tv_dial_command) to the TV via Home Assistant. A rare, user-initiated
+// "MENU", "BACK", "FAST_FORWARD", "REWIND", "PLAY" (dial#57's scrub-speed
+// ladder resuming normal playback - see main_idf.c's s_tv_seek_level) -
+// see scripts.yaml's tv_dial_command) to the TV via Home Assistant. A
+// rare, user-initiated
 // action like ha_source_client_select, not a hot path, so unlike
 // ha_volume_client it reads HA config fresh on each call rather than
 // caching it. Returns false if HA isn't configured (host/token unset) or

@@ -488,14 +488,41 @@ static void ui_loop_task(void *arg) {
 // sign convention the volume override already uses) scrub the TV
 // forward/back instead of adjusting volume - registered in place of
 // ha_volume_client_adjust below so every other screen's encoder behavior
-// is completely unchanged. Debounced to one ADB call per
-// TV_STREAMING_SEEK_DEBOUNCE_MS: FAST_FORWARD/REWIND are discrete
-// "jump" keyevents in most video apps, not a continuous scrub, so one
-// call per raw tick would flood ADB during a fast spin - the dial#54
-// script's own mode:queued cap was always meant as a backstop for this,
-// not the primary fix.
+// is completely unchanged. Debounced to one call per
+// TV_STREAMING_SEEK_DEBOUNCE_MS: FAST_FORWARD/REWIND are discrete "jump"
+// commands (webOS media.controls/fastForward and /rewind, via
+// media_player.media_next_track/previous_track - see tv_dial_command in
+// scripts.yaml), not a continuous scrub, so one call per raw tick would
+// flood the TV during a fast spin - the dial#54 script's own mode:queued
+// cap was always meant as a backstop for this, not the primary fix.
+//
+// Owner report, 12 October 2026: every tick used to send a fresh
+// FAST_FORWARD/REWIND unconditionally, with no notion of a current speed
+// - repeated clockwise ticks kept sending FAST_FORWARD past whatever
+// speed the TV app's own on-screen indicator had reached (2x/3x/4x),
+// which made its internal state wrap back down to a lower speed instead
+// of staying at its max. s_tv_seek_level now tracks that speed locally
+// (-3..+3, 0 = normal playback, +/-N = forward/reverse notch N+1) so a
+// tick that would push past either end is simply swallowed - clockwise
+// clamps at +3 (4x forward) and stays there, anticlockwise at -3 (4x
+// reverse). Crossing back through 0 sends "PLAY" (webOS
+// media.controls/play, a real distinct primitive - see tv_dial_command)
+// to explicitly resume normal playback, rather than relying on
+// FAST_FORWARD/REWIND to somehow mean "stop" at the right moment.
+//
+// UNVERIFIED assumption, needs a live test: stepping down *within* one
+// direction (e.g. 4x forward back to 3x forward) sends the OPPOSITE
+// command (REWIND while still net-forward) on the theory that the TV
+// app's own player treats "press the other scrub button mid-scrub" as
+// "slow down" before "reverse" - a common convention, but not confirmed
+// for this specific app/TV. If that assumption is wrong, the symmetric
+// ladder in the owner's spec (4x->3x->2x->normal->2x->3x->4x reverse,
+// smoothly, each click moving exactly one notch) may not hold and this
+// will need a different mechanism once that's seen live.
 #define TV_STREAMING_SEEK_DEBOUNCE_MS 250
+#define TV_STREAMING_SEEK_MAX_LEVEL 3  // 3 clicks past normal = 4x (2x, 3x, 4x)
 static uint64_t s_last_tv_seek_send_ms;
+static int s_tv_seek_level;  // -3..+3, 0 = normal playback
 
 static bool dial_volume_or_tv_seek(int32_t steps) {
     if (!ui_is_tv_streaming_mode_active()) {
@@ -508,8 +535,17 @@ static bool dial_volume_or_tv_seek(int32_t steps) {
     if (now - s_last_tv_seek_send_ms < TV_STREAMING_SEEK_DEBOUNCE_MS) {
         return true;  // swallow extra ticks within the debounce window
     }
+    int direction = steps > 0 ? 1 : -1;
+    int new_level = s_tv_seek_level + direction;
+    if (new_level > TV_STREAMING_SEEK_MAX_LEVEL) new_level = TV_STREAMING_SEEK_MAX_LEVEL;
+    if (new_level < -TV_STREAMING_SEEK_MAX_LEVEL) new_level = -TV_STREAMING_SEEK_MAX_LEVEL;
+    if (new_level == s_tv_seek_level) {
+        return true;  // already clamped at this end - nothing to send
+    }
+    s_tv_seek_level = new_level;
     s_last_tv_seek_send_ms = now;
-    return ha_tv_remote_client_send(steps > 0 ? "FAST_FORWARD" : "REWIND");
+    const char *command = (new_level == 0) ? "PLAY" : (direction > 0 ? "FAST_FORWARD" : "REWIND");
+    return ha_tv_remote_client_send(command);
 }
 
 void app_main(void) {
