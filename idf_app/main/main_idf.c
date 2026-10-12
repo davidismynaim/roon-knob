@@ -19,7 +19,7 @@
 #include "bridge_client.h"
 #include "controller_action_router.h"
 #include "controller_config.h"
-#include "ha_firetv_client.h"
+#include "ha_tv_remote_client.h"
 #include "ha_mute_client.h"
 #include "controller_view_compat.h"
 #include "vinyl_client.h"
@@ -485,7 +485,7 @@ static void ui_loop_task(void *arg) {
 
 // Rotary-encoder repurposing on the streaming-platforms screen (dial#57):
 // while it's up, clockwise/anticlockwise (positive/negative steps, same
-// sign convention the volume override already uses) scrub the Fire TV
+// sign convention the volume override already uses) scrub the TV
 // forward/back instead of adjusting volume - registered in place of
 // ha_volume_client_adjust below so every other screen's encoder behavior
 // is completely unchanged. Debounced to one ADB call per
@@ -509,7 +509,7 @@ static bool dial_volume_or_tv_seek(int32_t steps) {
         return true;  // swallow extra ticks within the debounce window
     }
     s_last_tv_seek_send_ms = now;
-    return ha_firetv_client_send(steps > 0 ? "FAST_FORWARD" : "REWIND");
+    return ha_tv_remote_client_send(steps > 0 ? "FAST_FORWARD" : "REWIND");
 }
 
 void app_main(void) {

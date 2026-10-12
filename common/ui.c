@@ -18,7 +18,7 @@
 #include "bridge_client.h"
 #include "ha_volume_client.h"
 #include "ha_mute_client.h"
-#include "ha_firetv_client.h"
+#include "ha_tv_remote_client.h"
 #include "vinyl_client.h"
 #include "voice_client.h"
 #include "track_title_filter.h"
@@ -2020,7 +2020,7 @@ static void build_tv_vinyl_layout(void) {
     lv_label_set_text(s_tv_vinyl_volume_label, "--");
 
     // TV screen's central button: tap sends the X2's OK/Enter function
-    // (ha_firetv_client_send("OK"), dial#54/#55), long-press invokes voice
+    // (ha_tv_remote_client_send("OK"), dial#54/#55), long-press invokes voice
     // (same long-press-for-mic convention as Music's center play button,
     // see btn_play_long_press_cb). Created last so it draws above
     // mute_region/source_region and wins first claim on presses within
@@ -2062,7 +2062,7 @@ static void build_tv_vinyl_layout(void) {
 
     // Directional ring (dial#55): 4 triangle markers at the compass points
     // around the central button, same function as the X2's physical
-    // D-pad (ha_firetv_client_send("UP"/"DOWN"/"LEFT"/"RIGHT")).
+    // D-pad (ha_tv_remote_client_send("UP"/"DOWN"/"LEFT"/"RIGHT")).
     // keyboard_arrow_* glyphs read as solid "little triangles" pointing in
     // their direction (owner spec), unlike chevron_left/right used
     // elsewhere in this file, which are outline brackets. Same size as
@@ -2081,8 +2081,10 @@ static void build_tv_vinyl_layout(void) {
     // would be silently swallowed instead of still muting/opening the
     // source picker (owner feedback: this must keep working everywhere in
     // that zone, not just outside these buttons). LEFT/RIGHT are the
-    // exception: their long-press is repurposed for Fire TV's seek/scrub
-    // mode (owner spec - "std feature on firestick"), not muting - since
+    // exception: their long-press is repurposed for the TV's seek/scrub
+    // mode (owner spec, originally modeled on "std feature on firestick" -
+    // the Fire Stick itself is long gone, this now drives the LG TV
+    // directly), not muting - since
     // they already win first claim on any press in their bounds, this
     // also means mute is *never* reachable through them (not a dead zone
     // carved out of mute_region's geometry, just this button's own choice
@@ -2182,7 +2184,7 @@ static void build_mute_overlay(void) {
 // Streaming-platforms screen (dial#57). CLICKABLE for the same reason as
 // s_mute_overlay: without it, a tap landing in this screen's bounds
 // would fall through to the TV screen's own center/directional buttons
-// underneath, firing an unintended Fire TV command while supposedly on a
+// underneath, firing an unintended TV command while supposedly on a
 // different screen. The swipe-up-to-exit gesture (dial#56,
 // platform_display_idf.c) isn't affected by this - it tracks raw touch
 // coordinates at the indev-read level, not LVGL widget hit-testing, same
@@ -2411,14 +2413,14 @@ static void btn_tv_center_tap_cb(lv_event_t *e) {
     }
     // Short tap: OK/select, same as the X2's physical Enter button
     // (dial#54/#55). Haptic fires immediately, before the HA call, same
-    // convention as btn_prev/next_event_cb - ha_firetv_client_send blocks
+    // convention as btn_prev/next_event_cb - ha_tv_remote_client_send blocks
     // on a network round trip, so gating the pulse on its result (as this
     // first read) made the buzz noticeably trail the on-screen press
     // (owner feedback).
 #if !TARGET_PC
     haptic_driver_pulse();
 #endif
-    (void)ha_firetv_client_send("OK");
+    (void)ha_tv_remote_client_send("OK");
 }
 
 static void btn_tv_center_long_press_cb(lv_event_t *e) {
@@ -2451,11 +2453,11 @@ static void btn_tv_dir_event_cb(lv_event_t *e) {
         return;
     }
     // Haptic before the HA call, same reasoning as btn_tv_center_tap_cb's
-    // own comment (ha_firetv_client_send blocks on a network round trip).
+    // own comment (ha_tv_remote_client_send blocks on a network round trip).
 #if !TARGET_PC
     haptic_driver_pulse();
 #endif
-    (void)ha_firetv_client_send(s_tv_dir_tap_command[dir]);
+    (void)ha_tv_remote_client_send(s_tv_dir_tap_command[dir]);
 }
 
 static void btn_tv_dir_long_press_cb(lv_event_t *e) {
@@ -2466,7 +2468,7 @@ static void btn_tv_dir_long_press_cb(lv_event_t *e) {
     s_tv_dir_long_press_fired[dir] = true;
     // UP/DOWN forward to whichever region (mute/source) they physically
     // sit over - both callbacks already ignore their event argument, safe
-    // to call directly. LEFT/RIGHT are repurposed for Fire TV's seek/
+    // to call directly. LEFT/RIGHT are repurposed for the TV's seek/
     // scrub mode instead (owner spec) - see this button's own creation
     // comment in build_tv_vinyl_layout for why that doesn't need any
     // change to mute_region/source_region themselves.
@@ -2481,13 +2483,13 @@ static void btn_tv_dir_long_press_cb(lv_event_t *e) {
 #if !TARGET_PC
         haptic_driver_pulse();
 #endif
-        (void)ha_firetv_client_send("LEFT_HOLD");
+        (void)ha_tv_remote_client_send("LEFT_HOLD");
         break;
     case TV_DIR_RIGHT:
 #if !TARGET_PC
         haptic_driver_pulse();
 #endif
-        (void)ha_firetv_client_send("RIGHT_HOLD");
+        (void)ha_tv_remote_client_send("RIGHT_HOLD");
         break;
     default:
         break;
@@ -2503,9 +2505,9 @@ static void btn_tv_dir_long_press_repeat_cb(lv_event_t *e) {
     // time it's held.
     tv_dir_t dir = (tv_dir_t)(intptr_t)lv_event_get_user_data(e);
     if (dir == TV_DIR_LEFT) {
-        (void)ha_firetv_client_send("LEFT_HOLD");
+        (void)ha_tv_remote_client_send("LEFT_HOLD");
     } else if (dir == TV_DIR_RIGHT) {
-        (void)ha_firetv_client_send("RIGHT_HOLD");
+        (void)ha_tv_remote_client_send("RIGHT_HOLD");
     }
 }
 
@@ -2514,14 +2516,14 @@ static void btn_tv_stream_event_cb(lv_event_t *e) {
     // (build_tv_streaming_overlay's stream_specs table) - one callback
     // for all 4 apps rather than 4 near-identical ones. Haptic before
     // the HA call, same reasoning as btn_tv_center_tap_cb's own comment
-    // (ha_firetv_client_send blocks on a network round trip - an app
+    // (ha_tv_remote_client_send blocks on a network round trip - an app
     // launch is a slower ADB call than a keyevent, so gating the pulse
     // on it would trail the tap even more noticeably).
     const char *command = (const char *)lv_event_get_user_data(e);
 #if !TARGET_PC
     haptic_driver_pulse();
 #endif
-    (void)ha_firetv_client_send(command);
+    (void)ha_tv_remote_client_send(command);
 }
 
 static void btn_play_event_cb(lv_event_t *e) {

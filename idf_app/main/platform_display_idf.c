@@ -4,7 +4,7 @@
 #include "bridge_client.h"
 #include "battery.h"
 #include "controller_input.h"
-#include "ha_firetv_client.h"
+#include "ha_tv_remote_client.h"
 #include "haptic_driver.h"
 #include "i2c_bsp.h"
 #include "lcd_touch_bsp.h"
@@ -86,7 +86,7 @@ static volatile bool s_pending_detail_pause = false;
 static volatile bool s_pending_detail_play = false;
 // TV screen swipe gestures (dial#56) - Home/Menu/Back are plain
 // fire-and-forget HA calls, deferred the same way as everything else
-// here because ha_firetv_client_send() blocks on a network round trip;
+// here because ha_tv_remote_client_send() blocks on a network round trip;
 // firing it straight from this touch callback would stall the next
 // indev read for however long that takes. Whether a swipe-up on the TV
 // screen means "Home" or "leave the streaming-platforms screen" is
@@ -990,24 +990,24 @@ void platform_display_process_pending(void) {
         }
     }
     // Process deferred TV screen swipe gestures (dial#56). Haptic fires
-    // here, immediately, rather than being gated on ha_firetv_client_send's
+    // here, immediately, rather than being gated on ha_tv_remote_client_send's
     // result - same reasoning as common/ui.c's btn_tv_center_tap_cb (that
     // call blocks on a network round trip; gating the pulse on it made the
     // buzz noticeably trail the swipe).
     if (s_pending_tv_home) {
         s_pending_tv_home = false;
         haptic_driver_pulse();
-        (void)ha_firetv_client_send("HOME");
+        (void)ha_tv_remote_client_send("HOME");
     }
     if (s_pending_tv_menu) {
         s_pending_tv_menu = false;
         haptic_driver_pulse();
-        (void)ha_firetv_client_send("MENU");
+        (void)ha_tv_remote_client_send("MENU");
     }
     if (s_pending_tv_back) {
         s_pending_tv_back = false;
         haptic_driver_pulse();
-        (void)ha_firetv_client_send("BACK");
+        (void)ha_tv_remote_client_send("BACK");
     }
     if (s_pending_tv_streaming_enter) {
         s_pending_tv_streaming_enter = false;
