@@ -51,6 +51,38 @@ bool ha_source_client_select(const char *option) {
         LOGW("Source select: HA call failed for option '%s'", option);
         return false;
     }
+
+    // roon-knob#63: also tell the X2 hub directly, Lounge only. The write
+    // above is a no-op in HA's eyes (no state-changed event at all) when
+    // `option` already matches input_select.audio_input's current value -
+    // which is exactly what happens re-picking the activity you were on
+    // BEFORE powering off, since powering off never touches that entity.
+    // audio_x2_activity_display_sync only runs the hub's real wake/switch
+    // macro on an actual state CHANGE of input_select.audio_input, so that
+    // no-op left the hub stuck off even though the dial itself moved on -
+    // confirmed live, 12 October 2026. A direct select.select_option call
+    // runs the integration's handler unconditionally on every call, same
+    // as ha_source_client_power_off's own write, so it reliably wakes the
+    // hub regardless of whether the value "changed".
+    if (room_cfg_get_current() != RK_ROOM_DINING) {
+        snprintf(url, sizeof(url), "http://%s/api/services/select/select_option",
+                 cfg.host);
+        snprintf(body, sizeof(body),
+                 "{\"entity_id\":\"select.x2_hub_activity\",\"option\":\"%s\"}",
+                 option);
+        char *resp2 = NULL;
+        size_t resp2_len = 0;
+        int ret2 = platform_http_post_auth(url, cfg.token, body, &resp2, &resp2_len);
+        platform_http_free(resp2);
+        if (ret2 != 0) {
+            LOGW("Source select: X2 hub activity call failed for option '%s'", option);
+            // Don't fail the whole call - input_select.audio_input was
+            // already written successfully above, and this second write
+            // is purely to guarantee the hub wakes on a same-value
+            // reselect; a transient failure here self-corrects on the
+            // next deliberate activity pick.
+        }
+    }
     return true;
 }
 

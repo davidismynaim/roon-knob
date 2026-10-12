@@ -121,6 +121,21 @@ static bool s_muted;
 static bool s_powered_off;
 static bool s_have_powered_off;
 
+/* Debounces poll_activity_once()'s off->not-off transition only (entering
+ * Off is trusted immediately - see that function). Confirmed live, 12
+ * October 2026: select.x2_hub_activity doesn't update atomically across a
+ * real power transition - a poll can land mid-transition and briefly read
+ * something other than "Powered Off", flickering the overlay off and back
+ * on before the next poll re-confirms it. Requiring 2 consecutive non-off
+ * reads before actually clearing the flag absorbs that one-poll blip
+ * without being user-visible. Doesn't affect the optimistic path at all -
+ * ha_volume_client_set_powered_off_optimistic() and
+ * ha_volume_client_set_current_source_optimistic() both set s_powered_off
+ * directly, bypassing this streak entirely, so a deliberate activity pick
+ * from this dial's own picker still clears the overlay instantly. */
+#define HA_POWERED_OFF_CLEAR_STREAK_REQUIRED 2
+static int s_powered_off_clear_streak;
+
 static int32_t s_pending_ticks;    // accumulated, not-yet-sent raw ticks
 static uint64_t s_last_tick_ms;    // when a tick last landed in the burst
 
@@ -278,6 +293,7 @@ void ha_volume_client_set_powered_off_optimistic(bool off) {
     bool changed = !s_have_powered_off || s_powered_off != off;
     s_powered_off = off;
     s_have_powered_off = true;
+    s_powered_off_clear_streak = 0;  // this is a deliberate, immediate change - no debounce in play
     os_mutex_unlock(&s_lock);
     if (changed) {
         LOGI("Powered off is now %s", off ? "true" : "false");
@@ -397,13 +413,29 @@ static bool poll_activity_once(const rk_ha_cfg_t *cfg) {
     bool ok = false;
     if (cJSON_IsString(state) && state->valuestring) {
         os_mutex_lock(&s_lock);
-        bool off = strcmp(state->valuestring, "Powered Off") == 0;
-        bool changed = !s_have_powered_off || s_powered_off != off;
-        s_powered_off = off;
+        bool raw_off = strcmp(state->valuestring, "Powered Off") == 0;
+        bool changed = false;
+        if (raw_off) {
+            // Entering Off is trusted immediately - no debounce needed in
+            // this direction (see s_powered_off_clear_streak's comment).
+            s_powered_off_clear_streak = 0;
+            changed = !s_have_powered_off || !s_powered_off;
+            s_powered_off = true;
+        } else if (s_powered_off) {
+            if (++s_powered_off_clear_streak >= HA_POWERED_OFF_CLEAR_STREAK_REQUIRED) {
+                s_powered_off = false;
+                s_powered_off_clear_streak = 0;
+                changed = true;
+            }
+            // else: stay "off" for now - debounced, not yet confirmed
+        } else {
+            s_powered_off_clear_streak = 0;
+        }
         s_have_powered_off = true;
+        bool final_off = s_powered_off;
         os_mutex_unlock(&s_lock);
         if (changed) {
-            LOGI("Powered off is now %s", off ? "true" : "false");
+            LOGI("Powered off is now %s", final_off ? "true" : "false");
         }
         ok = true;
     }
