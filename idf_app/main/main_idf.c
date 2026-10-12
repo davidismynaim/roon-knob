@@ -37,6 +37,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -505,22 +506,27 @@ static void ui_loop_task(void *arg) {
 // (-3..+3, 0 = normal playback, +/-N = forward/reverse notch N+1) so a
 // tick that would push past either end is simply swallowed - clockwise
 // clamps at +3 (4x forward) and stays there, anticlockwise at -3 (4x
-// reverse). Crossing back through 0 sends "PLAY" (webOS
-// media.controls/play, a real distinct primitive - see tv_dial_command)
-// to explicitly resume normal playback, rather than relying on
-// FAST_FORWARD/REWIND to somehow mean "stop" at the right moment.
+// reverse).
 //
-// UNVERIFIED assumption, needs a live test: stepping down *within* one
-// direction (e.g. 4x forward back to 3x forward) sends the OPPOSITE
-// command (REWIND while still net-forward) on the theory that the TV
-// app's own player treats "press the other scrub button mid-scrub" as
-// "slow down" before "reverse" - a common convention, but not confirmed
-// for this specific app/TV. If that assumption is wrong, the symmetric
-// ladder in the owner's spec (4x->3x->2x->normal->2x->3x->4x reverse,
-// smoothly, each click moving exactly one notch) may not hold and this
-// will need a different mechanism once that's seen live.
+// A first attempt tried stepping down *within* one direction (e.g. 4x
+// forward back to 3x forward) by sending the OPPOSITE command, on the
+// theory that the TV app's own player would treat "press the other
+// scrub button mid-scrub" as "slow down" before "reverse". Confirmed
+// live the same day: wrong - it reverses immediately instead, and the
+// reverse side only ever reached -3x, not -4x, because the desync between
+// our tracked level and the TV's real (now-reversed) state compounded
+// with every further tick. FAST_FORWARD/REWIND have no "slow down"
+// primitive at all - each only reliably means "go faster from whatever
+// baseline you're at", confirmed by the clockwise clamp test actually
+// working. So reducing |level| (including crossing through 0) now resets
+// to normal via "PLAY" (webOS media.controls/play, a real distinct
+// primitive - see tv_dial_command) and rebuilds back up to the new
+// target from that known baseline, rather than trying to decrement in
+// place. Increasing |level| still sends a single incremental press,
+// since that's the one direction already proven to work.
 #define TV_STREAMING_SEEK_DEBOUNCE_MS 250
 #define TV_STREAMING_SEEK_MAX_LEVEL 3  // 3 clicks past normal = 4x (2x, 3x, 4x)
+#define TV_STREAMING_SEEK_REBUILD_GAP_MS 200  // spacing between rebuild presses - the clockwise clamp test confirmed presses at least this far apart register as discrete steps; back-to-back may not
 static uint64_t s_last_tv_seek_send_ms;
 static int s_tv_seek_level;  // -3..+3, 0 = normal playback
 
@@ -542,10 +548,27 @@ static bool dial_volume_or_tv_seek(int32_t steps) {
     if (new_level == s_tv_seek_level) {
         return true;  // already clamped at this end - nothing to send
     }
+    bool increasing_magnitude = abs(new_level) > abs(s_tv_seek_level);
     s_tv_seek_level = new_level;
     s_last_tv_seek_send_ms = now;
-    const char *command = (new_level == 0) ? "PLAY" : (direction > 0 ? "FAST_FORWARD" : "REWIND");
-    return ha_tv_remote_client_send(command);
+
+    if (increasing_magnitude) {
+        // Single press builds on the TV's own current speed state -
+        // confirmed to work by the clockwise clamp test.
+        return ha_tv_remote_client_send(new_level > 0 ? "FAST_FORWARD" : "REWIND");
+    }
+    // Reducing magnitude (including landing on/crossing 0): no "slow
+    // down" primitive exists - reset to normal, then rebuild exactly
+    // abs(new_level) presses up from that known baseline.
+    bool ok = ha_tv_remote_client_send("PLAY");
+    if (new_level != 0) {
+        const char *rebuild_command = new_level > 0 ? "FAST_FORWARD" : "REWIND";
+        for (int i = 0; i < abs(new_level); i++) {
+            vTaskDelay(pdMS_TO_TICKS(TV_STREAMING_SEEK_REBUILD_GAP_MS));
+            ok = ha_tv_remote_client_send(rebuild_command) && ok;
+        }
+    }
+    return ok;
 }
 
 void app_main(void) {
