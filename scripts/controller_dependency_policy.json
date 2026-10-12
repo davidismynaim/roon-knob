@@ -89,6 +89,12 @@
     "dial|common/controller_view_compat.c|common/controller_presentation.h",
     "dial|common/controller_view_compat.c|common/controller_view_compat.h",
     "dial|common/controller_view_compat.h|common/controller_view.h",
+    "dial|common/ha_tv_remote_client.c|common/ha_tv_remote_client.h",
+    "dial|common/ha_tv_remote_client.c|common/platform/platform_http.h",
+    "dial|common/ha_tv_remote_client.c|common/platform/platform_log.h",
+    "dial|common/ha_tv_remote_client.c|common/platform/platform_storage.h",
+    "dial|idf_app/main/main_idf.c|common/ha_tv_remote_client.h",
+    "dial|idf_app/main/platform_display_idf.c|common/ha_tv_remote_client.h",
     "dial|common/ha_mute_client.c|common/ha_mute_client.h",
     "dial|common/ha_mute_client.c|common/ha_volume_client.h",
     "dial|common/ha_mute_client.c|common/platform/platform_http.h",
@@ -145,6 +151,7 @@
     "dial|common/ui.c|common/bridge_client.h",
     "dial|common/ui.c|common/controller_input.h",
     "dial|common/ui.c|common/ha_mute_client.h",
+    "dial|common/ui.c|common/ha_tv_remote_client.h",
     "dial|common/ui.c|common/ha_volume_client.h",
     "dial|common/ui.c|common/platform/platform_http.h",
     "dial|common/ui.c|common/platform/platform_task.h",
@@ -447,6 +454,12 @@
       "reason": "Legacy Dial renderer still queries controller state directly."
     },
     {
+      "edge": "dial|common/ui.c|common/ha_tv_remote_client.h",
+      "owner": "controller architecture program",
+      "retirement_issue": "#132",
+      "reason": "Legacy Dial renderer still queries the TV remote client directly, same as the bridge_client.h edge above."
+    },
+    {
       "edge": "dial|common/ui.c|idf_app/main/battery.h",
       "owner": "controller architecture program",
       "retirement_issue": "#132",
@@ -740,6 +753,11 @@
       "edge": "dial|common/ha_mute_client.c|common/platform/platform_storage.h",
       "owner": "Home Assistant mute/volume config boundary",
       "reason": "Sole production caller of the mute domain's own narrow platform_storage_read_ha accessor, distinct from the generic raw transaction API."
+    },
+    {
+      "edge": "dial|common/ha_tv_remote_client.c|common/platform/platform_storage.h",
+      "owner": "Home Assistant TV remote config boundary",
+      "reason": "Sole production caller of the TV remote domain's own narrow platform_storage_read_ha accessor, distinct from the generic raw transaction API."
     },
     {
       "edge": "dial|common/ha_source_client.c|common/platform/platform_storage.h",
