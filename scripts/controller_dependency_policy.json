@@ -454,12 +454,6 @@
       "reason": "Legacy Dial renderer still queries controller state directly."
     },
     {
-      "edge": "dial|common/ui.c|common/ha_tv_remote_client.h",
-      "owner": "controller architecture program",
-      "retirement_issue": "#132",
-      "reason": "Legacy Dial renderer still queries the TV remote client directly, same as the bridge_client.h edge above."
-    },
-    {
       "edge": "dial|common/ui.c|idf_app/main/battery.h",
       "owner": "controller architecture program",
       "retirement_issue": "#132",
