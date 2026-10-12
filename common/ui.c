@@ -245,6 +245,17 @@ static dial_screen_t s_current_screen = DIAL_SCREEN_MUSIC;
 static lv_obj_t *s_mute_overlay;
 static bool s_mute_overlay_visible = false;  // Avoid redundant show/hide calls every poll cycle
 
+// Full-screen "Power Off" state (dial#63) - same black-background,
+// large-centered-red-icon treatment as s_mute_overlay above, and the same
+// reasoning for why: a single global state (ha_volume_client_is_powered_off,
+// polling select.x2_hub_activity), not per-screen, so it layers on top of
+// whichever of Music/TV/Vinyl is active underneath rather than replacing
+// apply_current_screen()'s own logic. Unlike mute, a long-press here
+// reopens the Activity picker (source_region_long_press_cb, reused as-is)
+// rather than toggling anything - the natural way to turn things back on.
+static lv_obj_t *s_power_off_overlay;
+static bool s_power_off_overlay_visible = false;
+
 // Streaming-platforms screen (dial#55-57) - 4 perimeter app buttons
 // (Netflix/Prime/Apple TV/Disney+), rotary encoder repurposed for
 // fast-forward/rewind while this is up (main_idf.c's
@@ -454,10 +465,12 @@ static void mute_region_long_press_cb(lv_event_t *e);
 static void source_region_long_press_cb(lv_event_t *e);
 static void build_tv_vinyl_layout(void);
 static void build_mute_overlay(void);
+static void build_power_off_overlay(void);
 static void apply_current_screen(void);
 static void set_vinyl_mode(bool on);
 static void apply_vinyl_transport(void);
 static void apply_mute_overlay(void);
+static void apply_power_off_overlay(void);
 static void btn_prev_event_cb(lv_event_t *e);
 static void btn_play_event_cb(lv_event_t *e);
 static void btn_play_long_press_cb(lv_event_t *e);
@@ -1521,6 +1534,7 @@ static void build_layout(void) {
     lv_obj_add_flag(s_seek_delta_arc, LV_OBJ_FLAG_HIDDEN);
 
     build_mute_overlay();
+    build_power_off_overlay();
     build_detail_overlay();
     build_tv_streaming_overlay();
     build_playback_icon_overlay();
@@ -2178,6 +2192,35 @@ static void build_mute_overlay(void) {
     lv_obj_set_style_text_font(icon, font_large_icon(), 0);
     lv_obj_set_style_text_color(icon, lv_color_hex(0xff3333), 0);
     lv_obj_center(icon);  // True center - owner feedback: was offset high, and "MUTED" text (removed) isn't needed
+#endif
+}
+
+// Full-screen "Power Off" state (dial#63) - same black
+// background/large centered red icon treatment as build_mute_overlay()
+// above, for the same AMOLED-current reasoning. Long-press reopens the
+// Activity picker (source_region_long_press_cb, the same callback the
+// Music/TV/Vinyl screens' own source gesture region already uses) rather
+// than toggling anything, since there's nothing to "un-off" without
+// picking what to turn on.
+static void build_power_off_overlay(void) {
+    s_power_off_overlay = lv_obj_create(s_artwork_container);
+    lv_obj_set_size(s_power_off_overlay, SCREEN_SIZE, SCREEN_SIZE);
+    lv_obj_center(s_power_off_overlay);
+    lv_obj_set_style_bg_color(s_power_off_overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_power_off_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_power_off_overlay, 0, 0);
+    lv_obj_set_style_radius(s_power_off_overlay, 0, 0);
+    lv_obj_add_flag(s_power_off_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_power_off_overlay, source_region_long_press_cb,
+                        LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_flag(s_power_off_overlay, LV_OBJ_FLAG_HIDDEN);
+
+#if !TARGET_PC
+    lv_obj_t *icon = lv_label_create(s_power_off_overlay);
+    lv_label_set_text(icon, ICON_POWER);
+    lv_obj_set_style_text_font(icon, font_large_icon(), 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0xff3333), 0);
+    lv_obj_center(icon);
 #endif
 }
 
@@ -3074,6 +3117,26 @@ static void apply_mute_overlay(void) {
     }
 }
 
+// Shows/hides the full-screen Power Off state (dial#63) based on the
+// polled select.x2_hub_activity value (ha_volume_client_is_powered_off) -
+// same optimistic-then-reconciled shape as apply_mute_overlay above.
+// Called after it in poll_pending() so that if both happen to be visible
+// at once, Power Off wins the foreground spot - a more totalizing state
+// than mute.
+static void apply_power_off_overlay(void) {
+    bool off = ha_volume_client_is_powered_off();
+    if (off == s_power_off_overlay_visible || !s_power_off_overlay) {
+        return;
+    }
+    s_power_off_overlay_visible = off;
+    if (off) {
+        lv_obj_move_foreground(s_power_off_overlay);
+        lv_obj_remove_flag(s_power_off_overlay, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_power_off_overlay, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void poll_pending(lv_timer_t *timer) {
     (void)timer;
 
@@ -3125,6 +3188,7 @@ static void poll_pending(lv_timer_t *timer) {
 
     apply_current_screen();
     apply_mute_overlay();
+    apply_power_off_overlay();
 }
 
 static int s_last_battery_level = -1;  // 0-3 levels for hysteresis
@@ -3394,6 +3458,7 @@ void ui_show_track_feedback(bool next) {
 // Special zone IDs (must match bridge_client.c)
 #define ZONE_ID_BACK "__back__"
 #define ZONE_ID_SETTINGS "__settings__"
+#define ZONE_ID_POWER_OFF "__power_off__"
 
 void ui_show_zone_picker(const char **zone_names, const char **zone_ids, int count, int selected) {
     if (s_zone_picker_visible) {
@@ -3421,7 +3486,7 @@ void ui_show_zone_picker(const char **zone_names, const char **zone_ids, int cou
 
     // Title at top
     lv_obj_t *title = lv_label_create(s_zone_picker_overlay);
-    lv_label_set_text(title, "INPUT SOURCE");
+    lv_label_set_text(title, "ACTIVITY");
     lv_obj_set_style_text_font(title, font_normal(), 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xfafafa), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
@@ -3493,6 +3558,12 @@ void ui_show_zone_picker(const char **zone_names, const char **zone_ids, int cou
             lv_label_set_text(icon_label, ICON_ALBUM);
 #else
             lv_label_set_text(icon_label, LV_SYMBOL_AUDIO);
+#endif
+        } else if (strcmp(zone_id, ZONE_ID_POWER_OFF) == 0) {
+#if !TARGET_PC
+            lv_label_set_text(icon_label, ICON_POWER);
+#else
+            lv_label_set_text(icon_label, LV_SYMBOL_POWER);
 #endif
         } else {
             // Music (the only other non-sentinel entry the source
