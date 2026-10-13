@@ -3196,20 +3196,48 @@ static bool s_last_battery_charging = false;  // Track charging state changes
 static lv_timer_t *s_battery_flash_timer = NULL;  // Only exists while flashing (<=5%, not charging)
 static bool s_battery_flash_on = true;  // Current phase of the flash
 
+// Owner report, 12 October 2026: the raw battery percent is noisy enough
+// that the amber/red colour state was flapping back and forth right at the
+// 25%/10% boundaries. Worsening (dropping a level) still applies
+// immediately at the plain thresholds below - no reason to delay bad news.
+// Improving (rising back out of a worse level) requires clearing that
+// threshold by this margin first, not just a single reading nudging back
+// over the line, so "once amber, stays amber" (and same for red) rather
+// than chasing every noisy sample. Starting value, not yet tuned against
+// real hardware noise characteristics.
+#define BATTERY_LEVEL_RAISE_MARGIN 5
+
+// Computes the 0-3 battery level from percent, applying the asymmetric
+// hysteresis above against previous_level (-1 if there's no previous
+// reading yet, e.g. first call since boot - applies the plain thresholds
+// immediately in that case, nothing to stick to).
+static int compute_battery_level(int percent, int previous_level) {
+    int level;
+    if (percent <= 10) level = 0;       // Critical
+    else if (percent <= 25) level = 1;  // Low
+    else if (percent <= 60) level = 2;  // Medium
+    else level = 3;                     // High
+
+    if (previous_level < 0 || level <= previous_level) {
+        return level;  // first reading, or at/below where we already were - no hysteresis needed
+    }
+    // Trying to improve past previous_level - only accept it once clear of
+    // that level's own threshold by the margin, otherwise stay put.
+    static const int kRaiseThreshold[3] = {
+        10 + BATTERY_LEVEL_RAISE_MARGIN,  // leaving Critical (0) -> Low (1)
+        25 + BATTERY_LEVEL_RAISE_MARGIN,  // leaving Low (1) -> Medium (2)
+        60 + BATTERY_LEVEL_RAISE_MARGIN,  // leaving Medium (2) -> High (3)
+    };
+    return (percent > kRaiseThreshold[previous_level]) ? level : previous_level;
+}
+
 static void update_battery_display(void) {
 #ifdef ESP_PLATFORM
     if (!s_battery_icon) return;
 
     int percent = battery_get_percentage();
     bool charging = battery_is_charging();
-
-    // Convert to 4 discrete levels for stability (precision matches fidelity)
-    // Critical: ≤10%, Low: 11-25%, Medium: 26-60%, High: ≥61%
-    int level;
-    if (percent <= 10) level = 0;       // Critical
-    else if (percent <= 25) level = 1;  // Low
-    else if (percent <= 60) level = 2;  // Medium
-    else level = 3;                     // High
+    int level = compute_battery_level(percent, s_last_battery_level);
 
     // Only update the icon glyph if level or charging state changed
     // (prevents flicker from redundant lv_label_set_text calls) - but
@@ -3242,15 +3270,18 @@ static void update_battery_display(void) {
         }
     }
 
-    // 4-stage color progression, matching the level thresholds above:
-    // near-white (fine) -> amber at 25% or less (Low) -> red at 10% or less
-    // (Critical) -> flashing red at 5% or less (below, unchanged). Near-white
-    // instead of grey (owner feedback) so the "fine" state reads clearly
-    // against the dark badge behind it, same as the amber/red states do.
+    // 4-stage color progression, matching the hysteresis-smoothed level
+    // above (not raw percent - that was the actual cause of the colour
+    // flapping, see compute_battery_level's own comment): near-white
+    // (fine) -> amber at Low -> red at Critical -> flashing red at 5% or
+    // less (below, unchanged - a finer sub-threshold within Critical, not
+    // its own hysteresis band). Near-white instead of grey (owner
+    // feedback) so the "fine" state reads clearly against the dark badge
+    // behind it, same as the amber/red states do.
     lv_color_t battery_color;
-    if (percent <= 10 && !charging) {
+    if (level == 0 && !charging) {
         battery_color = lv_color_hex(0xff0000);  // Red
-    } else if (percent <= 25 && !charging) {
+    } else if (level == 1 && !charging) {
         battery_color = lv_color_hex(0xffaa00);  // Amber
     } else {
         battery_color = lv_color_hex(0xfafafa);  // Near-white
